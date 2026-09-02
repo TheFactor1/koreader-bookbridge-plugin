@@ -370,38 +370,132 @@ function Shelfmark:doSearch(params, existing_books)
             if item.is_load_more then
                 self:doSearch({ query = params.query, author = params.author, page = (params.page or 1) + 1 }, books)
             else
-                self:confirmRequest(item.book_data)
+                self:browseReleases(item.book_data)
             end
         end,
     }
     UIManager:show(results_menu)
 end
 
-function Shelfmark:confirmRequest(book)
+local function describeRelease(release)
+    local bits = {}
+    if release.format then table.insert(bits, release.format) end
+    if release.size then table.insert(bits, release.size) end
+    if release.indexer then table.insert(bits, release.indexer) end
+    if release.peers then
+        table.insert(bits, release.peers)
+    elseif release.seeders then
+        table.insert(bits, tostring(release.seeders) .. "S")
+    end
+    return table.concat(bits, " • ") -- bullet-separated (raw UTF-8, not \u{} -- LuaJIT/Lua 5.1 doesn't support that escape form)
+end
+
+-- Searches release sources (Prowlarr, direct download, etc.) for this one
+-- specific book -- deliberately not run during the metadata search above,
+-- so indexers only get queried for a book you've actually committed to.
+function Shelfmark:browseReleases(book)
+    UIManager:show(InfoMessage:new{ text = _("Searching release sources (Prowlarr etc.)..."), timeout = 2 })
+
+    local qs = {
+        "provider=" .. socketurl.escape(book.provider or ""),
+        "book_id=" .. socketurl.escape(book.provider_id or ""),
+        "content_type=ebook",
+    }
+    if book.title then table.insert(qs, "title=" .. socketurl.escape(book.title)) end
+    local author = describeAuthor(book)
+    if author ~= "" then table.insert(qs, "author=" .. socketurl.escape(author)) end
+
+    local resp, code, err = self:apiRequest("GET", "/api/releases?" .. table.concat(qs, "&"))
+    if err then
+        UIManager:show(InfoMessage:new{ text = err })
+        return
+    end
+    if code ~= 200 or not resp or not resp.releases then
+        local msg = (resp and (resp.message or resp.error)) or _("Release search failed.")
+        UIManager:show(InfoMessage:new{ text = msg })
+        return
+    end
+    if #resp.releases == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("No releases found for this book. You can still submit a plain request and let Shelfmark keep looking."),
+            timeout = 3,
+        })
+        self:confirmBookLevelRequest(book)
+        return
+    end
+
+    local item_table = {}
+    for i, release in ipairs(resp.releases) do
+        item_table[i] = {
+            text = release.title or _("Untitled release"),
+            mandatory = describeRelease(release),
+            release_data = release,
+        }
+    end
+
+    local releases_menu
+    releases_menu = Menu:new{
+        title = T(_("Releases for: %1"), book.title or _("this book")),
+        item_table = item_table,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_menu_self, item)
+            UIManager:close(releases_menu)
+            self:confirmReleaseRequest(book, item.release_data)
+        end,
+    }
+    UIManager:show(releases_menu)
+end
+
+-- The search endpoint returns "authors" (a list), but request validation
+-- requires a singular "author" string it never provides itself --
+-- confirmed against requests_service.py's required_fields. Shelfmark's own
+-- web UI must derive this before submitting; do the same here.
+local function withAuthorField(book)
+    if not book.author then
+        local author = describeAuthor(book)
+        if author ~= "" then book.author = author end
+    end
+    return book
+end
+
+function Shelfmark:confirmReleaseRequest(book, release)
     local ConfirmBox = require("ui/widget/confirmbox")
     UIManager:show(ConfirmBox:new{
-        text = describeBook(book) .. "\n\n" .. _("Request this book?"),
+        text = (release.title or _("This release")) .. "\n\n" .. _("Request this release?"),
         ok_text = _("Request"),
         ok_callback = function()
-            self:submitRequest(book)
+            self:submitRequest(withAuthorField(book), release)
         end,
     })
 end
 
-function Shelfmark:submitRequest(book)
-    -- The search endpoint returns "authors" (a list), but request
-    -- validation requires a singular "author" string it never provides
-    -- itself -- confirmed against requests_service.py's required_fields.
-    -- Shelfmark's own web UI must derive this before submitting; do the
-    -- same here rather than sending it and letting the request 400.
-    if not book.author and book.authors and #book.authors > 0 then
-        book.author = table.concat(book.authors, ", ")
-    end
+function Shelfmark:confirmBookLevelRequest(book)
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = describeBook(book) .. "\n\n" .. _("Submit a plain request for this book (no specific release found)?"),
+        ok_text = _("Request"),
+        ok_callback = function()
+            self:submitRequest(withAuthorField(book), nil)
+        end,
+    })
+end
 
-    local resp, code, err = self:apiRequest("POST", "/api/requests", {
+-- release is optional: nil submits a book-level request (Shelfmark finds a
+-- release later), given submits a release-level request (this exact file).
+function Shelfmark:submitRequest(book, release)
+    local body = {
         book_data = book,
         context = { content_type = "ebook" },
-    })
+    }
+    if release then
+        body.release_data = release
+        body.context.source = release.source
+    end
+
+    local resp, code, err = self:apiRequest("POST", "/api/requests", body)
     if err then
         UIManager:show(InfoMessage:new{ text = err })
         return
