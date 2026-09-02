@@ -542,7 +542,12 @@ end
 -- arbitrary OPDS catalogs. Pulls just title/author/the acquisition
 -- download link out of each <entry>, preferring an epub acquisition link
 -- when an entry happens to have more than one format available.
-local function decodeXmlEntities(s)
+-- Not just for OPDS/XML despite the name's origin -- confirmed live that
+-- Shelfmark's own JSON /api/releases response passes indexer release
+-- titles through with raw HTML entities still in them too (e.g. "&amp;"
+-- showing up literally on-screen instead of "&"), so this gets reused for
+-- release titles as well, not just CWA's Atom feed.
+local function decodeHtmlEntities(s)
     if not s then return s end
     return (s:gsub("&#34;", '"'):gsub("&#39;", "'"):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&amp;", "&"))
 end
@@ -550,8 +555,8 @@ end
 local function parseOpdsEntries(xml)
     local entries = {}
     for entry_xml in xml:gmatch("<entry>(.-)</entry>") do
-        local title = decodeXmlEntities(entry_xml:match("<title>(.-)</title>"))
-        local author = decodeXmlEntities(entry_xml:match("<author>%s*<name>(.-)</name>"))
+        local title = decodeHtmlEntities(entry_xml:match("<title>(.-)</title>"))
+        local author = decodeHtmlEntities(entry_xml:match("<author>%s*<name>(.-)</name>"))
         local best_href, best_type
         for link_tag in entry_xml:gmatch("<link[^>]->") do
             if link_tag:find('rel="http://opds%-spec%.org/acquisition"') then
@@ -1038,6 +1043,9 @@ function Shelfmark:browseReleases(book)
     end
 
     local releases = resp.releases
+    for _, r in ipairs(releases) do
+        r.title = decodeHtmlEntities(r.title)
+    end
     for i, r in ipairs(releases) do
         r._orig_index = i
         r._relevance = releaseRelevanceScore(r.title)
