@@ -58,6 +58,7 @@ function Shelfmark:loadSettings()
     self.server_url = self.sm_settings.data.shelfmark.server_url
     self.username = self.sm_settings.data.shelfmark.username
     self.password = self.sm_settings.data.shelfmark.password
+    self.socks5_proxy = self.sm_settings.data.shelfmark.socks5_proxy
 end
 
 function Shelfmark:init()
@@ -72,6 +73,10 @@ function Shelfmark:editServerSettings()
             { text = self.server_url, hint = _("Server URL, e.g. http://shelfmark:8084") },
             { text = self.username, hint = _("Username") },
             { text = self.password, text_type = "password", hint = _("Password") },
+            {
+                text = self.socks5_proxy,
+                hint = _("SOCKS5 proxy host:port (optional, e.g. 127.0.0.1:1055 for Tailscale userspace mode)"),
+            },
         },
         buttons = {
             {
@@ -89,10 +94,12 @@ function Shelfmark:editServerSettings()
                         self.server_url = fields[1]:gsub("/*$", "")
                         self.username = fields[2]
                         self.password = fields[3]
+                        self.socks5_proxy = fields[4] ~= "" and fields[4] or nil
                         self.sm_settings:saveSetting("shelfmark", {
                             server_url = self.server_url,
                             username = self.username,
                             password = self.password,
+                            socks5_proxy = self.socks5_proxy,
                         })
                         self.sm_settings:flush()
                         self.session_cookie = nil -- force re-login with new creds
@@ -186,7 +193,84 @@ local function debugLog(msg)
     end
 end
 
-local function doRawRequest(server_url, cookie, method, path, body)
+-- Minimal SOCKS5 client (CONNECT command, no-auth only) -- for reaching a
+-- Shelfmark instance over Tailscale from a device running Tailscale in
+-- userspace-networking mode, where the OS has no route to 100.x.x.x
+-- addresses at all and only this local proxy can reach tailnet peers.
+-- LuaSocket has no built-in SOCKS5 support, but http.request accepts a
+-- `create` function that must return a socket-like object; LuaSocket then
+-- calls `:connect(host, port)` on it with the real destination itself. This
+-- wraps a normal socket.tcp() (already timeout-patched by socketutil, see
+-- above) and intercepts just that one call: connect to the proxy instead,
+-- speak the SOCKS5 handshake to establish a tunnel to the real destination,
+-- then hand the same live connection back for LuaSocket to use normally --
+-- every other method (send/receive/close/settimeout/...) just delegates
+-- straight through to the real socket.
+local function makeSocks5Socket(proxy_host, proxy_port)
+    local real = socket.tcp()
+    local wrapper = {}
+
+    function wrapper:connect(dest_host, dest_port)
+        local ok, err = real:connect(proxy_host, proxy_port)
+        if not ok then return nil, "socks5 proxy unreachable: " .. tostring(err) end
+
+        -- Greeting: version 5, 1 auth method offered, method 0 = no-auth.
+        real:send("\5\1\0")
+        local greet, greet_err = real:receive(2)
+        if not greet or #greet < 2 then
+            return nil, "socks5 greeting failed: " .. tostring(greet_err)
+        end
+        if greet:byte(1) ~= 5 or greet:byte(2) ~= 0 then
+            return nil, "socks5 proxy requires auth or is not SOCKS5"
+        end
+
+        -- CONNECT request. Tailscale addresses are always numeric IPv4, so
+        -- that's the only case that actually needs to work -- the domain
+        -- name fallback (atyp 3) exists for defensiveness, not because
+        -- this path is expected to see one.
+        local a, b, c, d = dest_host:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+        local atyp, addr_bytes
+        if a then
+            atyp = 1
+            addr_bytes = string.char(tonumber(a), tonumber(b), tonumber(c), tonumber(d))
+        else
+            atyp = 3
+            addr_bytes = string.char(#dest_host) .. dest_host
+        end
+        local port_bytes = string.char(math.floor(dest_port / 256) % 256, dest_port % 256)
+        real:send(string.char(5, 1, 0, atyp) .. addr_bytes .. port_bytes)
+
+        -- Reply: version, reply code, reserved, bound-address type (4 bytes
+        -- fixed header), then a variable-length bound address to discard.
+        local hdr, hdr_err = real:receive(4)
+        if not hdr or #hdr < 4 then
+            return nil, "socks5 connect reply failed: " .. tostring(hdr_err)
+        end
+        if hdr:byte(2) ~= 0 then
+            return nil, "socks5 connect refused, code " .. tostring(hdr:byte(2))
+        end
+        local reply_atyp = hdr:byte(4)
+        if reply_atyp == 1 then
+            real:receive(4 + 2) -- IPv4 + port
+        elseif reply_atyp == 4 then
+            real:receive(16 + 2) -- IPv6 + port
+        elseif reply_atyp == 3 then
+            local lenb = real:receive(1)
+            if lenb then real:receive(lenb:byte(1) + 2) end
+        end
+
+        return 1 -- LuaSocket connect() success convention
+    end
+
+    setmetatable(wrapper, {
+        __index = function(_, key)
+            return function(_, ...) return real[key](real, ...) end
+        end,
+    })
+    return wrapper
+end
+
+local function doRawRequest(server_url, cookie, method, path, body, socks5_proxy)
     if not server_url or server_url == "" then
         return nil, nil, cookie, _("Shelfmark server URL isn't set -- check Settings.")
     end
@@ -227,6 +311,14 @@ local function doRawRequest(server_url, cookie, method, path, body)
     if body_json then
         request.source = ltn12.source.string(body_json)
     end
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        else
+            debugLog("<- invalid socks5_proxy setting, ignoring: " .. socks5_proxy)
+        end
+    end
 
     local ok, code, resp_headers = pcall(function()
         return socket.skip(1, http.request(request))
@@ -261,11 +353,11 @@ local function doRawRequest(server_url, cookie, method, path, body)
 end
 
 -- Returns (true, cookie) on success, or (false, nil, error_string).
-local function doLogin(server_url, username, password)
+local function doLogin(server_url, username, password, socks5_proxy)
     local resp, code, cookie = doRawRequest(server_url, nil, "POST", "/api/auth/login", {
         username = username,
         password = password,
-    })
+    }, socks5_proxy)
     if code == 200 and resp and resp.success ~= false then
         return true, cookie
     end
@@ -276,25 +368,25 @@ end
 -- The full operation: log in first if we don't have a session yet, do the
 -- request, retry once on 401 in case the session expired mid-use. Returns
 -- (decoded_body, http_code, cookie_to_remember, error_string).
-local function doApiRequest(server_url, username, password, cookie, method, path, body)
+local function doApiRequest(server_url, username, password, cookie, method, path, body, socks5_proxy)
     if not cookie then
         if not username or username == "" then
             return nil, nil, nil, _("No Shelfmark username set -- check Settings.")
         end
-        local ok, new_cookie, login_err = doLogin(server_url, username, password)
+        local ok, new_cookie, login_err = doLogin(server_url, username, password, socks5_proxy)
         if not ok then return nil, nil, nil, login_err end
         cookie = new_cookie
     end
 
-    local resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body)
+    local resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body, socks5_proxy)
     if err then return nil, nil, cookie, err end
     cookie = new_cookie
 
     if code == 401 then
-        local ok, relog_cookie, login_err = doLogin(server_url, username, password)
+        local ok, relog_cookie, login_err = doLogin(server_url, username, password, socks5_proxy)
         if not ok then return nil, nil, nil, login_err end
         cookie = relog_cookie
-        resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body)
+        resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body, socks5_proxy)
         if err then return nil, nil, cookie, err end
         cookie = new_cookie
     end
@@ -312,10 +404,11 @@ end
 -- Trapper:wrap()'d coroutine (every entry point below is).
 function Shelfmark:apiRequest(method, path, body, progress_text)
     local Trapper = require("ui/trapper")
-    local server_url, username, password, cookie = self.server_url, self.username, self.password, self.session_cookie
+    local server_url, username, password, cookie, socks5_proxy =
+        self.server_url, self.username, self.password, self.session_cookie, self.socks5_proxy
 
     local completed, resp, code, new_cookie, err = Trapper:dismissableRunInSubprocess(function()
-        return doApiRequest(server_url, username, password, cookie, method, path, body)
+        return doApiRequest(server_url, username, password, cookie, method, path, body, socks5_proxy)
     end, progress_text or _("Talking to Shelfmark..."))
 
     if not completed then
