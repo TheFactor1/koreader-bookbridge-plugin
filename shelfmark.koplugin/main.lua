@@ -345,6 +345,15 @@ function Shelfmark:confirmRequest(book)
 end
 
 function Shelfmark:submitRequest(book)
+    -- The search endpoint returns "authors" (a list), but request
+    -- validation requires a singular "author" string it never provides
+    -- itself -- confirmed against requests_service.py's required_fields.
+    -- Shelfmark's own web UI must derive this before submitting; do the
+    -- same here rather than sending it and letting the request 400.
+    if not book.author and book.authors and #book.authors > 0 then
+        book.author = table.concat(book.authors, ", ")
+    end
+
     local resp, code, err = self:apiRequest("POST", "/api/requests", {
         book_data = book,
         context = { content_type = "ebook" },
