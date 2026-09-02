@@ -982,7 +982,21 @@ end
 -- Searches release sources (Prowlarr, direct download, etc.) for this one
 -- specific book -- deliberately not run during the metadata search above,
 -- so indexers only get queried for a book you've actually committed to.
-function Shelfmark:browseReleases(book)
+-- manual_query, when given, is passed straight through to Shelfmark's
+-- manual_query param -- the only lever that actually changes what gets
+-- sent to Prowlarr/indexers as the search term. Shelfmark's own Prowlarr
+-- source deliberately searches title-only otherwise: its source code
+-- (release_sources/prowlarr/source.py) used to append the author to every
+-- indexer query and reverted that (their issue #1293) because AND-based
+-- indexers like MyAnonamouse return nothing when the metadata provider's
+-- author spelling doesn't exactly match the tracker's ("Timothy Ferriss"
+-- vs "Tim Ferriss") -- confirmed by reading that file directly. Author
+-- there only affects result *ordering* (affinity sort), never which query
+-- string reaches the indexer, and there's no per-request way to opt back
+-- into an author-qualified query except manual_query. So "the Prowlarr
+-- query itself doesn't include the author" is Shelfmark's own intentional
+-- design, not something this plugin's title=/author= params control.
+function Shelfmark:browseReleases(book, manual_query)
     UIManager:show(InfoMessage:new{ text = _("Searching release sources (Prowlarr etc.)..."), timeout = 2 })
 
     local qs = {
@@ -993,6 +1007,9 @@ function Shelfmark:browseReleases(book)
     if book.title then table.insert(qs, "title=" .. socketurl.escape(book.title)) end
     local author = describeAuthor(book)
     if author ~= "" then table.insert(qs, "author=" .. socketurl.escape(author)) end
+    if manual_query and manual_query ~= "" then
+        table.insert(qs, "manual_query=" .. socketurl.escape(manual_query))
+    end
 
     local resp, code, err = self:apiRequest("GET", "/api/releases?" .. table.concat(qs, "&"))
     if err then
@@ -1062,18 +1079,34 @@ function Shelfmark:browseReleases(book)
         r._relevance = nil
     end
 
-    local item_table = {}
-    for i, release in ipairs(releases) do
-        item_table[i] = {
+    -- Prowlarr/indexer search is title-only by Shelfmark's own design (see
+    -- the comment above browseReleases()) -- it never gets an author or
+    -- format term, no matter what this plugin sends. Client-side relevance
+    -- sort is the mitigation for that, but for a common/ambiguous title
+    -- (many books literally called "The Stand") it can't distinguish a
+    -- same-titled unrelated book. manual_query is the one real override,
+    -- so it's offered here as an explicit opt-in action rather than done
+    -- automatically -- automatically qualifying every search this way
+    -- would reintroduce the exact AND-indexer breakage Shelfmark reverted.
+    local item_table = {
+        { text = _("\xE2\x9C\x8E Custom search query..."), is_custom_query = true }, -- "✎ ..."
+    }
+    for _, release in ipairs(releases) do
+        table.insert(item_table, {
             text = truncate(release.title, 90) or _("Untitled release"),
             mandatory = truncate(describeRelease(release), 40),
             release_data = release,
-        }
+        })
+    end
+
+    local menu_title = T(_("Releases for: %1"), truncate(book.title, 40) or _("this book"))
+    if manual_query and manual_query ~= "" then
+        menu_title = menu_title .. _(" (custom query)")
     end
 
     local releases_menu
     releases_menu = Menu:new{
-        title = T(_("Releases for: %1"), truncate(book.title, 40) or _("this book")),
+        title = menu_title,
         item_table = item_table,
         multilines_forced = true,
         covers_fullscreen = true,
@@ -1082,10 +1115,57 @@ function Shelfmark:browseReleases(book)
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
             UIManager:close(releases_menu)
-            self:confirmReleaseRequest(book, item.release_data)
+            if item.is_custom_query then
+                self:promptCustomReleaseQuery(book)
+            else
+                self:confirmReleaseRequest(book, item.release_data)
+            end
         end,
     }
     UIManager:show(releases_menu)
+end
+
+-- Opens an editable query box (pre-filled with title + author) and re-runs
+-- browseReleases with it as Shelfmark's manual_query -- the raw string is
+-- sent to indexers verbatim instead of Shelfmark's default title-only
+-- search, so this is the way to actually get an author (or anything else,
+-- e.g. "epub") into what Prowlarr searches for.
+function Shelfmark:promptCustomReleaseQuery(book, prefill)
+    local InputDialog = require("ui/widget/inputdialog")
+    local author = describeAuthor(book)
+    local default_query = prefill or table.concat(
+        { book.title or "", author }, " "
+    ):gsub("^%s+", ""):gsub("%s+$", "")
+
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Custom Prowlarr/indexer query"),
+        description = _("Sent to indexers as-is, in place of Shelfmark's default title-only search."),
+        input = default_query,
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function() UIManager:close(dialog) end,
+                },
+                {
+                    text = _("Search"),
+                    is_enter_default = true,
+                    callback = function()
+                        local query = dialog:getInputText()
+                        UIManager:close(dialog)
+                        if query and query:gsub("%s", "") ~= "" then
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() self:browseReleases(book, query) end)
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 -- The search endpoint returns "authors" (a list), but request validation
