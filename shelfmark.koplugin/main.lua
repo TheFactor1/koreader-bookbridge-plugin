@@ -917,11 +917,33 @@ function Shelfmark:showDebugLog()
             content = "...\n" .. content:sub(-max_chars)
         end
     end
-    UIManager:show(TextViewer:new{
+    local viewer
+    viewer = TextViewer:new{
         title = _("Shelfmark debug log"),
         text = content,
         justified = false,
-    })
+        add_default_buttons = true, -- keep the built-in "Close" alongside ours
+        buttons_table = {
+            {
+                {
+                    text = _("Clear log"),
+                    callback = function()
+                        local ConfirmBox = require("ui/widget/confirmbox")
+                        UIManager:show(ConfirmBox:new{
+                            text = _("Clear the debug log?"),
+                            ok_text = _("Clear"),
+                            ok_callback = function()
+                                local cf = io.open(DEBUG_LOG_PATH, "w")
+                                if cf then cf:close() end
+                                UIManager:close(viewer)
+                            end,
+                        })
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(viewer)
 end
 
 -- ===== search + request flow =====
@@ -1238,6 +1260,15 @@ local function describeRelease(release)
     elseif release.seeders then
         table.insert(bits, tostring(release.seeders) .. "S")
     end
+    -- Prowlarr's own historical grab count (Torznab's "grabs" attribute) --
+    -- confirmed live in release.extra.grabs on real search results. This
+    -- is the one popularity/reliability signal usenet releases actually
+    -- have: NZB releases never carry peers/seeders (there's no live swarm
+    -- to count), so without this the field above is always empty for them.
+    local grabs = release.extra and release.extra.grabs
+    if grabs then
+        table.insert(bits, tostring(grabs) .. "G")
+    end
     return table.concat(bits, " • ") -- bullet-separated (raw UTF-8, not \u{} -- LuaJIT/Lua 5.1 doesn't support that escape form)
 end
 
@@ -1334,6 +1365,14 @@ function Shelfmark:browseReleases(book, manual_query)
         local a_epub = (a.format and a.format:lower() == "epub") and 0 or 1
         local b_epub = (b.format and b.format:lower() == "epub") and 0 or 1
         if a_epub ~= b_epub then return a_epub < b_epub end
+        -- Grabs as the last tiebreaker before falling back to the server's
+        -- own ordering -- among otherwise-equal candidates (same relevance,
+        -- same format), the one more people have actually grabbed is the
+        -- better bet, and it's the only volume/reliability signal usenet
+        -- releases carry at all (see the note on describeRelease).
+        local a_grabs = (a.extra and a.extra.grabs) or 0
+        local b_grabs = (b.extra and b.extra.grabs) or 0
+        if a_grabs ~= b_grabs then return a_grabs > b_grabs end
         return a._orig_index < b._orig_index
     end)
     for _, r in ipairs(releases) do
