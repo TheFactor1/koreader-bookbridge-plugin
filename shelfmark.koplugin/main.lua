@@ -846,6 +846,19 @@ function Shelfmark:saveCwaEntry(entry)
         text = T(_("Saved to %1"), save_path),
         timeout = 4,
     })
+
+    -- The file manager (if it's the screen this was opened from, which it
+    -- usually is -- Shelfmark's menu lives in the file browser's menu, not
+    -- the reader's) only re-lists a folder when it navigates into it; it
+    -- has no way to know a background download just dropped a new file
+    -- into whatever folder it's already sitting on, so without this the
+    -- new book is genuinely invisible there until you leave and come back.
+    -- Confirmed as the actual cause live: the file existed on disk (SSH
+    -- ls) the whole time the file manager claimed otherwise.
+    local FileManager = require("apps/filemanager/filemanager")
+    if FileManager.instance then
+        FileManager.instance:onRefresh()
+    end
 end
 
 -- ===== menu =====
