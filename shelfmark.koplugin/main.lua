@@ -479,7 +479,7 @@ end
 function Shelfmark:doSearch(params, existing_books)
     UIManager:show(InfoMessage:new{ text = _("Searching..."), timeout = 1 })
 
-    local qs = { "limit=100", "page=" .. tostring(params.page or 1) }
+    local qs = { "limit=100", "sort=popularity", "page=" .. tostring(params.page or 1) }
     if params.query and params.query ~= "" then
         table.insert(qs, "query=" .. socketurl.escape(params.query))
     end
@@ -592,8 +592,21 @@ function Shelfmark:browseReleases(book)
         return
     end
 
+    -- EPUB first, otherwise keep the server's own ordering (a plain
+    -- table.sort isn't guaranteed stable, so the original index is used
+    -- as an explicit tiebreaker rather than leaving that to chance).
+    local releases = resp.releases
+    for i, r in ipairs(releases) do r._orig_index = i end
+    table.sort(releases, function(a, b)
+        local a_epub = (a.format and a.format:lower() == "epub") and 0 or 1
+        local b_epub = (b.format and b.format:lower() == "epub") and 0 or 1
+        if a_epub ~= b_epub then return a_epub < b_epub end
+        return a._orig_index < b._orig_index
+    end)
+    for _, r in ipairs(releases) do r._orig_index = nil end
+
     local item_table = {}
-    for i, release in ipairs(resp.releases) do
+    for i, release in ipairs(releases) do
         item_table[i] = {
             text = truncate(release.title, 90) or _("Untitled release"),
             mandatory = truncate(describeRelease(release), 40),
