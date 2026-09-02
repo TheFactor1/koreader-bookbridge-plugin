@@ -860,6 +860,11 @@ function Shelfmark:addToMainMenu(menu_items)
                 callback = function() self:startSearch() end,
             },
             {
+                text = _("Discover"),
+                keep_menu_open = true,
+                callback = function() self:showDiscover() end,
+            },
+            {
                 text = _("My requests"),
                 keep_menu_open = true,
                 callback = function()
@@ -963,6 +968,105 @@ function Shelfmark:startSearch()
     self.search_dialog:onShowKeyboard()
 end
 
+-- ===== discovery =====
+
+-- Hardcover's "Most Popular" isn't its own endpoint -- it's sort=
+-- popularity (users_count:desc) applied to a wildcard query. A genuinely
+-- empty query is rejected server-side ("Either 'query' or search field
+-- values are required", confirmed live), but query="*" isn't empty and
+-- Hardcover/Typesense treats it as match-everything -- confirmed live
+-- against the real server: query=*&sort=popularity returns exactly the
+-- global top-users_count books (1984, Project Hail Mary, Harry Potter,
+-- Dune, ...), not an error.
+function Shelfmark:showDiscover()
+    local item_table = {
+        { text = _("Most Popular"), action = "popular" },
+        { text = _("My Hardcover Lists"), action = "lists" },
+    }
+    local discover_menu
+    discover_menu = Menu:new{
+        title = _("Discover"),
+        item_table = item_table,
+        multilines_forced = true,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_menu_self, item)
+            UIManager:close(discover_menu)
+            local Trapper = require("ui/trapper")
+            if item.action == "popular" then
+                Trapper:wrap(function()
+                    self:doSearch({ query = "*", page = 1, title_override = _("Most Popular") })
+                end)
+            elseif item.action == "lists" then
+                Trapper:wrap(function() self:browseHardcoverLists() end)
+            end
+        end,
+    }
+    UIManager:show(discover_menu)
+end
+
+-- Hardcover's own curated lists for whichever account Shelfmark's
+-- HARDCOVER_API_KEY is configured with (Want to Read / Currently Reading /
+-- Read / Did Not Finish, plus any of that account's own named lists) --
+-- this is Shelfmark's "Browse a list..." advanced search field
+-- (hardcover_list), surfaced here directly since this plugin has no
+-- general advanced-search UI to put it behind. Confirmed live:
+-- /api/metadata/field-options?provider=hardcover&field=hardcover_list
+-- returns {group=, label=, value=} entries -- value is what gets sent
+-- back as the hardcover_list field to actually run the browse.
+function Shelfmark:browseHardcoverLists()
+    local resp, code, err = self:apiRequest(
+        "GET", "/api/metadata/field-options?provider=hardcover&field=hardcover_list",
+        nil, _("Loading lists...")
+    )
+    if err then
+        UIManager:show(InfoMessage:new{ text = err })
+        return
+    end
+    if code ~= 200 or not resp or not resp.options then
+        UIManager:show(InfoMessage:new{ text = _("Couldn't load Hardcover lists.") })
+        return
+    end
+    if #resp.options == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No lists found for the configured Hardcover account.") })
+        return
+    end
+
+    local item_table = {}
+    for i, opt in ipairs(resp.options) do
+        item_table[i] = {
+            text = opt.label or opt.value,
+            mandatory = opt.group,
+            list_value = opt.value,
+            list_label = opt.label,
+        }
+    end
+
+    local lists_menu
+    lists_menu = Menu:new{
+        title = _("My Hardcover Lists"),
+        item_table = item_table,
+        multilines_forced = true,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_menu_self, item)
+            UIManager:close(lists_menu)
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
+                self:doSearch({
+                    fields = { hardcover_list = item.list_value },
+                    page = 1,
+                    title_override = item.list_label,
+                })
+            end)
+        end,
+    }
+    UIManager:show(lists_menu)
+end
 
 local function describeAuthor(book)
     if book.authors and #book.authors > 0 then
@@ -1022,9 +1126,11 @@ local function describeBook(book)
     return text
 end
 
--- params: {query=, author=, page=}. existing_books, when given, is the
--- accumulated result list so far (used by "Load more" to append rather
--- than replace).
+-- params: {query=, author=, page=, fields=, title_override=}. fields is an
+-- optional {key=value} table of Hardcover's own advanced search fields
+-- (currently only hardcover_list -- see showDiscover) sent alongside/
+-- instead of query. existing_books, when given, is the accumulated
+-- result list so far (used by "Load more" to append rather than replace).
 function Shelfmark:doSearch(params, existing_books)
     UIManager:show(InfoMessage:new{ text = _("Searching..."), timeout = 1 })
 
@@ -1034,6 +1140,11 @@ function Shelfmark:doSearch(params, existing_books)
     end
     if params.author and params.author ~= "" then
         table.insert(qs, "author=" .. socketurl.escape(params.author))
+    end
+    if params.fields then
+        for key, value in pairs(params.fields) do
+            table.insert(qs, socketurl.escape(key) .. "=" .. socketurl.escape(value))
+        end
     end
 
     local resp, code, err = self:apiRequest("GET", "/api/metadata/search?" .. table.concat(qs, "&"))
@@ -1081,9 +1192,12 @@ function Shelfmark:doSearch(params, existing_books)
         item_table[#item_table + 1] = { text = _("-- Load more results --"), is_load_more = true }
     end
 
+    local menu_title = params.title_override and T(_("%1 (%2)"), params.title_override, #books)
+        or T(_("Search results (%1)"), #books)
+
     local results_menu
     results_menu = Menu:new{
-        title = T(_("Search results (%1)"), #books),
+        title = menu_title,
         item_table = item_table,
         multilines_forced = true,
         covers_fullscreen = true,
@@ -1095,7 +1209,13 @@ function Shelfmark:doSearch(params, existing_books)
             if item.is_load_more then
                 local Trapper = require("ui/trapper")
                 Trapper:wrap(function()
-                    self:doSearch({ query = params.query, author = params.author, page = (params.page or 1) + 1 }, books)
+                    self:doSearch({
+                        query = params.query,
+                        author = params.author,
+                        fields = params.fields,
+                        title_override = params.title_override,
+                        page = (params.page or 1) + 1,
+                    }, books)
                 end)
             else
                 local Trapper = require("ui/trapper")
