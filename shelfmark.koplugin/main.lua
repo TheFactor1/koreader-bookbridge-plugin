@@ -39,20 +39,10 @@ local Shelfmark = WidgetContainer:extend{
     session_cookie = nil,
 }
 
--- A blocking network call (our HTTP requests aren't run through Trapper's
--- subprocess machinery -- that would need session_cookie mutations to
--- survive a fork, which they can't without a larger rework) run in the
--- same tick as UIManager:close() on a dialog/menu -- especially one that
--- was showing the on-screen keyboard -- is a known-fragile pattern on
--- Android. A native crash was observed here with an IME-hide event
--- immediately preceding it in both crash logs. This defers the actual
--- blocking call to the next UI tick, after any close/dismiss transition
--- has settled, which is a low-risk mitigation for that correlation -- not
--- a confirmed fix, since the crash log had no Lua-level traceback to
--- point at a definitive cause.
-local function deferBlocking(fn)
-    UIManager:scheduleIn(0.3, fn)
-end
+-- Superseded: network requests now run through Trapper (see apiRequest
+-- below), which moves the actual blocking work into a subprocess instead
+-- of merely delaying when it starts on the main thread. Every entry point
+-- that used to call deferBlocking(fn) now calls Trapper:wrap(fn) instead.
 
 -- ===== settings =====
 
@@ -135,17 +125,27 @@ local function extractSessionCookie(headers)
     return nil
 end
 
+-- Everything from here down to doApiRequest() runs inside a forked
+-- subprocess (see Shelfmark:apiRequest below) -- plain functions taking
+-- explicit arguments rather than methods, since a fork's child memory is a
+-- copy: mutating `self.session_cookie` inside the child would never be
+-- visible back in the parent. The cookie flows through return values
+-- instead, and Shelfmark:apiRequest applies it to `self` once the
+-- subprocess has actually returned to the parent.
+
 -- Low-level request. `body` (if given) is a Lua table, JSON-encoded and
 -- sent with Content-Type: application/json. Returns decoded JSON body (or
--- nil), plus the HTTP status code (or nil on a connection-level failure).
-function Shelfmark:rawRequest(method, path, body)
-    if not self.server_url or self.server_url == "" then
-        return nil, nil, _("Shelfmark server URL isn't set -- check Settings.")
+-- nil), the HTTP status code, the cookie to use from now on (unchanged if
+-- the response didn't set a new one), and an error string on a
+-- connection-level failure.
+local function doRawRequest(server_url, cookie, method, path, body)
+    if not server_url or server_url == "" then
+        return nil, nil, cookie, _("Shelfmark server URL isn't set -- check Settings.")
     end
 
     local headers = { ["Accept"] = "application/json" }
-    if self.session_cookie then
-        headers["Cookie"] = self.session_cookie
+    if cookie then
+        headers["Cookie"] = cookie
     end
 
     local body_json
@@ -158,7 +158,7 @@ function Shelfmark:rawRequest(method, path, body)
     local sink = {}
     local request = {
         method = method,
-        url = self.server_url .. path,
+        url = server_url .. path,
         headers = headers,
         sink = ltn12.sink.table(sink),
     }
@@ -171,13 +171,10 @@ function Shelfmark:rawRequest(method, path, body)
     end)
     if not ok then
         logger.warn("Shelfmark: request failed", code)
-        return nil, nil, _("Couldn't reach the Shelfmark server -- are you on your home network?")
+        return nil, nil, cookie, _("Couldn't reach the Shelfmark server -- are you on your home network?")
     end
 
-    local cookie = extractSessionCookie(resp_headers)
-    if cookie then
-        self.session_cookie = cookie
-    end
+    local new_cookie = extractSessionCookie(resp_headers) or cookie
 
     local content = table.concat(sink)
     local decoded
@@ -186,49 +183,74 @@ function Shelfmark:rawRequest(method, path, body)
         if decode_ok then decoded = result end
     end
 
-    return decoded, code
+    return decoded, code, new_cookie
 end
 
-function Shelfmark:login()
-    local resp, code = self:rawRequest("POST", "/api/auth/login", {
-        username = self.username,
-        password = self.password,
+-- Returns (true, cookie) on success, or (false, nil, error_string).
+local function doLogin(server_url, username, password)
+    local resp, code, cookie = doRawRequest(server_url, nil, "POST", "/api/auth/login", {
+        username = username,
+        password = password,
     })
     if code == 200 and resp and resp.success ~= false then
-        return true
+        return true, cookie
     end
     local err = resp and resp.error or _("Login failed -- check your Shelfmark username/password in Settings.")
-    return false, err
+    return false, nil, err
 end
 
--- Ensures we have a session, logging in first if needed. Returns true, or
--- false plus a user-facing error string.
-function Shelfmark:ensureLoggedIn()
-    if self.session_cookie then return true end
-    if not self.username or self.username == "" then
-        return false, _("No Shelfmark username set -- check Settings.")
+-- The full operation: log in first if we don't have a session yet, do the
+-- request, retry once on 401 in case the session expired mid-use. Returns
+-- (decoded_body, http_code, cookie_to_remember, error_string).
+local function doApiRequest(server_url, username, password, cookie, method, path, body)
+    if not cookie then
+        if not username or username == "" then
+            return nil, nil, nil, _("No Shelfmark username set -- check Settings.")
+        end
+        local ok, new_cookie, login_err = doLogin(server_url, username, password)
+        if not ok then return nil, nil, nil, login_err end
+        cookie = new_cookie
     end
-    return self:login()
-end
 
--- Authenticated request wrapper: logs in first if needed, and retries once
--- on a 401 in case the session expired mid-use.
-function Shelfmark:apiRequest(method, path, body)
-    local ok, login_err = self:ensureLoggedIn()
-    if not ok then return nil, nil, login_err end
-
-    local resp, code, err = self:rawRequest(method, path, body)
-    if err then return nil, nil, err end
+    local resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body)
+    if err then return nil, nil, cookie, err end
+    cookie = new_cookie
 
     if code == 401 then
-        self.session_cookie = nil
-        local relog_ok, relog_err = self:login()
-        if not relog_ok then return nil, nil, relog_err end
-        resp, code, err = self:rawRequest(method, path, body)
-        if err then return nil, nil, err end
+        local ok, relog_cookie, login_err = doLogin(server_url, username, password)
+        if not ok then return nil, nil, nil, login_err end
+        cookie = relog_cookie
+        resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body)
+        if err then return nil, nil, cookie, err end
+        cookie = new_cookie
     end
 
-    return resp, code
+    return resp, code, cookie
+end
+
+-- Runs the whole request off the main UI thread via Trapper's subprocess
+-- execution, showing a cancelable progress dialog. The releases search in
+-- particular can take real time (it's actively querying Prowlarr/other
+-- indexers live), and a synchronous call on the main thread was a real,
+-- reproducible cause of the app freezing during it -- and plausibly of the
+-- earlier native crashes too, if Android's watchdog decided the
+-- unresponsive app needed to be force-killed. Must be called from within a
+-- Trapper:wrap()'d coroutine (every entry point below is).
+function Shelfmark:apiRequest(method, path, body, progress_text)
+    local Trapper = require("ui/trapper")
+    local server_url, username, password, cookie = self.server_url, self.username, self.password, self.session_cookie
+
+    local completed, resp, code, new_cookie, err = Trapper:dismissableRunInSubprocess(function()
+        return doApiRequest(server_url, username, password, cookie, method, path, body)
+    end, progress_text or _("Talking to Shelfmark..."))
+
+    if not completed then
+        return nil, nil, _("Cancelled.")
+    end
+    if new_cookie then
+        self.session_cookie = new_cookie
+    end
+    return resp, code, err
 end
 
 -- ===== menu =====
@@ -245,7 +267,10 @@ function Shelfmark:addToMainMenu(menu_items)
             {
                 text = _("My requests"),
                 keep_menu_open = true,
-                callback = function() self:showMyRequests() end,
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function() self:showMyRequests() end)
+                end,
             },
             {
                 text = _("Settings"),
@@ -287,7 +312,8 @@ function Shelfmark:startSearch()
                         local author = fields[2] or ""
                         UIManager:close(self.search_dialog)
                         if query ~= "" or author ~= "" then
-                            deferBlocking(function()
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function()
                                 self:doSearch({ query = query, author = author, page = 1 })
                             end)
                         end
@@ -402,11 +428,13 @@ function Shelfmark:doSearch(params, existing_books)
         onMenuSelect = function(_menu_self, item)
             UIManager:close(results_menu)
             if item.is_load_more then
-                deferBlocking(function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function()
                     self:doSearch({ query = params.query, author = params.author, page = (params.page or 1) + 1 }, books)
                 end)
             else
-                deferBlocking(function() self:browseReleases(item.book_data) end)
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:browseReleases(item.book_data) end)
             end
         end,
     }
@@ -504,7 +532,8 @@ function Shelfmark:confirmReleaseRequest(book, release)
         text = (release.title or _("This release")) .. "\n\n" .. _("Request this release?"),
         ok_text = _("Request"),
         ok_callback = function()
-            deferBlocking(function() self:submitRequest(withAuthorField(book), release) end)
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:submitRequest(withAuthorField(book), release) end)
         end,
     })
 end
@@ -515,7 +544,8 @@ function Shelfmark:confirmBookLevelRequest(book)
         text = describeBook(book) .. "\n\n" .. _("Submit a plain request for this book (no specific release found)?"),
         ok_text = _("Request"),
         ok_callback = function()
-            deferBlocking(function() self:submitRequest(withAuthorField(book), nil) end)
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:submitRequest(withAuthorField(book), nil) end)
         end,
     })
 end
