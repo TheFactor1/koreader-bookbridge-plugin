@@ -39,6 +39,21 @@ local Shelfmark = WidgetContainer:extend{
     session_cookie = nil,
 }
 
+-- A blocking network call (our HTTP requests aren't run through Trapper's
+-- subprocess machinery -- that would need session_cookie mutations to
+-- survive a fork, which they can't without a larger rework) run in the
+-- same tick as UIManager:close() on a dialog/menu -- especially one that
+-- was showing the on-screen keyboard -- is a known-fragile pattern on
+-- Android. A native crash was observed here with an IME-hide event
+-- immediately preceding it in both crash logs. This defers the actual
+-- blocking call to the next UI tick, after any close/dismiss transition
+-- has settled, which is a low-risk mitigation for that correlation -- not
+-- a confirmed fix, since the crash log had no Lua-level traceback to
+-- point at a definitive cause.
+local function deferBlocking(fn)
+    UIManager:scheduleIn(0.3, fn)
+end
+
 -- ===== settings =====
 
 function Shelfmark:loadSettings()
@@ -272,7 +287,9 @@ function Shelfmark:startSearch()
                         local author = fields[2] or ""
                         UIManager:close(self.search_dialog)
                         if query ~= "" or author ~= "" then
-                            self:doSearch({ query = query, author = author, page = 1 })
+                            deferBlocking(function()
+                                self:doSearch({ query = query, author = author, page = 1 })
+                            end)
                         end
                     end,
                 },
@@ -368,9 +385,11 @@ function Shelfmark:doSearch(params, existing_books)
         onMenuSelect = function(_menu_self, item)
             UIManager:close(results_menu)
             if item.is_load_more then
-                self:doSearch({ query = params.query, author = params.author, page = (params.page or 1) + 1 }, books)
+                deferBlocking(function()
+                    self:doSearch({ query = params.query, author = params.author, page = (params.page or 1) + 1 }, books)
+                end)
             else
-                self:browseReleases(item.book_data)
+                deferBlocking(function() self:browseReleases(item.book_data) end)
             end
         end,
     }
@@ -467,7 +486,7 @@ function Shelfmark:confirmReleaseRequest(book, release)
         text = (release.title or _("This release")) .. "\n\n" .. _("Request this release?"),
         ok_text = _("Request"),
         ok_callback = function()
-            self:submitRequest(withAuthorField(book), release)
+            deferBlocking(function() self:submitRequest(withAuthorField(book), release) end)
         end,
     })
 end
@@ -478,7 +497,7 @@ function Shelfmark:confirmBookLevelRequest(book)
         text = describeBook(book) .. "\n\n" .. _("Submit a plain request for this book (no specific release found)?"),
         ok_text = _("Request"),
         ok_callback = function()
-            self:submitRequest(withAuthorField(book), nil)
+            deferBlocking(function() self:submitRequest(withAuthorField(book), nil) end)
         end,
     })
 end
