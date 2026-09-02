@@ -17,19 +17,20 @@ here that could complete that kind of login flow.
 
 local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
-local InputDialog = require("ui/widget/inputdialog")
 local JSON = require("json")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local ffiUtil = require("ffi/util")
 local http = require("socket.http")
 local ltn12 = require("ltn12")
 local logger = require("logger")
 local socket = require("socket")
 local socketurl = require("socket.url")
 local _ = require("gettext")
+local T = ffiUtil.template
 
 local Shelfmark = WidgetContainer:extend{
     name = "shelfmark",
@@ -244,10 +245,17 @@ end
 -- ===== search + request flow =====
 
 function Shelfmark:startSearch()
-    self.search_dialog = InputDialog:new{
+    -- Two fields rather than one free-text box: Hardcover (the configured
+    -- metadata provider) exposes a dedicated "author" search field,
+    -- separate from its generic title/keyword search -- using it actually
+    -- surfaces an author's other books, instead of relying on relevance
+    -- ranking of a plain-text query to happen to turn them up.
+    self.search_dialog = MultiInputDialog:new{
         title = _("Search Shelfmark"),
-        input = "",
-        input_hint = _("Title, author, ISBN..."),
+        fields = {
+            { hint = _("Title or keywords") },
+            { hint = _("Author (optional)") },
+        },
         buttons = {
             {
                 {
@@ -259,10 +267,12 @@ function Shelfmark:startSearch()
                     text = _("Search"),
                     is_enter_default = true,
                     callback = function()
-                        local query = self.search_dialog:getInputText()
+                        local fields = self.search_dialog:getFields()
+                        local query = fields[1] or ""
+                        local author = fields[2] or ""
                         UIManager:close(self.search_dialog)
-                        if query and query ~= "" then
-                            self:doSearch(query)
+                        if query ~= "" or author ~= "" then
+                            self:doSearch({ query = query, author = author, page = 1 })
                         end
                     end,
                 },
@@ -273,28 +283,48 @@ function Shelfmark:startSearch()
     self.search_dialog:onShowKeyboard()
 end
 
-local function describeBook(book)
-    local author = ""
+local function describeAuthor(book)
     if book.authors and #book.authors > 0 then
-        author = table.concat(book.authors, ", ")
+        return table.concat(book.authors, ", ")
     end
-    local text = book.title or _("Untitled")
-    if author ~= "" then
-        text = text .. " -- " .. author
-    end
-    if book.publish_year then
-        text = text .. " (" .. tostring(book.publish_year) .. ")"
-    end
-    return text
+    return ""
 end
 
-function Shelfmark:doSearch(query)
+-- type-checked rather than a truthy check: a missing publish_year decodes
+-- as KOReader's JSON-null sentinel, which is truthy but not a number --
+-- tostring()-ing it printed literal "function: 0x..." in the list
+-- (confirmed on-device) instead of just omitting the year.
+local function describeYear(book)
+    if type(book.publish_year) == "number" then
+        return " (" .. tostring(book.publish_year) .. ")"
+    end
+    return ""
+end
+
+local function describeBook(book)
+    local text = book.title or _("Untitled")
+    local author = describeAuthor(book)
+    if author ~= "" then
+        text = text .. "\n" .. author
+    end
+    return text .. describeYear(book)
+end
+
+-- params: {query=, author=, page=}. existing_books, when given, is the
+-- accumulated result list so far (used by "Load more" to append rather
+-- than replace).
+function Shelfmark:doSearch(params, existing_books)
     UIManager:show(InfoMessage:new{ text = _("Searching..."), timeout = 1 })
 
-    local resp, code, err = self:apiRequest(
-        "GET",
-        "/api/metadata/search?query=" .. socketurl.escape(query)
-    )
+    local qs = { "limit=100", "page=" .. tostring(params.page or 1) }
+    if params.query and params.query ~= "" then
+        table.insert(qs, "query=" .. socketurl.escape(params.query))
+    end
+    if params.author and params.author ~= "" then
+        table.insert(qs, "author=" .. socketurl.escape(params.author))
+    end
+
+    local resp, code, err = self:apiRequest("GET", "/api/metadata/search?" .. table.concat(qs, "&"))
     if err then
         UIManager:show(InfoMessage:new{ text = err })
         return
@@ -304,22 +334,32 @@ function Shelfmark:doSearch(query)
         UIManager:show(InfoMessage:new{ text = msg })
         return
     end
-    if #resp.books == 0 then
+
+    local books = existing_books or {}
+    for _, book in ipairs(resp.books) do
+        table.insert(books, book)
+    end
+
+    if #books == 0 then
         UIManager:show(InfoMessage:new{ text = _("No results.") })
         return
     end
 
     local item_table = {}
-    for i, book in ipairs(resp.books) do
+    for i, book in ipairs(books) do
         item_table[i] = {
-            text = describeBook(book),
+            text = book.title or _("Untitled"),
+            mandatory = describeAuthor(book) .. describeYear(book),
             book_data = book,
         }
+    end
+    if resp.has_more then
+        item_table[#item_table + 1] = { text = _("-- Load more results --"), is_load_more = true }
     end
 
     local results_menu
     results_menu = Menu:new{
-        title = _("Search results"),
+        title = T(_("Search results (%1)"), #books),
         item_table = item_table,
         covers_fullscreen = true,
         is_borderless = true,
@@ -327,7 +367,11 @@ function Shelfmark:doSearch(query)
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
             UIManager:close(results_menu)
-            self:confirmRequest(item.book_data)
+            if item.is_load_more then
+                self:doSearch({ query = params.query, author = params.author, page = (params.page or 1) + 1 }, books)
+            else
+                self:confirmRequest(item.book_data)
+            end
         end,
     }
     UIManager:show(results_menu)
