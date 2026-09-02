@@ -25,8 +25,10 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
 local http = require("socket.http")
+local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
 local logger = require("logger")
+local mime = require("mime")
 local socket = require("socket")
 local socketurl = require("socket.url")
 local socketutil = require("socketutil")
@@ -59,6 +61,13 @@ function Shelfmark:loadSettings()
     self.username = self.sm_settings.data.shelfmark.username
     self.password = self.sm_settings.data.shelfmark.password
     self.socks5_proxy = self.sm_settings.data.shelfmark.socks5_proxy
+    -- CWA (Calibre-Web-Automated) is a separate server with its own login --
+    -- only needed for "My requests" to jump straight to a delivered book's
+    -- entry in CWA's OPDS catalog and download it, since Shelfmark itself
+    -- has no record of where a delivered file ended up (see downloadFromCwa).
+    self.cwa_url = self.sm_settings.data.shelfmark.cwa_url
+    self.cwa_username = self.sm_settings.data.shelfmark.cwa_username
+    self.cwa_password = self.sm_settings.data.shelfmark.cwa_password
 end
 
 function Shelfmark:init()
@@ -77,6 +86,9 @@ function Shelfmark:editServerSettings()
                 text = self.socks5_proxy,
                 hint = _("SOCKS5 proxy host:port (optional, e.g. 127.0.0.1:1055 for Tailscale userspace mode)"),
             },
+            { text = self.cwa_url, hint = _("CWA URL, optional -- e.g. http://cwa:8083 (for 'My requests' download)") },
+            { text = self.cwa_username, hint = _("CWA username (optional)") },
+            { text = self.cwa_password, text_type = "password", hint = _("CWA password (optional)") },
         },
         buttons = {
             {
@@ -95,11 +107,17 @@ function Shelfmark:editServerSettings()
                         self.username = fields[2]
                         self.password = fields[3]
                         self.socks5_proxy = fields[4] ~= "" and fields[4] or nil
+                        self.cwa_url = fields[5] ~= "" and fields[5]:gsub("/*$", "") or nil
+                        self.cwa_username = fields[6] ~= "" and fields[6] or nil
+                        self.cwa_password = fields[7] ~= "" and fields[7] or nil
                         self.sm_settings:saveSetting("shelfmark", {
                             server_url = self.server_url,
                             username = self.username,
                             password = self.password,
                             socks5_proxy = self.socks5_proxy,
+                            cwa_url = self.cwa_url,
+                            cwa_username = self.cwa_username,
+                            cwa_password = self.cwa_password,
                         })
                         self.sm_settings:flush()
                         self.session_cookie = nil -- force re-login with new creds
@@ -417,6 +435,125 @@ local function doApiRequest(server_url, username, password, cookie, method, path
     return resp, code, cookie
 end
 
+-- CWA (Calibre-Web-Automated) plumbing -- a completely separate server
+-- from Shelfmark, with its own plain HTTP Basic Auth (no session cookie),
+-- used only so "My requests" can jump straight to a delivered book's OPDS
+-- entry and download it. Shelfmark itself has no record of where a
+-- delivered file ends up (see the note on Shelfmark:downloadFromCwa), so
+-- this is the only way to close that loop from inside this plugin.
+
+-- Returns the raw response body (a string; not JSON) plus the HTTP code.
+local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
+    if not cwa_url or cwa_url == "" then
+        return nil, nil, _("CWA URL isn't set -- add it under Shelfmark Settings.")
+    end
+    local headers = {}
+    if username and username ~= "" then
+        headers["Authorization"] = "Basic " .. mime.b64(username .. ":" .. (password or ""))
+    end
+
+    socketutil:set_timeout(15, 45)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "GET", url = cwa_url .. path, headers = headers, sink = sink }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        return nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
+    end
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        return nil, nil, _("Request to CWA timed out.")
+    end
+    return table.concat(sink_table), code
+end
+
+-- Same idea, but streams straight to a file instead of building the whole
+-- response up in memory first -- books can be a lot bigger than any JSON
+-- response this plugin otherwise deals with. socketutil.file_sink (used
+-- instead of plain ltn12.sink.file) is what makes the total_timeout above
+-- actually apply to a slow/stalled download, not just to the JSON-style
+-- requests -- see socketutil.lua's own comment on why the plain sink alone
+-- can't enforce it.
+local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy, save_path)
+    if not cwa_url or cwa_url == "" then
+        return nil, nil, _("CWA URL isn't set -- add it under Shelfmark Settings.")
+    end
+    local headers = {}
+    if username and username ~= "" then
+        headers["Authorization"] = "Basic " .. mime.b64(username .. ":" .. (password or ""))
+    end
+
+    local file, ferr = io.open(save_path, "wb")
+    if not file then
+        return nil, nil, _("Couldn't open file for writing: ") .. tostring(ferr)
+    end
+
+    socketutil:set_timeout(15, 60)
+    local sink = socketutil.file_sink(file)
+    local request = { method = "GET", url = cwa_url .. path, headers = headers, sink = sink }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        return nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
+    end
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        return nil, nil, _("Download from CWA timed out.")
+    end
+    return true, code
+end
+
+-- Lightweight, deliberately non-general OPDS/Atom parsing -- plain string
+-- patterns rather than a real XML parser, since this only ever has to
+-- understand feeds from one specific, already-inspected server (CWA), not
+-- arbitrary OPDS catalogs. Pulls just title/author/the acquisition
+-- download link out of each <entry>, preferring an epub acquisition link
+-- when an entry happens to have more than one format available.
+local function decodeXmlEntities(s)
+    if not s then return s end
+    return (s:gsub("&#34;", '"'):gsub("&#39;", "'"):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&amp;", "&"))
+end
+
+local function parseOpdsEntries(xml)
+    local entries = {}
+    for entry_xml in xml:gmatch("<entry>(.-)</entry>") do
+        local title = decodeXmlEntities(entry_xml:match("<title>(.-)</title>"))
+        local author = decodeXmlEntities(entry_xml:match("<author>%s*<name>(.-)</name>"))
+        local best_href, best_type
+        for link_tag in entry_xml:gmatch("<link[^>]->") do
+            if link_tag:find('rel="http://opds%-spec%.org/acquisition"') then
+                local href = link_tag:match('href="([^"]+)"')
+                local ltype = link_tag:match('type="([^"]+)"')
+                if href and (not best_href or (ltype and ltype:find("epub", 1, true))) then
+                    best_href, best_type = href, ltype
+                end
+            end
+        end
+        if title and best_href then
+            table.insert(entries, { title = title, author = author, href = best_href, type = best_type })
+        end
+    end
+    return entries
+end
+
 -- Runs the whole request off the main UI thread via Trapper's subprocess
 -- execution, showing a cancelable progress dialog. The releases search in
 -- particular can take real time (it's actively querying Prowlarr/other
@@ -441,6 +578,121 @@ function Shelfmark:apiRequest(method, path, body, progress_text)
         self.session_cookie = new_cookie
     end
     return resp, code, err
+end
+
+-- Mirrors apiRequest's Trapper-subprocess wrapping above, but for CWA's
+-- simpler basic-auth (there's no session cookie to carry back across the
+-- fork boundary the way Shelfmark's login needs).
+function Shelfmark:cwaRequest(path, progress_text)
+    local Trapper = require("ui/trapper")
+    local cwa_url, cwa_username, cwa_password, socks5_proxy =
+        self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
+
+    local completed, body, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doCwaRequest(cwa_url, cwa_username, cwa_password, path, socks5_proxy)
+    end, progress_text or _("Searching CWA..."))
+
+    if not completed then return nil, nil, _("Cancelled.") end
+    return body, code, err
+end
+
+function Shelfmark:cwaFileDownload(path, save_path, progress_text)
+    local Trapper = require("ui/trapper")
+    local cwa_url, cwa_username, cwa_password, socks5_proxy =
+        self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
+
+    local completed, ok, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doCwaFileDownload(cwa_url, cwa_username, cwa_password, path, socks5_proxy, save_path)
+    end, progress_text or _("Downloading book..."))
+
+    if not completed then return nil, nil, _("Cancelled.") end
+    return ok, code, err
+end
+
+-- Shelfmark itself has no record of where a delivered file ends up -- it
+-- hands the file off to CWA's ingest folder and doesn't track it past
+-- that point (confirmed against the request_routes.py/user_db.py schema:
+-- no file-path or download-URL column exists on a request at all). So
+-- "tap a delivered request to get the file" has to mean something
+-- different in practice: search CWA's own OPDS catalog by title (the book
+-- should already be imported there by the time a request shows
+-- delivery_state "complete") and let you download straight from there.
+function Shelfmark:downloadFromCwa(title)
+    if not self.cwa_url or self.cwa_url == "" then
+        UIManager:show(InfoMessage:new{
+            text = _("Add a CWA URL under Shelfmark Settings to enable downloading from here."),
+        })
+        return
+    end
+
+    local body, code, err = self:cwaRequest("/opds/search/" .. socketurl.escape(title))
+    if err then
+        UIManager:show(InfoMessage:new{ text = err })
+        return
+    end
+    if code ~= 200 or not body then
+        UIManager:show(InfoMessage:new{ text = T(_("CWA search failed (HTTP %1)"), tostring(code)) })
+        return
+    end
+
+    local entries = parseOpdsEntries(body)
+    if #entries == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("No matching book found in CWA yet -- it may still be importing."),
+            timeout = 3,
+        })
+        return
+    end
+
+    local item_table = {}
+    for i, e in ipairs(entries) do
+        item_table[i] = {
+            text = truncate(e.title, 70) or e.title,
+            mandatory = truncate(e.author or "", 30),
+            entry = e,
+        }
+    end
+
+    local results_menu
+    results_menu = Menu:new{
+        title = _("Matches in CWA -- tap to download"),
+        item_table = item_table,
+        multilines_forced = true,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_menu_self, item)
+            UIManager:close(results_menu)
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:saveCwaEntry(item.entry) end)
+        end,
+    }
+    UIManager:show(results_menu)
+end
+
+function Shelfmark:saveCwaEntry(entry)
+    local dir = DataStorage:getFullDataDir() .. "/shelfmark_downloads"
+    if lfs.attributes(dir, "mode") ~= "directory" then
+        lfs.mkdir(dir)
+    end
+    local ext = entry.href:match("([^/]+)/?$") or "epub"
+    local safe_title = (entry.title or "book"):gsub('[/\\:%*%?"<>|]', "_")
+    local save_path = dir .. "/" .. safe_title .. "." .. ext
+
+    local ok, code, err = self:cwaFileDownload(entry.href, save_path)
+    if err then
+        UIManager:show(InfoMessage:new{ text = err })
+        return
+    end
+    if not ok or code ~= 200 then
+        UIManager:show(InfoMessage:new{ text = T(_("Download failed (HTTP %1)"), tostring(code)) })
+        return
+    end
+    UIManager:show(InfoMessage:new{
+        text = T(_("Saved to %1"), save_path),
+        timeout = 4,
+    })
 end
 
 -- ===== menu =====
@@ -869,10 +1121,21 @@ function Shelfmark:showMyRequests()
     for i, r in ipairs(requests) do
         local title = r.title or (r.book_data and r.book_data.title) or _("Untitled")
         local status = r.status or "?"
-        item_table[i] = { text = truncate(title, 70) .. "  [" .. status .. "]" }
+        -- delivery_state (per Shelfmark's own QueueStatus enum) is
+        -- separate from the request-approval status field above -- this
+        -- is the one that actually means "the file exists somewhere now".
+        local delivery = r.delivery_state or "none"
+        local is_delivered = delivery == "complete"
+        item_table[i] = {
+            text = truncate(title, 80) .. "\n" .. status,
+            mandatory = is_delivered and _("Ready - tap to download") or delivery,
+            title = title,
+            is_delivered = is_delivered,
+        }
     end
 
-    UIManager:show(Menu:new{
+    local requests_menu
+    requests_menu = Menu:new{
         title = _("My Shelfmark requests"),
         item_table = item_table,
         multilines_forced = true,
@@ -880,7 +1143,17 @@ function Shelfmark:showMyRequests()
         is_borderless = true,
         is_popout = false,
         title_bar_fm_style = true,
-    })
+        onMenuSelect = function(_menu_self, item)
+            if not item.is_delivered then
+                UIManager:show(InfoMessage:new{ text = _("Not delivered yet."), timeout = 2 })
+                return
+            end
+            UIManager:close(requests_menu)
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:downloadFromCwa(item.title) end)
+        end,
+    }
+    UIManager:show(requests_menu)
 end
 
 return Shelfmark
