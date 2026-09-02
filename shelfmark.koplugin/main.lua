@@ -574,6 +574,32 @@ local function parseOpdsEntries(xml)
     return entries
 end
 
+-- KOReader's own equivalent list (readersearch.lua's find-results Menu)
+-- uses the same covers_fullscreen/is_borderless/is_popout/title_bar_fm_style
+-- combination we do, so that's not the differentiator -- but it also sets
+-- multilines_forced/items_max_lines and only ever feeds it short text.
+-- Our "mandatory" field (author lists) and release titles (full torrent/
+-- usenet filenames) can run well past what that field is normally used
+-- for (confirmed: a 4-author book, and scene-release-style filenames with
+-- quality/codec tags, both 80+ chars). Truncating defensively here even
+-- though the exact crash mechanism (a native SIGABRT with no Lua
+-- traceback) isn't confirmed -- this narrows a real, concrete difference
+-- from the working reference case.
+--
+-- Defined here (ahead of downloadFromCwa/apiRequest) rather than down by
+-- its other original callers (describeBook et al.) -- it was defined too
+-- late in the file to be in scope for downloadFromCwa's item_table build,
+-- a real bug confirmed via crash.log: "attempt to call global 'truncate'
+-- (a nil value)" on every single tap-to-download attempt, thrown before
+-- the CWA-matches menu ever got shown. Trapper:wrap swallows the error
+-- with no UI feedback at all (frontend/ui/trapper.lua just logger.warns
+-- it), which is exactly why this looked like a silent no-op rather than a
+-- crash -- there was no dialog, no error message, nothing on-screen.
+local function truncate(text, maxlen)
+    if type(text) ~= "string" or #text <= maxlen then return text end
+    return text:sub(1, maxlen - 1) .. "…" -- raw UTF-8, not \u{} -- see bullet note above
+end
+
 -- Runs the whole request off the main UI thread via Trapper's subprocess
 -- execution, showing a cancelable progress dialog. The releases search in
 -- particular can take real time (it's actively querying Prowlarr/other
@@ -818,27 +844,22 @@ function Shelfmark:startSearch()
     self.search_dialog:onShowKeyboard()
 end
 
--- KOReader's own equivalent list (readersearch.lua's find-results Menu)
--- uses the same covers_fullscreen/is_borderless/is_popout/title_bar_fm_style
--- combination we do, so that's not the differentiator -- but it also sets
--- multilines_forced/items_max_lines and only ever feeds it short text.
--- Our "mandatory" field (author lists) and release titles (full torrent/
--- usenet filenames) can run well past what that field is normally used
--- for (confirmed: a 4-author book, and scene-release-style filenames with
--- quality/codec tags, both 80+ chars). Truncating defensively here even
--- though the exact crash mechanism (a native SIGABRT with no Lua
--- traceback) isn't confirmed -- this narrows a real, concrete difference
--- from the working reference case.
-local function truncate(text, maxlen)
-    if type(text) ~= "string" or #text <= maxlen then return text end
-    return text:sub(1, maxlen - 1) .. "…" -- raw UTF-8, not \u{} -- see bullet note above
-end
 
 local function describeAuthor(book)
     if book.authors and #book.authors > 0 then
         return table.concat(book.authors, ", ")
     end
     return ""
+end
+
+-- Title + author, used as the manual_query sent straight to browseReleases
+-- as soon as a book is picked -- an explicit choice to accept the
+-- AND-indexer risk Shelfmark's own devs backed out of (see the note on
+-- browseReleases) in exchange for not needing a second tap into "Custom
+-- search query..." just to get the same qualified query every time.
+local function defaultReleaseQuery(book)
+    local author = describeAuthor(book)
+    return table.concat({ book.title or "", author }, " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
 -- Hardcover's search results carry a display_fields list -- Rating (e.g.
@@ -959,7 +980,9 @@ function Shelfmark:doSearch(params, existing_books)
                 end)
             else
                 local Trapper = require("ui/trapper")
-                Trapper:wrap(function() self:browseReleases(item.book_data) end)
+                Trapper:wrap(function()
+                    self:browseReleases(item.book_data, defaultReleaseQuery(item.book_data))
+                end)
             end
         end,
     }
@@ -1099,8 +1122,11 @@ function Shelfmark:browseReleases(book, manual_query)
         })
     end
 
+    -- The default query (title + author, sent automatically -- see
+    -- defaultReleaseQuery) isn't flagged as "custom"; only a query that's
+    -- actually been hand-edited via "Custom search query..." is.
     local menu_title = T(_("Releases for: %1"), truncate(book.title, 40) or _("this book"))
-    if manual_query and manual_query ~= "" then
+    if manual_query and manual_query ~= "" and manual_query ~= defaultReleaseQuery(book) then
         menu_title = menu_title .. _(" (custom query)")
     end
 
@@ -1116,7 +1142,7 @@ function Shelfmark:browseReleases(book, manual_query)
         onMenuSelect = function(_menu_self, item)
             UIManager:close(releases_menu)
             if item.is_custom_query then
-                self:promptCustomReleaseQuery(book)
+                self:promptCustomReleaseQuery(book, manual_query)
             else
                 self:confirmReleaseRequest(book, item.release_data)
             end
@@ -1132,15 +1158,12 @@ end
 -- e.g. "epub") into what Prowlarr searches for.
 function Shelfmark:promptCustomReleaseQuery(book, prefill)
     local InputDialog = require("ui/widget/inputdialog")
-    local author = describeAuthor(book)
-    local default_query = prefill or table.concat(
-        { book.title or "", author }, " "
-    ):gsub("^%s+", ""):gsub("%s+$", "")
+    local default_query = prefill or defaultReleaseQuery(book)
 
     local dialog
     dialog = InputDialog:new{
         title = _("Custom Prowlarr/indexer query"),
-        description = _("Sent to indexers as-is, in place of Shelfmark's default title-only search."),
+        description = _("Sent to indexers as-is, in place of Shelfmark's default title-only search. Edit freely -- e.g. drop the author if this comes back empty, or add a format like \"epub\"."),
         input = default_query,
         buttons = {
             {
