@@ -18,6 +18,7 @@ here that could complete that kind of login flow.
 local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
 local JSON = require("json")
+local bit = require("bit")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
@@ -74,6 +75,11 @@ function Shelfmark:loadSettings()
     -- browses by default -- customizable so it can go straight into
     -- wherever books are actually kept instead of needing a manual move.
     self.download_dir = self.sm_settings.data.shelfmark.download_dir
+    -- Only used by the QR-code / paste-based settings transfer between
+    -- two devices -- see showSetupQrCode/importSettingsFromText. Prompted
+    -- for lazily the first time either is used rather than living in one
+    -- of the main settings dialogs, since it's a one-off/rare setting.
+    self.pairing_relay_url = self.sm_settings.data.shelfmark.pairing_relay_url
 end
 
 function Shelfmark:defaultDownloadDir()
@@ -101,6 +107,7 @@ function Shelfmark:saveAllSettings(msg)
         cwa_username = self.cwa_username,
         cwa_password = self.cwa_password,
         download_dir = self.download_dir,
+        pairing_relay_url = self.pairing_relay_url,
     })
     self.sm_settings:flush()
     self.session_cookie = nil -- force re-login with new creds
@@ -814,6 +821,117 @@ local function doCwaMultipartUpload(cwa_url, cookie, filename, file_bytes, socks
     return true, code
 end
 
+-- ===== device-to-device settings transfer (QR code / paste) =====
+--
+-- No crypto library exists anywhere in KOReader's Lua environment
+-- (confirmed by a full search of its frontend/ffi/common trees for
+-- anything sha/aes/crypt/cipher/hmac-shaped) -- hand-rolling a real
+-- cipher like AES from scratch was the alternative, and that's a real
+-- bug-surface risk to get subtly wrong for something claiming to be
+-- secure. A one-time pad sidesteps that entirely: XOR the plaintext with
+-- a key that is (a) truly random, (b) exactly as long as the message,
+-- and (c) never reused -- all three genuinely guaranteed here, since a
+-- fresh key is generated from scratch for every single use of this
+-- feature -- and it is information-theoretically unbreakable, not just
+-- "good enough". The pairing relay (homeserver-configs/
+-- shelfmark-pairing-relay) only ever sees the ciphertext; the key travels
+-- separately, folded into the same QR code/pairing text, and never
+-- touches that service at all.
+
+-- /dev/urandom, not math.random -- math.random is a plain PRNG (seeded
+-- from time in KOReader), predictable enough that it must never be used
+-- for anything claiming real secrecy. /dev/urandom is a real CSPRNG
+-- backed by the kernel, present and world-readable on both Linux-based
+-- platforms this plugin runs on (the Kindle and Android).
+local function randomBytes(n)
+    local f = io.open("/dev/urandom", "rb")
+    if not f then return nil, _("Couldn't open /dev/urandom for randomness.") end
+    local bytes = f:read(n)
+    f:close()
+    if not bytes or #bytes ~= n then
+        return nil, _("Couldn't read enough randomness from /dev/urandom.")
+    end
+    return bytes
+end
+
+-- Symmetric: the same function encrypts and decrypts, since XOR is its
+-- own inverse. Both arguments must be the same length.
+local function xorBytes(a, b)
+    if #a ~= #b then return nil, "xorBytes: length mismatch" end
+    local out = {}
+    for i = 1, #a do
+        out[i] = string.char(bit.bxor(a:byte(i), b:byte(i)))
+    end
+    return table.concat(out)
+end
+
+local function doPairingUpload(relay_url, ciphertext_b64, socks5_proxy)
+    local headers = { ["Content-Type"] = "application/json" }
+    local body = JSON.encode({ ciphertext = ciphertext_b64 })
+    headers["Content-Length"] = tostring(#body)
+
+    local url = relay_url .. "/pair"
+    debugLog("[pair] -> POST " .. url)
+    socketutil:set_timeout(10, 20)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "POST", url = url, headers = headers, sink = sink, source = ltn12.source.string(body) }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+    local ok, code = pcall(function() return socket.skip(1, http.request(request)) end)
+    socketutil:reset_timeout()
+    if not ok then
+        debugLog("[pair] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the pairing relay -- check its URL.")
+    end
+    local content = table.concat(sink_table)
+    debugLog("[pair] <- HTTP " .. tostring(code))
+    if code ~= 200 then
+        return nil, code, _("Pairing relay rejected the request.")
+    end
+    local decode_ok, decoded = pcall(JSON.decode, content)
+    if not decode_ok or type(decoded) ~= "table" or type(decoded.code) ~= "string" then
+        return nil, code, _("Pairing relay gave an unexpected response.")
+    end
+    return decoded.code, code
+end
+
+local function doPairingDownload(relay_url, pair_code, socks5_proxy)
+    local url = relay_url .. "/pair/" .. pair_code
+    debugLog("[pair] -> GET " .. url)
+    socketutil:set_timeout(10, 20)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "GET", url = url, headers = {}, sink = sink }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+    local ok, code = pcall(function() return socket.skip(1, http.request(request)) end)
+    socketutil:reset_timeout()
+    if not ok then
+        debugLog("[pair] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the pairing relay -- check its URL.")
+    end
+    local content = table.concat(sink_table)
+    debugLog("[pair] <- HTTP " .. tostring(code))
+    if code == 404 then
+        return nil, code, _("That code has already been used or has expired.")
+    end
+    if code ~= 200 then
+        return nil, code, _("Pairing relay rejected the request.")
+    end
+    local decode_ok, decoded = pcall(JSON.decode, content)
+    if not decode_ok or type(decoded) ~= "table" or type(decoded.ciphertext) ~= "string" then
+        return nil, code, _("Pairing relay gave an unexpected response.")
+    end
+    return decoded.ciphertext, code
+end
+
 -- Lightweight, deliberately non-general OPDS/Atom parsing -- plain string
 -- patterns rather than a real XML parser, since this only ever has to
 -- understand feeds from one specific, already-inspected server (CWA), not
@@ -1173,6 +1291,215 @@ function Shelfmark:syncLibrary()
     })
 end
 
+-- ===== device-to-device settings transfer (QR code / paste) =====
+
+-- Shared by showSetupQrCode/importSettingsFromText -- both need the
+-- relay URL first and do the same "ask once, save it, then continue"
+-- dance if it isn't set yet.
+function Shelfmark:promptPairingRelayUrl(on_success)
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Pairing relay URL"),
+        description = _("A small always-on service both devices can reach (homeserver-configs/shelfmark-pairing-relay). Only asked once -- saved after this."),
+        input = "",
+        input_hint = _("e.g. http://homeserver:8086"),
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function() UIManager:close(dialog) end,
+                },
+                {
+                    text = _("Continue"),
+                    is_enter_default = true,
+                    callback = function()
+                        local url = dialog:getInputText()
+                        UIManager:close(dialog)
+                        if url and url:gsub("%s", "") ~= "" then
+                            self.pairing_relay_url = url:gsub("/*$", "")
+                            self:saveAllSettings(_("Saved."))
+                            on_success()
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function Shelfmark:showSetupQrCode()
+    if not self.pairing_relay_url or self.pairing_relay_url == "" then
+        self:promptPairingRelayUrl(function() self:showSetupQrCode() end)
+        return
+    end
+
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = _("This shows a QR code carrying your Shelfmark and CWA settings (encrypted, but visible to anyone who can see or photograph the screen while it's open). It expires in 5 minutes either way. Continue?"),
+        ok_text = _("Show it"),
+        ok_callback = function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:generateAndShowPairingQr() end)
+        end,
+    })
+end
+
+-- Runs as a Trapper:wrap coroutine (see caller) -- the encryption itself
+-- is local/instant and stays on the main thread; only the actual upload
+-- to the pairing relay forks a subprocess, same division as every other
+-- network entry point in this file.
+function Shelfmark:generateAndShowPairingQr()
+    local plaintext = JSON.encode({
+        server_url = self.server_url,
+        username = self.username,
+        password = self.password,
+        socks5_proxy = self.socks5_proxy,
+        cwa_url = self.cwa_url,
+        cwa_username = self.cwa_username,
+        cwa_password = self.cwa_password,
+    })
+
+    local key, rand_err = randomBytes(#plaintext)
+    if not key then
+        UIManager:show(InfoMessage:new{ text = rand_err })
+        return
+    end
+    local ciphertext, xor_err = xorBytes(plaintext, key)
+    if not ciphertext then
+        UIManager:show(InfoMessage:new{ text = tostring(xor_err) })
+        return
+    end
+    local ciphertext_b64 = mime.b64(ciphertext)
+    local key_b64 = mime.b64(key)
+
+    local relay_url, socks5_proxy = self.pairing_relay_url, self.socks5_proxy
+    local Trapper = require("ui/trapper")
+    local completed, pair_code, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doPairingUpload(relay_url, ciphertext_b64, socks5_proxy)
+    end, _("Uploading encrypted settings..."))
+
+    if not completed then return end
+    if not pair_code then
+        UIManager:show(InfoMessage:new{ text = err or T(_("Pairing relay error (HTTP %1)."), tostring(code)) })
+        return
+    end
+
+    -- The key never touches the pairing relay -- it only ever exists in
+    -- this string, which only ever exists on-screen as a QR code (or in
+    -- transit, decoded, on the importing device). See the note above
+    -- doPairingUpload for why that split is what makes this a real
+    -- one-time pad rather than security theater.
+    local pairing_text = "shelfmark-pair:" .. pair_code .. ":" .. key_b64
+
+    local QRMessage = require("ui/widget/qrmessage")
+    local Screen = require("device").screen
+    UIManager:show(QRMessage:new{
+        text = pairing_text,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        timeout = 300, -- matches the pairing relay's own 5-minute expiry
+    })
+end
+
+function Shelfmark:importSettingsFromText()
+    if not self.pairing_relay_url or self.pairing_relay_url == "" then
+        self:promptPairingRelayUrl(function() self:importSettingsFromText() end)
+        return
+    end
+
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Import settings"),
+        description = _("Paste the text your camera/QR app decoded from the other device's QR code."),
+        input = "",
+        allow_newline = true,
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function() UIManager:close(dialog) end,
+                },
+                {
+                    text = _("Import"),
+                    is_enter_default = true,
+                    callback = function()
+                        local pairing_text = dialog:getInputText()
+                        UIManager:close(dialog)
+                        if pairing_text and pairing_text:gsub("%s", "") ~= "" then
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() self:applyPairingText(pairing_text) end)
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function Shelfmark:applyPairingText(pairing_text)
+    local trimmed = pairing_text:gsub("^%s+", ""):gsub("%s+$", "")
+    local pair_code, key_b64 = trimmed:match("^shelfmark%-pair:([0-9a-f]+):(%S+)$")
+    if not pair_code then
+        UIManager:show(InfoMessage:new{ text = _("That doesn't look like a Shelfmark pairing code.") })
+        return
+    end
+
+    local relay_url, socks5_proxy = self.pairing_relay_url, self.socks5_proxy
+    local Trapper = require("ui/trapper")
+    local completed, ciphertext_b64, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doPairingDownload(relay_url, pair_code, socks5_proxy)
+    end, _("Fetching encrypted settings..."))
+
+    if not completed then return end
+    if not ciphertext_b64 then
+        UIManager:show(InfoMessage:new{ text = err or T(_("Pairing relay error (HTTP %1)."), tostring(code)) })
+        return
+    end
+
+    local key_ok, key = pcall(mime.unb64, key_b64)
+    local ciphertext = ciphertext_b64 and mime.unb64(ciphertext_b64)
+    if not key_ok or not key or not ciphertext or #ciphertext ~= #key then
+        UIManager:show(InfoMessage:new{ text = _("Pairing data looked corrupted (bad encoding or length mismatch).") })
+        return
+    end
+    local plaintext, xor_err = xorBytes(ciphertext, key)
+    if not plaintext then
+        UIManager:show(InfoMessage:new{ text = tostring(xor_err) })
+        return
+    end
+    local decode_ok, settings_tbl = pcall(JSON.decode, plaintext)
+    if not decode_ok or type(settings_tbl) ~= "table" then
+        UIManager:show(InfoMessage:new{ text = _("Decrypted data wasn't valid settings.") })
+        return
+    end
+    settings_tbl = stripJsonNull(settings_tbl)
+
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Import these settings?\n\nServer: %1\nCWA: %2\n\nThis overwrites your current Server settings and CWA settings on this device. Your download folder is left alone -- that stays per-device."),
+            tostring(settings_tbl.server_url), tostring(settings_tbl.cwa_url)),
+        ok_text = _("Import"),
+        ok_callback = function()
+            self.server_url = settings_tbl.server_url or nil
+            self.username = settings_tbl.username or nil
+            self.password = settings_tbl.password or nil
+            self.socks5_proxy = settings_tbl.socks5_proxy or nil
+            self.cwa_url = settings_tbl.cwa_url or nil
+            self.cwa_username = settings_tbl.cwa_username or nil
+            self.cwa_password = settings_tbl.cwa_password or nil
+            self:saveAllSettings(_("Settings imported."))
+        end,
+    })
+end
+
 -- Shelfmark itself has no record of where a delivered file ends up -- it
 -- hands the file off to CWA's ingest folder and doesn't track it past
 -- that point (confirmed against the request_routes.py/user_db.py schema:
@@ -1335,6 +1662,16 @@ function Shelfmark:addToMainMenu(menu_items)
                 text = _("Sync library with CWA"),
                 keep_menu_open = true,
                 callback = function() self:syncLibrary() end,
+            },
+            {
+                text = _("Show setup QR code"),
+                keep_menu_open = true,
+                callback = function() self:showSetupQrCode() end,
+            },
+            {
+                text = _("Import settings from text"),
+                keep_menu_open = true,
+                callback = function() self:importSettingsFromText() end,
             },
             {
                 text = _("View debug log"),
