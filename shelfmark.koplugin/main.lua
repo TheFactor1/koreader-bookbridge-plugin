@@ -194,6 +194,24 @@ function Shelfmark:chooseDownloadDir()
     if lfs.attributes(start_path, "mode") ~= "directory" then
         start_path = "/mnt/us"
     end
+    -- FileChooser (which PathChooser is built on) hides the "up a level"
+    -- row whenever the current path exactly equals KOReader's own global
+    -- home_dir *and* "Lock home folder" is on -- confirmed live via
+    -- screenshot (only "Long-press here to choose current folder" showed,
+    -- no "../" row, "Page 1 of 1") plus settings.reader.lua on this
+    -- device: home_dir is /mnt/us/books with lock_home_folder = true,
+    -- exactly the folder this was starting in. That's a global KOReader
+    -- setting the user has for their own file manager, not something to
+    -- silently work around by disabling it -- so instead, start one level
+    -- up (the current folder's parent) so the picker never opens exactly
+    -- on the locked path in the first place; navigating back down into it
+    -- from there works fine, it's only that one exact starting path that
+    -- gets the up-row suppressed.
+    if G_reader_settings:isTrue("lock_home_folder")
+        and start_path == G_reader_settings:readSetting("home_dir")
+    then
+        start_path = start_path:match("^(.*)/[^/]+$") or "/mnt/us"
+    end
     local path_chooser = PathChooser:new{
         title = _("Long-press the folder to use for downloads"),
         path = start_path,
