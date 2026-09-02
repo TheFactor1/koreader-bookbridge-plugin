@@ -302,6 +302,34 @@ local function debugLog(msg)
     end
 end
 
+-- Registry of books this plugin has downloaded, keyed by CWA's uuid --
+-- read by a separate homeserver-side script (shelfmark-kindle-sync in
+-- homeserver-configs/scripts/) that polls CWA for metadata changes and
+-- overwrites the file in place when it finds one, so an edit made in CWA
+-- eventually reaches an already-downloaded copy without a manual
+-- redownload. This plugin only ever writes to it; the sync script is the
+-- only other reader/writer, over SSH, while the Kindle is on the LAN.
+local SYNC_REGISTRY_PATH = DataStorage:getSettingsDir() .. "/shelfmark_synced_books.json"
+local function registerSyncedBook(uuid, path, title)
+    if not uuid or uuid == "" then return end
+    local registry = {}
+    local f = io.open(SYNC_REGISTRY_PATH, "r")
+    if f then
+        local content = f:read("*a")
+        f:close()
+        if content and content ~= "" then
+            local ok, decoded = pcall(JSON.decode, content)
+            if ok and type(decoded) == "table" then registry = decoded end
+        end
+    end
+    registry[uuid] = { path = path, title = title }
+    local out = io.open(SYNC_REGISTRY_PATH, "w")
+    if out then
+        out:write(JSON.encode(registry))
+        out:close()
+    end
+end
+
 -- Minimal SOCKS5 client (CONNECT command, no-auth only) -- for reaching a
 -- Shelfmark instance over Tailscale from a device running Tailscale in
 -- userspace-networking mode, where the OS has no route to 100.x.x.x
@@ -648,6 +676,11 @@ local function parseOpdsEntries(xml)
     for entry_xml in xml:gmatch("<entry>(.-)</entry>") do
         local title = decodeHtmlEntities(entry_xml:match("<title>(.-)</title>"))
         local author = decodeHtmlEntities(entry_xml:match("<author>%s*<name>(.-)</name>"))
+        -- CWA's own stable per-book identifier (independent of title/href,
+        -- which can both change) -- kept so a redownload can be tracked
+        -- for auto-sync even across a metadata edit that changes the
+        -- title. Matches what CWA's /ajax/book/<uuid> endpoint expects.
+        local uuid = entry_xml:match("<id>urn:uuid:(.-)</id>")
         local best_href, best_type
         for link_tag in entry_xml:gmatch("<link[^>]->") do
             if link_tag:find('rel="http://opds%-spec%.org/acquisition"') then
@@ -659,7 +692,7 @@ local function parseOpdsEntries(xml)
             end
         end
         if title and best_href then
-            table.insert(entries, { title = title, author = author, href = best_href, type = best_type })
+            table.insert(entries, { title = title, author = author, href = best_href, type = best_type, uuid = uuid })
         end
     end
     return entries
@@ -846,6 +879,8 @@ function Shelfmark:saveCwaEntry(entry)
         text = T(_("Saved to %1"), save_path),
         timeout = 4,
     })
+
+    registerSyncedBook(entry.uuid, save_path, entry.title)
 
     -- The file manager (if it's the screen this was opened from, which it
     -- usually is -- Shelfmark's menu lives in the file browser's menu, not
