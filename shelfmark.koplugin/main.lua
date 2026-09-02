@@ -149,15 +149,11 @@ end
 
 function Shelfmark:editCwaSettings()
     self.cwa_settings_dialog = MultiInputDialog:new{
-        title = _("CWA & download settings"),
+        title = _("CWA settings"),
         fields = {
             { text = self.cwa_url, hint = _("CWA URL, optional -- e.g. http://cwa:8083 (for 'My requests' download)") },
             { text = self.cwa_username, hint = _("CWA username (optional)") },
             { text = self.cwa_password, text_type = "password", hint = _("CWA password (optional)") },
-            {
-                text = self.download_dir,
-                hint = T(_("Download folder, optional -- e.g. /mnt/us/documents (default: %1)"), self:defaultDownloadDir()),
-            },
         },
         buttons = {
             {
@@ -175,7 +171,6 @@ function Shelfmark:editCwaSettings()
                         self.cwa_url = fields[1] ~= "" and fields[1]:gsub("/*$", "") or nil
                         self.cwa_username = fields[2] ~= "" and fields[2] or nil
                         self.cwa_password = fields[3] ~= "" and fields[3] or nil
-                        self.download_dir = fields[4] ~= "" and fields[4]:gsub("/*$", "") or nil
                         UIManager:close(self.cwa_settings_dialog)
                         self:saveAllSettings(_("Saved."))
                     end,
@@ -185,6 +180,32 @@ function Shelfmark:editCwaSettings()
     }
     UIManager:show(self.cwa_settings_dialog)
     self.cwa_settings_dialog:onShowKeyboard()
+end
+
+-- Folder picker for the tap-to-download save location, in place of typing
+-- a raw path -- easy to get wrong (confirmed live: typed "/mnt/books",
+-- which doesn't exist on this device; the real library folder turned out
+-- to be "/mnt/us/books", not the "/mnt/us/documents" this plugin guessed
+-- at from what else was sitting there). Browsing and long-pressing the
+-- actual folder sidesteps needing to already know its exact path.
+function Shelfmark:chooseDownloadDir()
+    local PathChooser = require("ui/widget/pathchooser")
+    local start_path = self.download_dir or self:defaultDownloadDir()
+    if lfs.attributes(start_path, "mode") ~= "directory" then
+        start_path = "/mnt/us"
+    end
+    local path_chooser = PathChooser:new{
+        title = _("Long-press the folder to use for downloads"),
+        path = start_path,
+        select_directory = true,
+        select_file = false,
+        show_files = false,
+        onConfirm = function(new_path)
+            self.download_dir = new_path:gsub("/*$", "")
+            self:saveAllSettings(T(_("Download folder set to %1"), self.download_dir))
+        end,
+    }
+    UIManager:show(path_chooser)
 end
 
 -- ===== HTTP / API plumbing =====
@@ -834,9 +855,16 @@ function Shelfmark:addToMainMenu(menu_items)
                 callback = function() self:editServerSettings() end,
             },
             {
-                text = _("CWA & download settings"),
+                text = _("CWA settings"),
                 keep_menu_open = true,
                 callback = function() self:editCwaSettings() end,
+            },
+            {
+                text_func = function()
+                    return T(_("Download folder: %1"), self.download_dir or self:defaultDownloadDir())
+                end,
+                keep_menu_open = true,
+                callback = function() self:chooseDownloadDir() end,
             },
             {
                 text = _("View debug log"),
