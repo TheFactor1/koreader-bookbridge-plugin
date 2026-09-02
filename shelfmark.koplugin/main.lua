@@ -445,6 +445,7 @@ end
 -- Returns the raw response body (a string; not JSON) plus the HTTP code.
 local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
     if not cwa_url or cwa_url == "" then
+        debugLog("[cwa] no cwa_url configured, aborting")
         return nil, nil, _("CWA URL isn't set -- add it under Shelfmark Settings.")
     end
     local headers = {}
@@ -452,9 +453,12 @@ local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
         headers["Authorization"] = "Basic " .. mime.b64(username .. ":" .. (password or ""))
     end
 
+    local url = cwa_url .. path
+    debugLog("[cwa] -> GET " .. url)
+
     socketutil:set_timeout(15, 45)
     local sink, sink_table = socketutil.table_sink()
-    local request = { method = "GET", url = cwa_url .. path, headers = headers, sink = sink }
+    local request = { method = "GET", url = url, headers = headers, sink = sink }
     if socks5_proxy and socks5_proxy ~= "" then
         local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
         if proxy_host then
@@ -468,11 +472,14 @@ local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
     socketutil:reset_timeout()
 
     if not ok then
+        debugLog("[cwa] <- connection error: " .. tostring(code))
         return nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
     end
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        debugLog("[cwa] <- timed out: " .. tostring(code))
         return nil, nil, _("Request to CWA timed out.")
     end
+    debugLog("[cwa] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#table.concat(sink_table)))
     return table.concat(sink_table), code
 end
 
@@ -485,6 +492,7 @@ end
 -- can't enforce it.
 local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy, save_path)
     if not cwa_url or cwa_url == "" then
+        debugLog("[cwa] no cwa_url configured, aborting download")
         return nil, nil, _("CWA URL isn't set -- add it under Shelfmark Settings.")
     end
     local headers = {}
@@ -494,12 +502,16 @@ local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy
 
     local file, ferr = io.open(save_path, "wb")
     if not file then
+        debugLog("[cwa] couldn't open " .. tostring(save_path) .. " for writing: " .. tostring(ferr))
         return nil, nil, _("Couldn't open file for writing: ") .. tostring(ferr)
     end
 
+    local url = cwa_url .. path
+    debugLog("[cwa] -> GET " .. url .. " (downloading to " .. tostring(save_path) .. ")")
+
     socketutil:set_timeout(15, 60)
     local sink = socketutil.file_sink(file)
-    local request = { method = "GET", url = cwa_url .. path, headers = headers, sink = sink }
+    local request = { method = "GET", url = url, headers = headers, sink = sink }
     if socks5_proxy and socks5_proxy ~= "" then
         local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
         if proxy_host then
@@ -513,11 +525,14 @@ local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy
     socketutil:reset_timeout()
 
     if not ok then
+        debugLog("[cwa] <- connection error: " .. tostring(code))
         return nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
     end
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        debugLog("[cwa] <- timed out: " .. tostring(code))
         return nil, nil, _("Download from CWA timed out.")
     end
+    debugLog("[cwa] <- HTTP " .. tostring(code) .. " saved to " .. tostring(save_path))
     return true, code
 end
 
@@ -993,18 +1008,51 @@ function Shelfmark:browseReleases(book)
         return
     end
 
-    -- EPUB first, otherwise keep the server's own ordering (a plain
+    -- Relevance first, then EPUB, then the server's own ordering (a plain
     -- table.sort isn't guaranteed stable, so the original index is used
     -- as an explicit tiebreaker rather than leaving that to chance).
+    --
+    -- Prowlarr/indexer search is a broad keyword match, not a precise
+    -- one -- confirmed live: searching "The Stand" returned 29 pages,
+    -- most of them unrelated ("Last Stand", "Stand-In", even a
+    -- different, unrelated book that's also literally titled "The
+    -- Stand"). Release objects carry no author field of their own, but
+    -- indexer release titles conventionally include the author's name,
+    -- so that's the actual signal used here: an exact book-title
+    -- substring match plus an author-surname match scores highest.
+    local book_author = describeAuthor(book)
+    local function releaseRelevanceScore(release_title)
+        if type(release_title) ~= "string" then return 0 end
+        local rt = release_title:lower()
+        local score = 0
+        if type(book.title) == "string" and book.title ~= "" and rt:find(book.title:lower(), 1, true) then
+            score = score + 100
+        end
+        if book_author ~= "" then
+            local surname = book_author:match("(%S+)%s*$")
+            if surname and #surname > 2 and rt:find(surname:lower(), 1, true) then
+                score = score + 50
+            end
+        end
+        return score
+    end
+
     local releases = resp.releases
-    for i, r in ipairs(releases) do r._orig_index = i end
+    for i, r in ipairs(releases) do
+        r._orig_index = i
+        r._relevance = releaseRelevanceScore(r.title)
+    end
     table.sort(releases, function(a, b)
+        if a._relevance ~= b._relevance then return a._relevance > b._relevance end
         local a_epub = (a.format and a.format:lower() == "epub") and 0 or 1
         local b_epub = (b.format and b.format:lower() == "epub") and 0 or 1
         if a_epub ~= b_epub then return a_epub < b_epub end
         return a._orig_index < b._orig_index
     end)
-    for _, r in ipairs(releases) do r._orig_index = nil end
+    for _, r in ipairs(releases) do
+        r._orig_index = nil
+        r._relevance = nil
+    end
 
     local item_table = {}
     for i, release in ipairs(releases) do
