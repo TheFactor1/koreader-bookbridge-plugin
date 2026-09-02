@@ -133,6 +133,39 @@ end
 -- instead, and Shelfmark:apiRequest applies it to `self` once the
 -- subprocess has actually returned to the parent.
 
+-- KOReader's JSON library (rapidjson) represents a decoded JSON `null` as
+-- a sentinel value that is not a plain nil -- confirmed live: it's what
+-- printed as "function: 0x..." in an earlier list-display bug (Lua's
+-- default tostring() only produces that exact format for a real function
+-- value). That alone was survivable when everything ran in-process, but
+-- now that responses have to cross the Trapper subprocess boundary,
+-- LuaJIT's string.buffer serializer explicitly refuses to serialize
+-- functions/userdata/threads at all -- so ANY response containing a null
+-- field (nearly all of them; most BookMetadata fields are optional)
+-- silently produced an empty, undecodable response, with no visible
+-- error: exactly the "searching does not bring up anything" symptom.
+-- Replaced with `false` rather than removed, so array positions/indices
+-- are never disturbed, and because every consumer in this file already
+-- type-checks fields it cares about (e.g. `type(x) == "number"`) rather
+-- than just truthy-checking them, `false` is treated identically to
+-- "absent" everywhere that matters.
+local function stripJsonNull(value, seen)
+    local t = type(value)
+    if t == "function" or t == "userdata" or t == "thread" then
+        return false
+    end
+    if t ~= "table" then
+        return value
+    end
+    seen = seen or {}
+    if seen[value] then return value end
+    seen[value] = true
+    for k, v in pairs(value) do
+        value[k] = stripJsonNull(v, seen)
+    end
+    return value
+end
+
 -- Low-level request. `body` (if given) is a Lua table, JSON-encoded and
 -- sent with Content-Type: application/json. Returns decoded JSON body (or
 -- nil), the HTTP status code, the cookie to use from now on (unchanged if
@@ -180,7 +213,7 @@ local function doRawRequest(server_url, cookie, method, path, body)
     local decoded
     if content ~= "" then
         local decode_ok, result = pcall(JSON.decode, content)
-        if decode_ok then decoded = result end
+        if decode_ok then decoded = stripJsonNull(result) end
     end
 
     return decoded, code, new_cookie
