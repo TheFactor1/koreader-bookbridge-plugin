@@ -913,9 +913,17 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         return { _("CWA URL isn't set -- add it under Shelfmark Settings.") }
     end
 
+    if lfs.attributes(download_dir, "mode") ~= "directory" then
+        -- A real, reachable case, not just defensiveness: on a fresh
+        -- install nothing has downloaded a book yet, so the configured
+        -- (or default) download folder may not exist at all the first
+        -- time this runs.
+        return { T(_("Download folder doesn't exist yet: %1"), download_dir) }
+    end
+
     local local_files = {}
     local ok, iter, dir_obj = pcall(lfs.dir, download_dir)
-    if not ok then
+    if not ok or type(iter) ~= "function" then
         return { T(_("Couldn't list %1: %2"), download_dir, tostring(iter)) }
     end
     for name in iter, dir_obj do
@@ -927,7 +935,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     local registry = loadSyncRegistry()
     local known_paths = {}
     for _, entry in pairs(registry) do
-        if entry.path then known_paths[entry.path] = true end
+        if type(entry) == "table" and entry.path then known_paths[entry.path] = true end
     end
     local unregistered = {}
     for _, path in ipairs(local_files) do
@@ -977,6 +985,14 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 table.insert(to_upload, path)
             end
         end
+        -- Cancelling this (a "dismissable" subprocess -- the user can
+        -- back out mid-run) kills the child immediately
+        -- (ffiutil.terminateSubProcess), and the only save was at the
+        -- very end -- so any matches already found this run would be
+        -- silently lost and have to be re-searched from scratch next
+        -- time. Saving after each phase means a cancelled run only
+        -- redoes what it hadn't finished yet, not everything.
+        saveSyncRegistry(registry)
     end
 
     if #to_upload > 0 then
@@ -998,9 +1014,11 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 else
                     local file_bytes = f:read("*a")
                     f:close()
-                    local up_ok, up_code = doCwaMultipartUpload(cwa_url, cookie, upload_name, file_bytes, socks5_proxy)
+                    local up_ok, up_code, up_err = doCwaMultipartUpload(cwa_url, cookie, upload_name, file_bytes, socks5_proxy)
                     if up_ok and up_code == 200 then
                         addLine(T(_("  [%1] uploaded -- will finish registering once CWA imports it (next sync)."), fname))
+                    elseif up_err then
+                        addLine(T(_("  [%1] upload failed: %2"), fname, up_err))
                     else
                         addLine(T(_("  [%1] upload failed (HTTP %2)."), fname, tostring(up_code)))
                     end
@@ -1013,7 +1031,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     for _ in pairs(registry) do tracked_count = tracked_count + 1 end
     addLine(T(_("Checking %1 tracked book(s) for CWA-side changes..."), tracked_count))
     for uuid, entry in pairs(registry) do
-        if entry.path then
+        if type(entry) == "table" and entry.path then
             local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password, "/ajax/book/" .. uuid, socks5_proxy)
             if body and code == 200 then
                 local decode_ok, decoded = pcall(JSON.decode, body)
@@ -1821,7 +1839,14 @@ function Shelfmark:browseReleases(book, manual_query)
     local item_table = {
         { text = _("\xE2\x9C\x8E Custom search query..."), is_custom_query = true }, -- "✎ ..."
     }
-    for _, release in ipairs(releases) do
+    -- Not "for _, release" -- that shadows gettext's _() for the rest of
+    -- this loop body, which calls it in the fallback branch below (found
+    -- by an audit for this exact pattern, not hit by any release seen so
+    -- far in practice: every real Prowlarr release title has been
+    -- truthy, so the or _("Untitled release") fallback never fired
+    -- during testing -- but a release genuinely missing a title would
+    -- have crashed with "attempt to call a number value").
+    for _idx, release in ipairs(releases) do
         table.insert(item_table, {
             text = truncate(release.title, 90) or _("Untitled release"),
             mandatory = truncate(describeRelease(release), 40),
