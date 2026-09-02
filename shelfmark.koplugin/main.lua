@@ -531,15 +531,21 @@ function Shelfmark:doSearch(params, existing_books)
 
     local item_table = {}
     for i, book in ipairs(books) do
-        local metrics = describeMetrics(book)
+        -- Confirmed on-device: cramming metrics+byline into "mandatory"
+        -- made that column wide enough to squeeze the title itself down
+        -- to a handful of visible characters -- the exact opposite of
+        -- legible. Title needs its own full line; author/year go on a
+        -- second line underneath it (multilines_forced is already set),
+        -- and "mandatory" goes back to being short -- just the rating,
+        -- which is what was actually asked for as the at-a-glance signal.
         local byline = describeAuthor(book) .. describeYear(book)
+        local title_text = truncate(book.title, 80) or _("Untitled")
+        if byline ~= "" then
+            title_text = title_text .. "\n" .. byline
+        end
         item_table[i] = {
-            text = truncate(book.title, 80) or _("Untitled"),
-            -- Metrics first (what was actually asked for: how popular is
-            -- it), byline after -- both truncated together within one
-            -- bounded budget so a book with a long rating string can't
-            -- crowd out its author entirely.
-            mandatory = truncate(metrics ~= "" and (metrics .. "  " .. byline) or byline, 55),
+            text = title_text,
+            mandatory = truncate(describeMetrics(book), 20),
             book_data = book,
         }
     end
