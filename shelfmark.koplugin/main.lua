@@ -85,6 +85,28 @@ function Shelfmark:init()
     self.ui.menu:registerToMainMenu(self)
 end
 
+-- Writes every self.* setting field currently in memory -- shared by both
+-- settings dialogs below, since each only edits its own subset of fields
+-- but saveSetting() replaces the whole "shelfmark" table wholesale, not
+-- a merge. Splitting one 8-field dialog into two 4-field ones was itself
+-- the fix for the on-screen keyboard covering the lower fields/Apply
+-- button on a Kindle-size screen -- confirmed live via screenshot.
+function Shelfmark:saveAllSettings(msg)
+    self.sm_settings:saveSetting("shelfmark", {
+        server_url = self.server_url,
+        username = self.username,
+        password = self.password,
+        socks5_proxy = self.socks5_proxy,
+        cwa_url = self.cwa_url,
+        cwa_username = self.cwa_username,
+        cwa_password = self.cwa_password,
+        download_dir = self.download_dir,
+    })
+    self.sm_settings:flush()
+    self.session_cookie = nil -- force re-login with new creds
+    UIManager:show(InfoMessage:new{ text = msg, timeout = 2 })
+end
+
 function Shelfmark:editServerSettings()
     self.settings_dialog = MultiInputDialog:new{
         title = _("Shelfmark settings"),
@@ -95,13 +117,6 @@ function Shelfmark:editServerSettings()
             {
                 text = self.socks5_proxy,
                 hint = _("SOCKS5 proxy host:port (optional, e.g. 127.0.0.1:1055 for Tailscale userspace mode)"),
-            },
-            { text = self.cwa_url, hint = _("CWA URL, optional -- e.g. http://cwa:8083 (for 'My requests' download)") },
-            { text = self.cwa_username, hint = _("CWA username (optional)") },
-            { text = self.cwa_password, text_type = "password", hint = _("CWA password (optional)") },
-            {
-                text = self.download_dir,
-                hint = T(_("Download folder, optional -- e.g. /mnt/us/documents (default: %1)"), self:defaultDownloadDir()),
             },
         },
         buttons = {
@@ -121,27 +136,8 @@ function Shelfmark:editServerSettings()
                         self.username = fields[2]
                         self.password = fields[3]
                         self.socks5_proxy = fields[4] ~= "" and fields[4] or nil
-                        self.cwa_url = fields[5] ~= "" and fields[5]:gsub("/*$", "") or nil
-                        self.cwa_username = fields[6] ~= "" and fields[6] or nil
-                        self.cwa_password = fields[7] ~= "" and fields[7] or nil
-                        self.download_dir = fields[8] ~= "" and fields[8]:gsub("/*$", "") or nil
-                        self.sm_settings:saveSetting("shelfmark", {
-                            server_url = self.server_url,
-                            username = self.username,
-                            password = self.password,
-                            socks5_proxy = self.socks5_proxy,
-                            cwa_url = self.cwa_url,
-                            cwa_username = self.cwa_username,
-                            cwa_password = self.cwa_password,
-                            download_dir = self.download_dir,
-                        })
-                        self.sm_settings:flush()
-                        self.session_cookie = nil -- force re-login with new creds
                         UIManager:close(self.settings_dialog)
-                        UIManager:show(InfoMessage:new{
-                            text = _("Saved. You'll be logged in on your next search or request."),
-                            timeout = 2,
-                        })
+                        self:saveAllSettings(_("Saved. You'll be logged in on your next search or request."))
                     end,
                 },
             },
@@ -149,6 +145,46 @@ function Shelfmark:editServerSettings()
     }
     UIManager:show(self.settings_dialog)
     self.settings_dialog:onShowKeyboard()
+end
+
+function Shelfmark:editCwaSettings()
+    self.cwa_settings_dialog = MultiInputDialog:new{
+        title = _("CWA & download settings"),
+        fields = {
+            { text = self.cwa_url, hint = _("CWA URL, optional -- e.g. http://cwa:8083 (for 'My requests' download)") },
+            { text = self.cwa_username, hint = _("CWA username (optional)") },
+            { text = self.cwa_password, text_type = "password", hint = _("CWA password (optional)") },
+            {
+                text = self.download_dir,
+                hint = T(_("Download folder, optional -- e.g. /mnt/us/documents (default: %1)"), self:defaultDownloadDir()),
+            },
+        },
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.cwa_settings_dialog)
+                    end,
+                },
+                {
+                    text = _("Apply"),
+                    callback = function()
+                        local fields = self.cwa_settings_dialog:getFields()
+                        self.cwa_url = fields[1] ~= "" and fields[1]:gsub("/*$", "") or nil
+                        self.cwa_username = fields[2] ~= "" and fields[2] or nil
+                        self.cwa_password = fields[3] ~= "" and fields[3] or nil
+                        self.download_dir = fields[4] ~= "" and fields[4]:gsub("/*$", "") or nil
+                        UIManager:close(self.cwa_settings_dialog)
+                        self:saveAllSettings(_("Saved."))
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.cwa_settings_dialog)
+    self.cwa_settings_dialog:onShowKeyboard()
 end
 
 -- ===== HTTP / API plumbing =====
@@ -793,9 +829,14 @@ function Shelfmark:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Settings"),
+                text = _("Server settings"),
                 keep_menu_open = true,
                 callback = function() self:editServerSettings() end,
+            },
+            {
+                text = _("CWA & download settings"),
+                keep_menu_open = true,
+                callback = function() self:editCwaSettings() end,
             },
             {
                 text = _("View debug log"),
