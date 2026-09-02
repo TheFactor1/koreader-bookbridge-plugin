@@ -453,6 +453,22 @@ local function describeAuthor(book)
     return ""
 end
 
+-- Hardcover's search results carry a display_fields list -- Rating (e.g.
+-- "4.5 (3,764)") and Readers, when available -- which is exactly the
+-- popularity signal the sort=popularity ordering is already using;
+-- surfacing the actual numbers makes that ranking legible instead of
+-- just trusting it blindly.
+local function describeMetrics(book)
+    if type(book.display_fields) ~= "table" then return "" end
+    local parts = {}
+    for _, f in ipairs(book.display_fields) do
+        if f.label and f.value then
+            table.insert(parts, f.label .. " " .. f.value)
+        end
+    end
+    return table.concat(parts, " \xC2\xB7 ") -- " · ", raw UTF-8 bytes
+end
+
 -- type-checked rather than a truthy check: a missing publish_year decodes
 -- as KOReader's JSON-null sentinel, which is truthy but not a number --
 -- tostring()-ing it printed literal "function: 0x..." in the list
@@ -470,7 +486,12 @@ local function describeBook(book)
     if author ~= "" then
         text = text .. "\n" .. author
     end
-    return text .. describeYear(book)
+    text = text .. describeYear(book)
+    local metrics = describeMetrics(book)
+    if metrics ~= "" then
+        text = text .. "\n" .. metrics
+    end
+    return text
 end
 
 -- params: {query=, author=, page=}. existing_books, when given, is the
@@ -510,9 +531,15 @@ function Shelfmark:doSearch(params, existing_books)
 
     local item_table = {}
     for i, book in ipairs(books) do
+        local metrics = describeMetrics(book)
+        local byline = describeAuthor(book) .. describeYear(book)
         item_table[i] = {
             text = truncate(book.title, 80) or _("Untitled"),
-            mandatory = truncate(describeAuthor(book) .. describeYear(book), 40),
+            -- Metrics first (what was actually asked for: how popular is
+            -- it), byline after -- both truncated together within one
+            -- bounded budget so a book with a long rating string can't
+            -- crowd out its author entirely.
+            mandatory = truncate(metrics ~= "" and (metrics .. "  " .. byline) or byline, 55),
             book_data = book,
         }
     end
