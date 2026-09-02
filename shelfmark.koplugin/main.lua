@@ -29,6 +29,7 @@ local ltn12 = require("ltn12")
 local logger = require("logger")
 local socket = require("socket")
 local socketurl = require("socket.url")
+local socketutil = require("socketutil")
 local _ = require("gettext")
 local T = ffiUtil.template
 
@@ -171,6 +172,20 @@ end
 -- nil), the HTTP status code, the cookie to use from now on (unchanged if
 -- the response didn't set a new one), and an error string on a
 -- connection-level failure.
+-- Plain file, not the logger module -- this runs inside the subprocess
+-- (no UI, and no confirmation logger output actually reaches anywhere the
+-- user can read without ADB set up), so writing directly to a file both
+-- of us can inspect is the only debug channel actually available here.
+-- Appends across sessions; delete the file to clear it.
+local DEBUG_LOG_PATH = DataStorage:getSettingsDir() .. "/shelfmark-debug.log"
+local function debugLog(msg)
+    local ok, f = pcall(io.open, DEBUG_LOG_PATH, "a")
+    if ok and f then
+        f:write(os.date("%Y-%m-%d %H:%M:%S") .. "  " .. tostring(msg) .. "\n")
+        f:close()
+    end
+end
+
 local function doRawRequest(server_url, cookie, method, path, body)
     if not server_url or server_url == "" then
         return nil, nil, cookie, _("Shelfmark server URL isn't set -- check Settings.")
@@ -188,12 +203,26 @@ local function doRawRequest(server_url, cookie, method, path, body)
         headers["Content-Length"] = tostring(#body_json)
     end
 
-    local sink = {}
+    local url = server_url .. path
+    debugLog("-> " .. method .. " " .. url)
+
+    -- No timeout was ever set before this -- LuaSocket blocks forever by
+    -- default, so a stalled connection (of any kind: DNS, TCP connect, a
+    -- server that accepts the connection but never responds) had no way
+    -- to ever give up, which is the likely cause of it sitting on "Talking
+    -- to Shelfmark..." indefinitely. block_timeout bounds a single stalled
+    -- read; total_timeout bounds the whole request once data starts
+    -- arriving (needs socketutil.table_sink, not plain ltn12.sink.table,
+    -- to actually be honored -- see socketutil.lua's own comment on why
+    -- block_timeout alone is not enough).
+    socketutil:set_timeout(15, 45)
+    local sink, sink_table = socketutil.table_sink()
+
     local request = {
         method = method,
-        url = server_url .. path,
+        url = url,
         headers = headers,
-        sink = ltn12.sink.table(sink),
+        sink = sink,
     }
     if body_json then
         request.source = ltn12.source.string(body_json)
@@ -202,18 +231,30 @@ local function doRawRequest(server_url, cookie, method, path, body)
     local ok, code, resp_headers = pcall(function()
         return socket.skip(1, http.request(request))
     end)
+    socketutil:reset_timeout()
+
     if not ok then
-        logger.warn("Shelfmark: request failed", code)
+        debugLog("<- connection error: " .. tostring(code))
         return nil, nil, cookie, _("Couldn't reach the Shelfmark server -- are you on your home network?")
     end
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        debugLog("<- timed out: " .. tostring(code))
+        return nil, nil, cookie, _("Request to Shelfmark timed out.")
+    end
+    debugLog("<- HTTP " .. tostring(code))
 
     local new_cookie = extractSessionCookie(resp_headers) or cookie
 
-    local content = table.concat(sink)
+    local content = table.concat(sink_table)
+    debugLog("<- body length " .. tostring(#content))
     local decoded
     if content ~= "" then
         local decode_ok, result = pcall(JSON.decode, content)
-        if decode_ok then decoded = stripJsonNull(result) end
+        if decode_ok then
+            decoded = stripJsonNull(result)
+        else
+            debugLog("<- JSON decode failed: " .. tostring(result))
+        end
     end
 
     return decoded, code, new_cookie
@@ -309,10 +350,40 @@ function Shelfmark:addToMainMenu(menu_items)
                 text = _("Settings"),
                 keep_menu_open = true,
                 callback = function() self:editServerSettings() end,
+            },
+            {
+                text = _("View debug log"),
+                keep_menu_open = true,
                 separator = true,
+                callback = function() self:showDebugLog() end,
             },
         },
     }
+end
+
+function Shelfmark:showDebugLog()
+    local TextViewer = require("ui/widget/textviewer")
+    local f = io.open(DEBUG_LOG_PATH, "r")
+    local content
+    if f then
+        content = f:read("*a")
+        f:close()
+    end
+    if not content or content == "" then
+        content = _("No debug log yet -- try a search first.")
+    else
+        -- Keep only the tail: this file appends across every session, and
+        -- TextViewer isn't meant for huge bodies of text.
+        local max_chars = 6000
+        if #content > max_chars then
+            content = "...\n" .. content:sub(-max_chars)
+        end
+    end
+    UIManager:show(TextViewer:new{
+        title = _("Shelfmark debug log"),
+        text = content,
+        justified = false,
+    })
 end
 
 -- ===== search + request flow =====
