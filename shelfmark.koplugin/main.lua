@@ -300,6 +300,22 @@ function Shelfmark:startSearch()
     self.search_dialog:onShowKeyboard()
 end
 
+-- KOReader's own equivalent list (readersearch.lua's find-results Menu)
+-- uses the same covers_fullscreen/is_borderless/is_popout/title_bar_fm_style
+-- combination we do, so that's not the differentiator -- but it also sets
+-- multilines_forced/items_max_lines and only ever feeds it short text.
+-- Our "mandatory" field (author lists) and release titles (full torrent/
+-- usenet filenames) can run well past what that field is normally used
+-- for (confirmed: a 4-author book, and scene-release-style filenames with
+-- quality/codec tags, both 80+ chars). Truncating defensively here even
+-- though the exact crash mechanism (a native SIGABRT with no Lua
+-- traceback) isn't confirmed -- this narrows a real, concrete difference
+-- from the working reference case.
+local function truncate(text, maxlen)
+    if type(text) ~= "string" or #text <= maxlen then return text end
+    return text:sub(1, maxlen - 1) .. "…" -- raw UTF-8, not \u{} -- see bullet note above
+end
+
 local function describeAuthor(book)
     if book.authors and #book.authors > 0 then
         return table.concat(book.authors, ", ")
@@ -365,8 +381,8 @@ function Shelfmark:doSearch(params, existing_books)
     local item_table = {}
     for i, book in ipairs(books) do
         item_table[i] = {
-            text = book.title or _("Untitled"),
-            mandatory = describeAuthor(book) .. describeYear(book),
+            text = truncate(book.title, 80) or _("Untitled"),
+            mandatory = truncate(describeAuthor(book) .. describeYear(book), 40),
             book_data = book,
         }
     end
@@ -378,6 +394,7 @@ function Shelfmark:doSearch(params, existing_books)
     results_menu = Menu:new{
         title = T(_("Search results (%1)"), #books),
         item_table = item_table,
+        multilines_forced = true,
         covers_fullscreen = true,
         is_borderless = true,
         is_popout = false,
@@ -446,16 +463,17 @@ function Shelfmark:browseReleases(book)
     local item_table = {}
     for i, release in ipairs(resp.releases) do
         item_table[i] = {
-            text = release.title or _("Untitled release"),
-            mandatory = describeRelease(release),
+            text = truncate(release.title, 90) or _("Untitled release"),
+            mandatory = truncate(describeRelease(release), 40),
             release_data = release,
         }
     end
 
     local releases_menu
     releases_menu = Menu:new{
-        title = T(_("Releases for: %1"), book.title or _("this book")),
+        title = T(_("Releases for: %1"), truncate(book.title, 40) or _("this book")),
         item_table = item_table,
+        multilines_forced = true,
         covers_fullscreen = true,
         is_borderless = true,
         is_popout = false,
@@ -555,12 +573,13 @@ function Shelfmark:showMyRequests()
     for i, r in ipairs(requests) do
         local title = r.title or (r.book_data and r.book_data.title) or _("Untitled")
         local status = r.status or "?"
-        item_table[i] = { text = title .. "  [" .. status .. "]" }
+        item_table[i] = { text = truncate(title, 70) .. "  [" .. status .. "]" }
     end
 
     UIManager:show(Menu:new{
         title = _("My Shelfmark requests"),
         item_table = item_table,
+        multilines_forced = true,
         covers_fullscreen = true,
         is_borderless = true,
         is_popout = false,
