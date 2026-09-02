@@ -309,25 +309,39 @@ end
 -- eventually reaches an already-downloaded copy without a manual
 -- redownload. This plugin only ever writes to it; the sync script is the
 -- only other reader/writer, over SSH, while the Kindle is on the LAN.
+-- Same registry file the homeserver-side shelfmark-kindle-sync script
+-- reads/writes over SSH -- shapes are compatible (that script only reads
+-- entry.path/entry.title and ignores anything else), so both can operate
+-- on it: the SSH-based script for the Kindle on its cron schedule, and
+-- this in-plugin version (loadSyncRegistry/saveSyncRegistry/syncLibrary
+-- below) for any device -- Android included -- where SSH access was
+-- never set up at all.
 local SYNC_REGISTRY_PATH = DataStorage:getSettingsDir() .. "/shelfmark_synced_books.json"
+
+local function loadSyncRegistry()
+    local f = io.open(SYNC_REGISTRY_PATH, "r")
+    if not f then return {} end
+    local content = f:read("*a")
+    f:close()
+    if not content or content == "" then return {} end
+    local ok, decoded = pcall(JSON.decode, content)
+    if ok and type(decoded) == "table" then return decoded end
+    return {}
+end
+
+local function saveSyncRegistry(registry)
+    local out = io.open(SYNC_REGISTRY_PATH, "w")
+    if not out then return false end
+    out:write(JSON.encode(registry))
+    out:close()
+    return true
+end
+
 local function registerSyncedBook(uuid, path, title)
     if not uuid or uuid == "" then return end
-    local registry = {}
-    local f = io.open(SYNC_REGISTRY_PATH, "r")
-    if f then
-        local content = f:read("*a")
-        f:close()
-        if content and content ~= "" then
-            local ok, decoded = pcall(JSON.decode, content)
-            if ok and type(decoded) == "table" then registry = decoded end
-        end
-    end
+    local registry = loadSyncRegistry()
     registry[uuid] = { path = path, title = title }
-    local out = io.open(SYNC_REGISTRY_PATH, "w")
-    if out then
-        out:write(JSON.encode(registry))
-        out:close()
-    end
+    saveSyncRegistry(registry)
 end
 
 -- Minimal SOCKS5 client (CONNECT command, no-auth only) -- for reaching a
@@ -655,6 +669,151 @@ local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy
     return true, code
 end
 
+-- ===== CWA library sync (device -> CWA, no SSH/homeserver script) =====
+--
+-- Everything above (doCwaRequest/doCwaFileDownload) authenticates to CWA
+-- with plain HTTP Basic Auth, which is all OPDS and /ajax/book/<uuid>
+-- accept -- confirmed live, a valid session cookie is actually *rejected*
+-- (401) on /ajax/book/<uuid> specifically. The routes below (/login,
+-- /upload) are the opposite: they're CWA's own web-app routes, protected
+-- by Flask-Login's session cookie plus a CSRF token, and reject Basic
+-- Auth. So this is a second, separate auth flow, not a variant of the
+-- first.
+--
+-- CWA (crocodilestick/calibre-web-automated) also diverges from the
+-- upstream calibre-web project it's forked from in ways that matter here
+-- -- confirmed live while building fix_description.py (the homeserver
+-- script this mirrors): the /ajax/editbooks/<param> edit endpoint takes
+-- form-encoded data with a bare numeric pk, not upstream's JSON with a
+-- list-valued pk. /upload hasn't been checked against upstream at all;
+-- this was built directly from CWA's own fork source.
+
+local function doCwaRawFormRequest(cwa_url, cookie, method, path, form_fields, extra_headers, socks5_proxy)
+    local headers = {}
+    for k, v in pairs(extra_headers or {}) do headers[k] = v end
+    if cookie then headers["Cookie"] = cookie end
+
+    local body
+    if form_fields then
+        local parts = {}
+        for k, v in pairs(form_fields) do
+            table.insert(parts, socketurl.escape(k) .. "=" .. socketurl.escape(v))
+        end
+        body = table.concat(parts, "&")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers["Content-Length"] = tostring(#body)
+    end
+
+    local url = cwa_url .. path
+    debugLog("[cwa] -> " .. method .. " " .. url)
+
+    socketutil:set_timeout(15, 45)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = method, url = url, headers = headers, sink = sink }
+    if body then request.source = ltn12.source.string(body) end
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+
+    local ok, code, resp_headers = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        debugLog("[cwa] <- connection error: " .. tostring(code))
+        return nil, nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
+    end
+    local content = table.concat(sink_table)
+    debugLog("[cwa] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#content))
+    return content, code, resp_headers
+end
+
+local function extractCsrfToken(html_body)
+    return html_body and html_body:match('csrf_token"%s+value="([^"]+)"')
+end
+
+-- Returns (cookie, err). The cookie carries the authenticated session for
+-- every subsequent doCwaRawFormRequest/upload call in this same process.
+local function doCwaLogin(cwa_url, username, password, socks5_proxy)
+    local login_page, code1, headers1 = doCwaRawFormRequest(cwa_url, nil, "GET", "/login", nil, nil, socks5_proxy)
+    if not login_page then return nil, _("Couldn't reach CWA's login page.") end
+    -- Flask-WTF ties the csrf_token to the specific pre-login session it
+    -- was issued under -- confirmed live: posting the token back without
+    -- also carrying this cookie forward gets a 400, not an auth failure.
+    local pre_login_cookie = extractSessionCookie(headers1)
+    local csrf_token = extractCsrfToken(login_page)
+    if not csrf_token then
+        return nil, _("Couldn't find CWA's login form -- its page layout may have changed.")
+    end
+
+    local body, code2, headers2 = doCwaRawFormRequest(cwa_url, pre_login_cookie, "POST", "/login", {
+        csrf_token = csrf_token,
+        username = username or "",
+        password = password or "",
+        submit = "Login",
+    }, nil, socks5_proxy)
+    if not body then return nil, _("Couldn't reach CWA's login page.") end
+    local cookie = extractSessionCookie(headers2)
+    if not cookie or (code2 ~= 200 and code2 ~= 302) then
+        return nil, _("CWA login failed -- check the CWA username/password in Settings.")
+    end
+    return cookie
+end
+
+local function doCwaMultipartUpload(cwa_url, cookie, filename, file_bytes, socks5_proxy)
+    -- A fresh csrf_token from an authenticated page -- the one from the
+    -- login form above is single-use/tied to the pre-login session,
+    -- confirmed while building fix_description.py: reusing it against an
+    -- authenticated POST elsewhere failed until a token was re-pulled
+    -- from a page fetched *with* the session cookie attached.
+    local home_body = doCwaRawFormRequest(cwa_url, cookie, "GET", "/", nil, nil, socks5_proxy)
+    local csrf_token = home_body and extractCsrfToken(home_body)
+    if not csrf_token then
+        return nil, nil, _("Couldn't get a fresh CSRF token from CWA.")
+    end
+
+    local boundary = "----shelfmarkkoplugin" .. tostring(os.time())
+    local parts = {
+        "--" .. boundary .. "\r\n",
+        'Content-Disposition: form-data; name="btn-upload"; filename="' .. filename .. '"\r\n',
+        "Content-Type: application/epub+zip\r\n\r\n",
+        file_bytes,
+        "\r\n--" .. boundary .. "--\r\n",
+    }
+    local body = table.concat(parts)
+
+    local headers = {
+        Cookie = cookie,
+        ["X-CSRFToken"] = csrf_token,
+        ["Content-Type"] = "multipart/form-data; boundary=" .. boundary,
+        ["Content-Length"] = tostring(#body),
+    }
+
+    local url = cwa_url .. "/upload"
+    debugLog("[cwa] -> POST " .. url .. " (uploading " .. filename .. ", " .. #file_bytes .. " bytes)")
+    socketutil:set_timeout(20, 90)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "POST", url = url, headers = headers, sink = sink, source = ltn12.source.string(body) }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+    local ok, code = pcall(function() return socket.skip(1, http.request(request)) end)
+    socketutil:reset_timeout()
+    if not ok then
+        debugLog("[cwa] <- connection error: " .. tostring(code))
+        return nil, nil, _("Upload to CWA failed -- connection error.")
+    end
+    debugLog("[cwa] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#table.concat(sink_table)))
+    return true, code
+end
+
 -- Lightweight, deliberately non-general OPDS/Atom parsing -- plain string
 -- patterns rather than a real XML parser, since this only ever has to
 -- understand feeds from one specific, already-inspected server (CWA), not
@@ -696,6 +855,194 @@ local function parseOpdsEntries(xml)
         end
     end
     return entries
+end
+
+-- ===== library sync (device <-> CWA, no SSH/homeserver script needed) =====
+--
+-- Mirrors homeserver-configs/scripts/shelfmark-kindle-sync/sync.py, but
+-- runs entirely on-device over plain HTTP -- built for platforms (Android
+-- KOReader, notably) that don't have an SSH server the way the jailbroken
+-- Kindle does, so that script has no way to reach in. Same registry file,
+-- same idea in both directions: books that appear locally by any means
+-- (this plugin's own downloads, a different KOReader plugin, a file
+-- copied on manually) get matched against CWA or uploaded as new: books
+-- already tracked get checked against CWA for changes and re-pulled.
+
+local SYNC_STOPWORDS = { the = true, a = true, an = true, of = true, ["and"] = true, novel = true }
+
+local function normalizeTitleWords(text)
+    if not text then return {} end
+    text = text:lower():gsub("%(z%-library%)", "")
+    text = text:gsub("[^%w]+", " ")
+    local words = {}
+    for w in text:gmatch("%S+") do
+        if not SYNC_STOPWORDS[w] and #w > 1 then
+            words[w] = true
+        end
+    end
+    return words
+end
+
+-- True only when every word of title_words is present in filename_words --
+-- deliberately one-directional and exact, no fuzzy scoring. A looser
+-- "closest match" approach already mixed up "Pines" and "Wayward Pines -
+-- 02 Wayward" for two different files during the first (manual) pass at
+-- this same kind of matching for the homeserver-side script -- better to
+-- flag ambiguity than guess wrong silently.
+local function titleWordsSubsetOf(title_words, filename_words)
+    local any = false
+    for w in pairs(title_words) do
+        any = true
+        if not filename_words[w] then return false end
+    end
+    return any
+end
+
+-- Runs entirely inside a Trapper subprocess (see Shelfmark:syncLibrary
+-- below) -- a real fork, so file writes it makes (downloaded books, the
+-- registry itself) land on the real filesystem same as if done in the
+-- parent; only in-memory Lua state doesn't cross back. Returns a list of
+-- plain report-line strings for the parent to display -- deliberately
+-- not the registry itself, avoiding the rapidjson-null string.buffer
+-- serialization trap documented on stripJsonNull above.
+local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir)
+    local report = {}
+    local function addLine(s) table.insert(report, s) end
+
+    if not cwa_url or cwa_url == "" then
+        return { _("CWA URL isn't set -- add it under Shelfmark Settings.") }
+    end
+
+    local local_files = {}
+    local ok, iter, dir_obj = pcall(lfs.dir, download_dir)
+    if not ok then
+        return { T(_("Couldn't list %1: %2"), download_dir, tostring(iter)) }
+    end
+    for name in iter, dir_obj do
+        if name:lower():match("%.epub$") then
+            table.insert(local_files, download_dir .. "/" .. name)
+        end
+    end
+
+    local registry = loadSyncRegistry()
+    local known_paths = {}
+    for _, entry in pairs(registry) do
+        if entry.path then known_paths[entry.path] = true end
+    end
+    local unregistered = {}
+    for _, path in ipairs(local_files) do
+        if not known_paths[path] then table.insert(unregistered, path) end
+    end
+
+    addLine(T(_("Found %1 book(s) locally, %2 already tracked."), #local_files, #local_files - #unregistered))
+
+    local to_upload = {}
+    if #unregistered > 0 then
+        addLine(T(_("Checking %1 untracked book(s) against CWA..."), #unregistered))
+        -- Not "for _, path" -- that shadows gettext's _() for the rest of
+        -- this loop body, which does call it (confirmed live: "attempt to
+        -- call local '_' (a number value)" the first time this ran for
+        -- real, thrown from the addLine(_(...)) calls below).
+        for _idx, path in ipairs(unregistered) do
+            local fname = path:match("([^/]+)%.[Ee][Pp][Uu][Bb]$") or path
+            local query = fname:gsub("[_%-%[%]%(%)]", " ")
+            local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+                "/opds/search/" .. socketurl.escape(query), socks5_proxy)
+            local matches = {}
+            if resp_body and code == 200 then
+                local fname_words = normalizeTitleWords(fname)
+                local seen_uuids = {}
+                for _, e in ipairs(parseOpdsEntries(resp_body)) do
+                    if e.uuid and not seen_uuids[e.uuid] then
+                        if titleWordsSubsetOf(normalizeTitleWords(e.title), fname_words) then
+                            table.insert(matches, e)
+                            seen_uuids[e.uuid] = true
+                        end
+                    end
+                end
+            end
+            if #matches == 1 then
+                local m = matches[1]
+                if registry[m.uuid] then
+                    addLine(T(_("  [%1] matches already-tracked \"%2\" -- possible duplicate file, skipped."), fname, m.title))
+                else
+                    registry[m.uuid] = { path = path, title = m.title }
+                    addLine(T(_("  [%1] matched existing CWA book \"%2\" -- registered."), fname, m.title))
+                end
+            elseif #matches > 1 then
+                local titles = {}
+                for _, m in ipairs(matches) do table.insert(titles, m.title) end
+                addLine(T(_("  [%1] matched more than one CWA book (%2) -- ambiguous, skipped."), fname, table.concat(titles, ", ")))
+            else
+                table.insert(to_upload, path)
+            end
+        end
+    end
+
+    if #to_upload > 0 then
+        addLine(T(_("Uploading %1 new book(s) to CWA..."), #to_upload))
+        local cookie, login_err = doCwaLogin(cwa_url, cwa_username, cwa_password, socks5_proxy)
+        if not cookie then
+            addLine(T(_("  couldn't log in to CWA to upload: %1"), tostring(login_err)))
+        else
+            for _idx, path in ipairs(to_upload) do -- see note above on why not "_"
+                local fname = path:match("([^/]+)$") or path
+                -- Confirmed live: CWA's ingest watcher silently ignores an
+                -- uppercase .EPUB extension (no error, no log line at all)
+                -- -- normalized here since this plugin has no control over
+                -- how other sources (e.g. a Z-Library plugin) name files.
+                local upload_name = fname:gsub("%.[Ee][Pp][Uu][Bb]$", ".epub")
+                local f = io.open(path, "rb")
+                if not f then
+                    addLine(T(_("  [%1] couldn't open local file to upload."), fname))
+                else
+                    local file_bytes = f:read("*a")
+                    f:close()
+                    local up_ok, up_code = doCwaMultipartUpload(cwa_url, cookie, upload_name, file_bytes, socks5_proxy)
+                    if up_ok and up_code == 200 then
+                        addLine(T(_("  [%1] uploaded -- will finish registering once CWA imports it (next sync)."), fname))
+                    else
+                        addLine(T(_("  [%1] upload failed (HTTP %2)."), fname, tostring(up_code)))
+                    end
+                end
+            end
+        end
+    end
+
+    local tracked_count = 0
+    for _ in pairs(registry) do tracked_count = tracked_count + 1 end
+    addLine(T(_("Checking %1 tracked book(s) for CWA-side changes..."), tracked_count))
+    for uuid, entry in pairs(registry) do
+        if entry.path then
+            local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password, "/ajax/book/" .. uuid, socks5_proxy)
+            if body and code == 200 then
+                local decode_ok, decoded = pcall(JSON.decode, body)
+                local book = decode_ok and stripJsonNull(decoded)
+                local last_modified = book and book.last_modified
+                if type(last_modified) == "string" then
+                    if not entry.last_modified then
+                        entry.last_modified = last_modified
+                    elseif entry.last_modified ~= last_modified then
+                        local epub_path = book.main_format and book.main_format.epub
+                        if type(epub_path) == "string" then
+                            addLine(T(_("  [%1] changed in CWA, re-downloading..."), entry.title or uuid))
+                            local dl_ok = doCwaFileDownload(cwa_url, cwa_username, cwa_password, epub_path, socks5_proxy, entry.path)
+                            if dl_ok then
+                                entry.last_modified = last_modified
+                                addLine(T(_("  [%1] synced."), entry.title or uuid))
+                            else
+                                addLine(T(_("  [%1] re-download failed."), entry.title or uuid))
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    saveSyncRegistry(registry)
+    addLine(_("Done."))
+    return report
 end
 
 -- KOReader's own equivalent list (readersearch.lua's find-results Menu)
@@ -777,6 +1124,35 @@ function Shelfmark:cwaFileDownload(path, save_path, progress_text)
 
     if not completed then return nil, nil, _("Cancelled.") end
     return ok, code, err
+end
+
+-- Manual trigger for doSyncLibrary above -- runs in a Trapper subprocess
+-- since it can involve several network round-trips in sequence (OPDS
+-- searches, a login, one or more uploads, then a check per tracked book),
+-- same reasoning as every other network entry point in this file.
+function Shelfmark:syncLibrary()
+    local Trapper = require("ui/trapper")
+    local cwa_url, cwa_username, cwa_password, socks5_proxy =
+        self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
+    local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
+        or self:defaultDownloadDir()
+
+    local completed, report = Trapper:dismissableRunInSubprocess(function()
+        return doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir)
+    end, _("Syncing library with CWA..."))
+
+    if not completed then return end
+    if type(report) ~= "table" or #report == 0 then
+        UIManager:show(InfoMessage:new{ text = _("Sync finished with no output.") })
+        return
+    end
+
+    local TextViewer = require("ui/widget/textviewer")
+    UIManager:show(TextViewer:new{
+        title = _("Library sync report"),
+        text = table.concat(report, "\n"),
+        justified = false,
+    })
 end
 
 -- Shelfmark itself has no record of where a delivered file ends up -- it
@@ -936,6 +1312,11 @@ function Shelfmark:addToMainMenu(menu_items)
                 end,
                 keep_menu_open = true,
                 callback = function() self:chooseDownloadDir() end,
+            },
+            {
+                text = _("Sync library with CWA"),
+                keep_menu_open = true,
+                callback = function() self:syncLibrary() end,
             },
             {
                 text = _("View debug log"),
