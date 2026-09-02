@@ -68,6 +68,16 @@ function Shelfmark:loadSettings()
     self.cwa_url = self.sm_settings.data.shelfmark.cwa_url
     self.cwa_username = self.sm_settings.data.shelfmark.cwa_username
     self.cwa_password = self.sm_settings.data.shelfmark.cwa_password
+    -- Where saveCwaEntry() (the "My requests" tap-to-download) writes the
+    -- file. Defaults to a folder inside KOReader's own app dir, which is
+    -- out of the way of any actual library/documents folder the device
+    -- browses by default -- customizable so it can go straight into
+    -- wherever books are actually kept instead of needing a manual move.
+    self.download_dir = self.sm_settings.data.shelfmark.download_dir
+end
+
+function Shelfmark:defaultDownloadDir()
+    return DataStorage:getFullDataDir() .. "/shelfmark_downloads"
 end
 
 function Shelfmark:init()
@@ -89,6 +99,10 @@ function Shelfmark:editServerSettings()
             { text = self.cwa_url, hint = _("CWA URL, optional -- e.g. http://cwa:8083 (for 'My requests' download)") },
             { text = self.cwa_username, hint = _("CWA username (optional)") },
             { text = self.cwa_password, text_type = "password", hint = _("CWA password (optional)") },
+            {
+                text = self.download_dir,
+                hint = T(_("Download folder, optional -- e.g. /mnt/us/documents (default: %1)"), self:defaultDownloadDir()),
+            },
         },
         buttons = {
             {
@@ -110,6 +124,7 @@ function Shelfmark:editServerSettings()
                         self.cwa_url = fields[5] ~= "" and fields[5]:gsub("/*$", "") or nil
                         self.cwa_username = fields[6] ~= "" and fields[6] or nil
                         self.cwa_password = fields[7] ~= "" and fields[7] or nil
+                        self.download_dir = fields[8] ~= "" and fields[8]:gsub("/*$", "") or nil
                         self.sm_settings:saveSetting("shelfmark", {
                             server_url = self.server_url,
                             username = self.username,
@@ -118,6 +133,7 @@ function Shelfmark:editServerSettings()
                             cwa_url = self.cwa_url,
                             cwa_username = self.cwa_username,
                             cwa_password = self.cwa_password,
+                            download_dir = self.download_dir,
                         })
                         self.sm_settings:flush()
                         self.session_cookie = nil -- force re-login with new creds
@@ -718,9 +734,25 @@ function Shelfmark:downloadFromCwa(title)
 end
 
 function Shelfmark:saveCwaEntry(entry)
-    local dir = DataStorage:getFullDataDir() .. "/shelfmark_downloads"
+    local dir = (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
     if lfs.attributes(dir, "mode") ~= "directory" then
-        lfs.mkdir(dir)
+        -- One level at a time -- lfs.mkdir isn't recursive (no "mkdir -p"),
+        -- so a configured path several levels below an existing root (e.g.
+        -- a fresh "/mnt/us/documents/shelfmark") needs each segment created
+        -- in order or the final mkdir fails on a missing parent.
+        local built = ""
+        for segment in dir:gmatch("[^/]+") do
+            built = built .. "/" .. segment
+            if lfs.attributes(built, "mode") ~= "directory" then
+                lfs.mkdir(built)
+            end
+        end
+        if lfs.attributes(dir, "mode") ~= "directory" then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Couldn't create download folder: %1"), dir),
+            })
+            return
+        end
     end
     local ext = entry.href:match("([^/]+)/?$") or "epub"
     local safe_title = (entry.title or "book"):gsub('[/\\:%*%?"<>|]', "_")
