@@ -1602,6 +1602,44 @@ function Shelfmark:showMyRequests()
             local Trapper = require("ui/trapper")
             Trapper:wrap(function() self:downloadFromCwa(item.title) end)
         end,
+        -- Explicit, separate from tap: tapping a delivered request already
+        -- searches CWA and re-downloads, so this is functionally the same
+        -- action -- but as a hold-triggered "Redownload" it's discoverable
+        -- as its own deliberate command (e.g. if you deleted the file
+        -- off-device, or the earlier download landed with a mangled
+        -- filename) rather than something that just happens to be what tap
+        -- does.
+        onMenuHold = function(_menu_self, item)
+            if not item.is_delivered then
+                UIManager:show(InfoMessage:new{ text = _("Not delivered yet."), timeout = 2 })
+                return
+            end
+            local ButtonDialog = require("ui/widget/buttondialog")
+            local hold_dialog
+            hold_dialog = ButtonDialog:new{
+                title = item.title,
+                buttons = {
+                    {
+                        {
+                            text = _("Redownload"),
+                            callback = function()
+                                UIManager:close(hold_dialog)
+                                UIManager:close(requests_menu)
+                                local Trapper = require("ui/trapper")
+                                Trapper:wrap(function() self:downloadFromCwa(item.title) end)
+                            end,
+                        },
+                    },
+                    {
+                        {
+                            text = _("Cancel"),
+                            callback = function() UIManager:close(hold_dialog) end,
+                        },
+                    },
+                },
+            }
+            UIManager:show(hold_dialog)
+        end,
     }
     UIManager:show(requests_menu)
 end
