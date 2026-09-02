@@ -206,6 +206,27 @@ end
 -- then hand the same live connection back for LuaSocket to use normally --
 -- every other method (send/receive/close/settimeout/...) just delegates
 -- straight through to the real socket.
+-- LuaSocket's send() can do a partial write and returns how many bytes
+-- actually went out (or nil, err, last_byte_sent on a partial failure) --
+-- it's the caller's job to loop until everything is sent. The SOCKS5
+-- handshake bytes are short, but not sending this loop is exactly the kind
+-- of bug that only shows up against a real socket, never a mock that just
+-- assumes a bare send() always succeeds in full.
+local function sendAll(sock, data)
+    local start = 1
+    while start <= #data do
+        local sent, err, last = sock:send(data, start)
+        if sent then
+            start = sent + 1
+        elseif last then
+            start = last + 1
+        else
+            return nil, err
+        end
+    end
+    return true
+end
+
 local function makeSocks5Socket(proxy_host, proxy_port)
     local real = socket.tcp()
     local wrapper = {}
@@ -215,7 +236,8 @@ local function makeSocks5Socket(proxy_host, proxy_port)
         if not ok then return nil, "socks5 proxy unreachable: " .. tostring(err) end
 
         -- Greeting: version 5, 1 auth method offered, method 0 = no-auth.
-        real:send("\5\1\0")
+        local send_ok, send_err = sendAll(real, "\5\1\0")
+        if not send_ok then return nil, "socks5 greeting send failed: " .. tostring(send_err) end
         local greet, greet_err = real:receive(2)
         if not greet or #greet < 2 then
             return nil, "socks5 greeting failed: " .. tostring(greet_err)
@@ -238,7 +260,8 @@ local function makeSocks5Socket(proxy_host, proxy_port)
             addr_bytes = string.char(#dest_host) .. dest_host
         end
         local port_bytes = string.char(math.floor(dest_port / 256) % 256, dest_port % 256)
-        real:send(string.char(5, 1, 0, atyp) .. addr_bytes .. port_bytes)
+        local conn_send_ok, conn_send_err = sendAll(real, string.char(5, 1, 0, atyp) .. addr_bytes .. port_bytes)
+        if not conn_send_ok then return nil, "socks5 connect-request send failed: " .. tostring(conn_send_err) end
 
         -- Reply: version, reply code, reserved, bound-address type (4 bytes
         -- fixed header), then a variable-length bound address to discard.
