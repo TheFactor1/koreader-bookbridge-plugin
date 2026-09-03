@@ -1987,14 +1987,6 @@ function Shelfmark:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("My Hardcover lists"),
-                keep_menu_open = true,
-                callback = function()
-                    local Trapper = require("ui/trapper")
-                    Trapper:wrap(function() self:browseHardcoverLists() end)
-                end,
-            },
-            {
                 text = _("My requests"),
                 keep_menu_open = true,
                 callback = function()
@@ -2144,71 +2136,13 @@ end
 -- Hardcover/Typesense treats it as match-everything -- confirmed live
 -- against the real server: query=*&sort=popularity returns exactly the
 -- global top-users_count books (1984, Project Hail Mary, Harry Potter,
--- Dune, ...), not an error. (Both "Most popular" and "My Hardcover lists"
--- are now direct entries in the main menu -- see addToMainMenu -- rather
--- than living behind a separate "Discover" submenu.)
-
--- Hardcover's own curated lists for whichever account Shelfmark's
--- HARDCOVER_API_KEY is configured with (Want to Read / Currently Reading /
--- Read / Did Not Finish, plus any of that account's own named lists) --
--- this is Shelfmark's "Browse a list..." advanced search field
--- (hardcover_list), surfaced here directly since this plugin has no
--- general advanced-search UI to put it behind. Confirmed live:
--- /api/metadata/field-options?provider=hardcover&field=hardcover_list
--- returns {group=, label=, value=} entries -- value is what gets sent
--- back as the hardcover_list field to actually run the browse.
-function Shelfmark:browseHardcoverLists()
-    local resp, code, err = self:apiRequest(
-        "GET", "/api/metadata/field-options?provider=hardcover&field=hardcover_list",
-        nil, _("Loading lists...")
-    )
-    if err then
-        UIManager:show(InfoMessage:new{ text = err })
-        return
-    end
-    if code ~= 200 or not resp or not resp.options then
-        UIManager:show(InfoMessage:new{ text = _("Couldn't load Hardcover lists.") })
-        return
-    end
-    if #resp.options == 0 then
-        UIManager:show(InfoMessage:new{ text = _("No lists found for the configured Hardcover account.") })
-        return
-    end
-
-    local item_table = {}
-    for i, opt in ipairs(resp.options) do
-        item_table[i] = {
-            text = opt.label or opt.value,
-            mandatory = opt.group,
-            list_value = opt.value,
-            list_label = opt.label,
-        }
-    end
-
-    local lists_menu
-    lists_menu = Menu:new{
-        title = _("My Hardcover Lists"),
-        item_table = item_table,
-        multilines_forced = true,
-        covers_fullscreen = true,
-        is_borderless = true,
-        is_popout = false,
-        title_bar_fm_style = true,
-        onMenuSelect = function(_menu_self, item)
-            UIManager:close(lists_menu)
-            local Trapper = require("ui/trapper")
-            Trapper:wrap(function()
-                self:doSearch({
-                    fields = { hardcover_list = item.list_value },
-                    page = 1,
-                    limit = 30,
-                    title_override = item.list_label,
-                })
-            end)
-        end,
-    }
-    UIManager:show(lists_menu)
-end
+-- Dune, ...), not an error. ("Most popular" is a direct entry in the main
+-- menu -- see addToMainMenu -- rather than living behind a separate
+-- "Discover" submenu. There used to be a "My Hardcover lists" entry here
+-- too, browsing the connected account's own curated lists -- dropped by
+-- explicit request, since Shelfmark's connected Hardcover account is the
+-- device owner's personal one, shared as the metadata source for both
+-- Kindles.)
 
 local function describeAuthor(book)
     if book.authors and #book.authors > 0 then
@@ -2269,14 +2203,14 @@ local function describeBook(book)
 end
 
 -- params: {query=, author=, page=, limit=, fields=, title_override=}. fields
--- is an optional {key=value} table of Hardcover's own advanced search fields
--- (currently only hardcover_list -- see addToMainMenu's "My Hardcover
--- lists") sent alongside/instead of query. limit defaults to 100; the
--- Discover-originated callers in addToMainMenu/browseHardcoverLists pass 30
--- instead, to cut down how much there is to scroll through before reaching
--- a release -- see the note there on why that exposure window matters.
--- existing_books, when given, is the accumulated result list so far (used
--- by "Load more" to append rather than replace).
+-- is an optional {key=value} table of Hardcover's own advanced search
+-- fields (e.g. hardcover_list) sent alongside/instead of query -- currently
+-- unused by any caller in this file, kept as general-purpose plumbing.
+-- limit defaults to 100; the Discover-originated "Most popular" caller in
+-- addToMainMenu passes 30 instead, to cut down how much there is to scroll
+-- through before reaching a release -- see the note there on why that
+-- exposure window matters. existing_books, when given, is the accumulated
+-- result list so far (used by "Load more" to append rather than replace).
 function Shelfmark:doSearch(params, existing_books)
     UIManager:show(InfoMessage:new{ text = _("Searching..."), timeout = 1 })
 
