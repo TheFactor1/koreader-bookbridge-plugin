@@ -1645,10 +1645,34 @@ function Shelfmark:addToMainMenu(menu_items)
                 keep_menu_open = true,
                 callback = function() self:startSearch() end,
             },
+            -- Two direct entries instead of a "Discover" submenu that just
+            -- led to these same two choices -- cuts one menu hop (open,
+            -- render, close) off every Discover-originated flow. This
+            -- matters because of a confirmed live bug: the confirmation
+            -- dialog after tapping an NZB release can get silently stomped
+            -- by a third-party home-screen plugin's own periodic UI
+            -- refresh, and how often that race is actually lost tracks with
+            -- how much wall-clock time/menu traffic elapses before the
+            -- dialog tries to show -- Discover's extra submenu hop plus its
+            -- much larger default result list (see the limit=30 below) gave
+            -- it meaningfully more exposure than typed search ever had.
             {
-                text = _("Discover"),
+                text = _("Most popular"),
                 keep_menu_open = true,
-                callback = function() self:showDiscover() end,
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        self:doSearch({ query = "*", page = 1, limit = 30, title_override = _("Most Popular") })
+                    end)
+                end,
+            },
+            {
+                text = _("My Hardcover lists"),
+                keep_menu_open = true,
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function() self:browseHardcoverLists() end)
+                end,
             },
             {
                 text = _("My requests"),
@@ -1800,35 +1824,9 @@ end
 -- Hardcover/Typesense treats it as match-everything -- confirmed live
 -- against the real server: query=*&sort=popularity returns exactly the
 -- global top-users_count books (1984, Project Hail Mary, Harry Potter,
--- Dune, ...), not an error.
-function Shelfmark:showDiscover()
-    local item_table = {
-        { text = _("Most Popular"), action = "popular" },
-        { text = _("My Hardcover Lists"), action = "lists" },
-    }
-    local discover_menu
-    discover_menu = Menu:new{
-        title = _("Discover"),
-        item_table = item_table,
-        multilines_forced = true,
-        covers_fullscreen = true,
-        is_borderless = true,
-        is_popout = false,
-        title_bar_fm_style = true,
-        onMenuSelect = function(_menu_self, item)
-            UIManager:close(discover_menu)
-            local Trapper = require("ui/trapper")
-            if item.action == "popular" then
-                Trapper:wrap(function()
-                    self:doSearch({ query = "*", page = 1, title_override = _("Most Popular") })
-                end)
-            elseif item.action == "lists" then
-                Trapper:wrap(function() self:browseHardcoverLists() end)
-            end
-        end,
-    }
-    UIManager:show(discover_menu)
-end
+-- Dune, ...), not an error. (Both "Most popular" and "My Hardcover lists"
+-- are now direct entries in the main menu -- see addToMainMenu -- rather
+-- than living behind a separate "Discover" submenu.)
 
 -- Hardcover's own curated lists for whichever account Shelfmark's
 -- HARDCOVER_API_KEY is configured with (Want to Read / Currently Reading /
@@ -1883,6 +1881,7 @@ function Shelfmark:browseHardcoverLists()
                 self:doSearch({
                     fields = { hardcover_list = item.list_value },
                     page = 1,
+                    limit = 30,
                     title_override = item.list_label,
                 })
             end)
@@ -1949,15 +1948,19 @@ local function describeBook(book)
     return text
 end
 
--- params: {query=, author=, page=, fields=, title_override=}. fields is an
--- optional {key=value} table of Hardcover's own advanced search fields
--- (currently only hardcover_list -- see showDiscover) sent alongside/
--- instead of query. existing_books, when given, is the accumulated
--- result list so far (used by "Load more" to append rather than replace).
+-- params: {query=, author=, page=, limit=, fields=, title_override=}. fields
+-- is an optional {key=value} table of Hardcover's own advanced search fields
+-- (currently only hardcover_list -- see addToMainMenu's "My Hardcover
+-- lists") sent alongside/instead of query. limit defaults to 100; the
+-- Discover-originated callers in addToMainMenu/browseHardcoverLists pass 30
+-- instead, to cut down how much there is to scroll through before reaching
+-- a release -- see the note there on why that exposure window matters.
+-- existing_books, when given, is the accumulated result list so far (used
+-- by "Load more" to append rather than replace).
 function Shelfmark:doSearch(params, existing_books)
     UIManager:show(InfoMessage:new{ text = _("Searching..."), timeout = 1 })
 
-    local qs = { "limit=100", "sort=popularity", "page=" .. tostring(params.page or 1) }
+    local qs = { "limit=" .. tostring(params.limit or 100), "sort=popularity", "page=" .. tostring(params.page or 1) }
     if params.query and params.query ~= "" then
         table.insert(qs, "query=" .. socketurl.escape(params.query))
     end
@@ -2036,6 +2039,7 @@ function Shelfmark:doSearch(params, existing_books)
                         query = params.query,
                         author = params.author,
                         fields = params.fields,
+                        limit = params.limit,
                         title_override = params.title_override,
                         page = (params.page or 1) + 1,
                     }, books)
