@@ -83,12 +83,13 @@ function Shelfmark:loadSettings()
     self.pairing_relay_url = self.sm_settings.data.shelfmark.pairing_relay_url
     -- The annas-archive-api companion service (github.com/bitesized/
     -- annas-archive-api) -- see the note above doAnnasSearch for why this
-    -- exists alongside Shelfmark's own direct_download integration.
-    -- Defaults match what's already deployed; no dedicated settings-dialog
-    -- UI for these yet (edit settings/shelfmark.lua directly if they ever
-    -- need to change) -- same treatment as pairing_relay_url above.
-    self.annas_url = self.sm_settings.data.shelfmark.annas_url or "http://REDACTED_TAILSCALE_IP:8087"
-    self.annas_download_key = self.sm_settings.data.shelfmark.annas_download_key or "REDACTED_AA_DONATOR_KEY"
+    -- exists alongside Shelfmark's own direct_download integration. No
+    -- hardcoded default here on purpose: this used to fall back to a real
+    -- URL/donator key baked into the source, which meant they sat in
+    -- plain text in every clone of this (once-private) repo -- see
+    -- editAnnasSettings below for where these are actually configured now.
+    self.annas_url = self.sm_settings.data.shelfmark.annas_url
+    self.annas_download_key = self.sm_settings.data.shelfmark.annas_download_key
     self.annas_tld = self.sm_settings.data.shelfmark.annas_tld or "gd"
 end
 
@@ -200,6 +201,41 @@ function Shelfmark:editCwaSettings()
     }
     UIManager:show(self.cwa_settings_dialog)
     self.cwa_settings_dialog:onShowKeyboard()
+end
+
+function Shelfmark:editAnnasSettings()
+    self.annas_settings_dialog = MultiInputDialog:new{
+        title = _("Anna's Archive settings"),
+        fields = {
+            { text = self.annas_url, hint = _("annas-archive-api URL, e.g. http://host:8087") },
+            { text = self.annas_download_key, text_type = "password", hint = _("Donator download key (optional)") },
+            { text = self.annas_tld, hint = _("Mirror TLD, e.g. gd (leave blank for default)") },
+        },
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.annas_settings_dialog)
+                    end,
+                },
+                {
+                    text = _("Apply"),
+                    callback = function()
+                        local fields = self.annas_settings_dialog:getFields()
+                        self.annas_url = fields[1] ~= "" and fields[1]:gsub("/*$", "") or nil
+                        self.annas_download_key = fields[2] ~= "" and fields[2] or nil
+                        self.annas_tld = fields[3] ~= "" and fields[3] or "gd"
+                        UIManager:close(self.annas_settings_dialog)
+                        self:saveAllSettings(_("Saved."))
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.annas_settings_dialog)
+    self.annas_settings_dialog:onShowKeyboard()
 end
 
 -- Folder picker for the tap-to-download save location, in place of typing
@@ -2189,6 +2225,11 @@ function Shelfmark:addToMainMenu(menu_items)
                         text = _("CWA settings"),
                         keep_menu_open = true,
                         callback = function() self:editCwaSettings() end,
+                    },
+                    {
+                        text = _("Anna's Archive settings"),
+                        keep_menu_open = true,
+                        callback = function() self:editAnnasSettings() end,
                     },
                     {
                         text_func = function()
