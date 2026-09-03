@@ -1017,6 +1017,28 @@ local SYNC_STOPWORDS = { the = true, a = true, an = true, of = true, ["and"] = t
 local function normalizeTitleWords(text)
     if not text then return {} end
     text = text:lower():gsub("%(z%-library%)", "")
+    -- CWA's own metadata enrichment routinely appends a trailing
+    -- parenthetical -- "(Red Rising Series Book 2)", "(Book 3)", etc --
+    -- that the original, pre-import filename never had and never could
+    -- have predicted. Left in, title_words picks up "red"/"rising"/
+    -- "series"/"book"/"2" that titleWordsSubsetOf then requires the
+    -- filename to also contain, which it never will. Confirmed live: this
+    -- made doSyncLibrary fail to recognize an already-uploaded book on
+    -- every subsequent run, silently re-uploading a genuine duplicate into
+    -- CWA each time (caught via CWA's own ingest logs: three separate
+    -- "Golden Son" uploads over two days, the moment CWA had enriched the
+    -- catalog title to "Golden Son (Red Rising Series Book 2)"). Stripped
+    -- repeatedly (in case of more than one trailing group) before
+    -- tokenizing, so both sides of the comparison see the same bare title
+    -- either way. Only trims a *trailing* group -- doesn't touch
+    -- parenthetical content in the middle of a title, which is far more
+    -- likely to be meaningfully title-distinguishing rather than
+    -- CWA-added series/edition context.
+    while true do
+        local stripped = text:gsub("%s*%b()%s*$", " ")
+        if stripped == text then break end
+        text = stripped
+    end
     text = text:gsub("[^%w]+", " ")
     local words = {}
     for w in text:gmatch("%S+") do
