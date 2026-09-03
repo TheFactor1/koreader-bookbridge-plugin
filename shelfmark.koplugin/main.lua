@@ -1919,7 +1919,7 @@ local function describeYear(book)
 end
 
 local function describeBook(book)
-    local text = book.title or _("Untitled")
+    local text = truncate(book.title, 90) or _("Untitled")
     local author = describeAuthor(book)
     if author ~= "" then
         text = text .. "\n" .. author
@@ -2274,8 +2274,17 @@ end
 
 function Shelfmark:confirmReleaseRequest(book, release)
     local ConfirmBox = require("ui/widget/confirmbox")
+    -- truncate() here, not just in the release list -- raw Prowlarr/scene
+    -- release filenames run 100-150+ chars (quality/codec tags, group
+    -- names), and this ConfirmBox was the one place in the file still
+    -- passing that text through unclipped. Matches the exact symptom
+    -- reported live: the UI disappearing right after tapping a release,
+    -- no error in either log -- consistent with the native, untraceable
+    -- crash already confirmed earlier this session to correlate with long
+    -- text into certain widgets, not a Lua-level exception this file's
+    -- own logging could ever have caught.
     UIManager:show(ConfirmBox:new{
-        text = (release.title or _("This release")) .. "\n\n" .. _("Request this release?"),
+        text = (truncate(release.title, 90) or _("This release")) .. "\n\n" .. _("Request this release?"),
         ok_text = _("Request"),
         ok_callback = function()
             local Trapper = require("ui/trapper")
