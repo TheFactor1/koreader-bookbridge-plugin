@@ -313,6 +313,23 @@ end
 -- user can read without ADB set up), so writing directly to a file both
 -- of us can inspect is the only debug channel actually available here.
 -- Appends across sessions; delete the file to clear it.
+-- Bumped by hand on any release tagged in the repo -- there's no build
+-- step to derive this from git, so it has to be kept in sync manually
+-- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
+-- for tag "v0.3.0").
+local PLUGIN_VERSION = "0.3.0"
+local UPDATE_REPO = "TheFactor1/koreader-shelfmark-plugin"
+
+-- This file's own directory on disk, derived from the currently-executing
+-- chunk's source rather than hardcoded -- kindle and kindle-pw don't
+-- actually install to the same absolute path in every case, and this is
+-- also how the self-update code below finds where to write the files it
+-- downloads.
+local function getPluginDir()
+    local src = debug.getinfo(1, "S").source:gsub("^@", "")
+    return src:match("^(.*)/[^/]+$") or "."
+end
+
 local DEBUG_LOG_PATH = DataStorage:getSettingsDir() .. "/shelfmark-debug.log"
 local function debugLog(msg)
     local ok, f = pcall(io.open, DEBUG_LOG_PATH, "a")
@@ -855,38 +872,146 @@ end
 -- rather than http.request: these URLs are always https://, and plain
 -- socket.http can't speak TLS at all -- confirmed necessary building the
 -- companion koplugin (annasarchive.koplugin), which hit exactly this.
-local function doAnnasFileDownload(download_url, save_path)
+-- Shared by doAnnasFileDownload below and the self-update downloader
+-- further down -- neither the Anna's Archive mirrors nor GitHub's raw
+-- content host need the SOCKS5 proxy (both are reached over plain public
+-- HTTPS, unlike the Tailscale-only Shelfmark/CWA/annas-archive-api calls
+-- elsewhere in this file).
+local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, total_timeout)
     local file, ferr = io.open(save_path, "wb")
     if not file then
         return nil, nil, _("Couldn't open file for writing: ") .. tostring(ferr)
     end
-    debugLog("[annas] -> GET " .. download_url .. " (downloading to " .. save_path .. ")")
+    debugLog(log_prefix .. " -> GET " .. url .. " (downloading to " .. save_path .. ")")
 
-    socketutil:set_timeout(15, 60)
+    socketutil:set_timeout(block_timeout or 15, total_timeout or 60)
     local sink = socketutil.file_sink(file)
-    local requester = download_url:match("^https:") and https or http
+    local requester = url:match("^https:") and https or http
     local ok, code = pcall(function()
-        return socket.skip(1, requester.request{ method = "GET", url = download_url, sink = sink })
+        return socket.skip(1, requester.request{ method = "GET", url = url, sink = sink })
     end)
     socketutil:reset_timeout()
 
     if not ok then
         os.remove(save_path)
-        debugLog("[annas] <- connection error: " .. tostring(code))
-        return nil, nil, _("Couldn't reach Anna's Archive's file mirror.")
+        debugLog(log_prefix .. " <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the file server.")
     end
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
         os.remove(save_path)
-        debugLog("[annas] <- timed out: " .. tostring(code))
-        return nil, nil, _("Download from Anna's Archive timed out.")
+        debugLog(log_prefix .. " <- timed out: " .. tostring(code))
+        return nil, nil, _("Download timed out.")
     end
     if type(code) ~= "number" or code >= 400 then
         os.remove(save_path)
-        debugLog("[annas] <- HTTP " .. tostring(code) .. ", removed partial file")
+        debugLog(log_prefix .. " <- HTTP " .. tostring(code) .. ", removed partial file")
         return nil, code, T(_("Download failed (HTTP %1)."), tostring(code))
     end
-    debugLog("[annas] <- HTTP " .. tostring(code) .. " saved to " .. save_path)
+    debugLog(log_prefix .. " <- HTTP " .. tostring(code) .. " saved to " .. save_path)
     return true, code
+end
+
+local function doAnnasFileDownload(download_url, save_path)
+    local ok, code, err = doHttpDownloadToFile(download_url, save_path, "[annas]", 15, 60)
+    if not ok and err then
+        -- Keep the Anna's-Archive-specific wording this call already had
+        -- rather than the generic fallback text.
+        if err == _("Couldn't reach the file server.") then
+            err = _("Couldn't reach Anna's Archive's file mirror.")
+        elseif err == _("Download timed out.") then
+            err = _("Download from Anna's Archive timed out.")
+        end
+    end
+    return ok, code, err
+end
+
+-- ===== self-update check (GitHub releases) =====
+
+local function isNewerVersion(remote_version, local_version)
+    local function parts(v)
+        local t = {}
+        for n in tostring(v):gsub("^v", ""):gmatch("%d+") do t[#t + 1] = tonumber(n) end
+        return t
+    end
+    local r, l = parts(remote_version), parts(local_version)
+    for i = 1, math.max(#r, #l) do
+        local rv, lv = r[i] or 0, l[i] or 0
+        if rv ~= lv then return rv > lv end
+    end
+    return false
+end
+
+local function doCheckForUpdate()
+    local url = "https://api.github.com/repos/" .. UPDATE_REPO .. "/releases/latest"
+    debugLog("[update] -> GET " .. url)
+
+    socketutil:set_timeout(15, 30)
+    local sink, sink_table = socketutil.table_sink()
+    local ok, code = pcall(function()
+        return socket.skip(1, https.request{
+            method = "GET",
+            url = url,
+            headers = {
+                ["User-Agent"] = "shelfmark.koplugin",
+                ["Accept"] = "application/vnd.github+json",
+            },
+            sink = sink,
+        })
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        debugLog("[update] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach GitHub to check for updates.")
+    end
+    local content = table.concat(sink_table)
+    if type(code) ~= "number" or code >= 400 then
+        debugLog("[update] <- HTTP " .. tostring(code))
+        return nil, code, T(_("GitHub returned HTTP %1."), tostring(code))
+    end
+    local decode_ok, decoded = pcall(JSON.decode, content)
+    if not decode_ok or type(decoded) ~= "table" or type(decoded.tag_name) ~= "string" then
+        debugLog("[update] <- couldn't parse response")
+        return nil, code, _("Couldn't parse GitHub's response.")
+    end
+    return stripJsonNull(decoded), code
+end
+
+-- Downloads the tagged release's main.lua/_meta.lua to temp files first,
+-- sanity-checks that main.lua actually parses (loadfile compiles without
+-- executing), and only then swaps them over the live files -- a bad
+-- download or a truncated file this way can never leave the plugin
+-- unable to load on next start, worst case the update is just silently
+-- not applied.
+local function doApplyUpdate(tag)
+    local plugin_dir = getPluginDir()
+    local base = "https://raw.githubusercontent.com/" .. UPDATE_REPO .. "/" .. tag .. "/shelfmark.koplugin/"
+    local files = { "main.lua", "_meta.lua" }
+    local tmp_paths = {}
+
+    for idx = 1, #files do
+        local fname = files[idx]
+        local tmp_path = plugin_dir .. "/" .. fname .. ".update-tmp"
+        local ok, _dl_code, dl_err = doHttpDownloadToFile(base .. fname, tmp_path, "[update]", 15, 45)
+        if not ok then
+            for j = 1, #tmp_paths do os.remove(tmp_paths[j]) end
+            return nil, dl_err or T(_("Couldn't download %1."), fname)
+        end
+        tmp_paths[#tmp_paths + 1] = tmp_path
+    end
+
+    local chunk, load_err = loadfile(plugin_dir .. "/main.lua.update-tmp")
+    if not chunk then
+        for j = 1, #tmp_paths do os.remove(tmp_paths[j]) end
+        return nil, _("Downloaded update failed to parse, not installed: ") .. tostring(load_err)
+    end
+
+    for idx = 1, #files do
+        local fname = files[idx]
+        os.rename(plugin_dir .. "/" .. fname .. ".update-tmp", plugin_dir .. "/" .. fname)
+    end
+    debugLog("[update] <- installed " .. tag .. " to " .. plugin_dir)
+    return true
 end
 
 -- ===== CWA library sync (device -> CWA, no SSH/homeserver script) =====
@@ -1628,6 +1753,55 @@ function Shelfmark:syncLibrary()
     })
 end
 
+-- Mirrors syncLibrary's Trapper-subprocess wrapping above.
+function Shelfmark:checkForUpdate()
+    local Trapper = require("ui/trapper")
+    local completed, info, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doCheckForUpdate()
+    end, _("Checking for updates..."))
+
+    if not completed then return end
+    if not info then
+        UIManager:show(InfoMessage:new{ text = err or T(_("Couldn't check for updates (HTTP %1)."), tostring(code)) })
+        return
+    end
+
+    local remote_version = info.tag_name
+    if not isNewerVersion(remote_version, PLUGIN_VERSION) then
+        UIManager:show(InfoMessage:new{ text = T(_("You're up to date (v%1)."), PLUGIN_VERSION) })
+        return
+    end
+
+    local ConfirmBox = require("ui/widget/confirmbox")
+    local notes = truncate((info.body or ""):gsub("\r\n", "\n"), 500)
+    local msg = T(_("%1 is available (you have v%2).\n\n%3"), tostring(info.name or remote_version), PLUGIN_VERSION, notes)
+    UIManager:show(ConfirmBox:new{
+        text = msg,
+        ok_text = _("Update"),
+        ok_callback = function()
+            local Trapper2 = require("ui/trapper")
+            Trapper2:wrap(function() self:applyUpdate(remote_version) end)
+        end,
+    })
+end
+
+function Shelfmark:applyUpdate(tag)
+    local Trapper = require("ui/trapper")
+    local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
+        return doApplyUpdate(tag)
+    end, _("Downloading update..."))
+
+    if not completed then return end
+    if not ok then
+        UIManager:show(InfoMessage:new{ text = err or _("Update failed.") })
+        return
+    end
+    UIManager:show(InfoMessage:new{
+        text = _("Updated. Restart KOReader for the new version to take effect."),
+        timeout = 6,
+    })
+end
+
 -- ===== device-to-device settings transfer (QR code / paste) =====
 
 -- Shared by showSetupQrCode/importSettingsFromText -- both need the
@@ -1995,42 +2169,61 @@ function Shelfmark:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Server settings"),
-                keep_menu_open = true,
-                callback = function() self:editServerSettings() end,
-            },
-            {
-                text = _("CWA settings"),
-                keep_menu_open = true,
-                callback = function() self:editCwaSettings() end,
-            },
-            {
-                text_func = function()
-                    return T(_("Download folder: %1"), self.download_dir or self:defaultDownloadDir())
-                end,
-                keep_menu_open = true,
-                callback = function() self:chooseDownloadDir() end,
-            },
-            {
                 text = _("Sync library with CWA"),
                 keep_menu_open = true,
+                separator = true,
                 callback = function() self:syncLibrary() end,
             },
+            -- Everything below is either one-time setup or rarely touched
+            -- day to day -- folded into one submenu so the top level stays
+            -- to the things actually used every session.
             {
-                text = _("Show setup QR code"),
-                keep_menu_open = true,
-                callback = function() self:showSetupQrCode() end,
-            },
-            {
-                text = _("Import settings from text"),
-                keep_menu_open = true,
-                callback = function() self:importSettingsFromText() end,
-            },
-            {
-                text = _("View debug log"),
-                keep_menu_open = true,
-                separator = true,
-                callback = function() self:showDebugLog() end,
+                text = _("Settings"),
+                sub_item_table = {
+                    {
+                        text = _("Server settings"),
+                        keep_menu_open = true,
+                        callback = function() self:editServerSettings() end,
+                    },
+                    {
+                        text = _("CWA settings"),
+                        keep_menu_open = true,
+                        callback = function() self:editCwaSettings() end,
+                    },
+                    {
+                        text_func = function()
+                            return T(_("Download folder: %1"), self.download_dir or self:defaultDownloadDir())
+                        end,
+                        keep_menu_open = true,
+                        callback = function() self:chooseDownloadDir() end,
+                    },
+                    {
+                        text = _("Show setup QR code"),
+                        keep_menu_open = true,
+                        callback = function() self:showSetupQrCode() end,
+                    },
+                    {
+                        text = _("Import settings from text"),
+                        keep_menu_open = true,
+                        separator = true,
+                        callback = function() self:importSettingsFromText() end,
+                    },
+                    {
+                        text_func = function()
+                            return T(_("Check for updates (v%1)"), PLUGIN_VERSION)
+                        end,
+                        keep_menu_open = true,
+                        callback = function()
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() self:checkForUpdate() end)
+                        end,
+                    },
+                    {
+                        text = _("View debug log"),
+                        keep_menu_open = true,
+                        callback = function() self:showDebugLog() end,
+                    },
+                },
             },
         },
     }
