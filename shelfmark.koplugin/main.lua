@@ -1204,7 +1204,24 @@ end
 -- crash -- there was no dialog, no error message, nothing on-screen.
 local function truncate(text, maxlen)
     if type(text) ~= "string" or #text <= maxlen then return text end
-    return text:sub(1, maxlen - 1) .. "…" -- raw UTF-8, not \u{} -- see bullet note above
+    -- Byte position, not character position -- back off while the byte
+    -- right after the cut is a UTF-8 continuation byte (0x80-0xBF) so a
+    -- multi-byte character never gets sliced in half. A cut mid-character
+    -- leaves a malformed trailing byte sequence right before the appended
+    -- "…", which is exactly the kind of malformed UTF-8 that has already
+    -- been confirmed (see the ConfirmBox note below) to cause a native,
+    -- untraceable crash rather than a catchable Lua error -- and explains
+    -- why this only ever showed up on Hardcover-sourced Discover results
+    -- (real bibliographic titles/author names, full of diacritics and
+    -- non-ASCII) and never on Prowlarr release titles (plain-ASCII scene
+    -- filenames).
+    local cut = maxlen - 1
+    while cut > 0 do
+        local b = text:byte(cut + 1)
+        if not b or b < 0x80 or b >= 0xC0 then break end
+        cut = cut - 1
+    end
+    return text:sub(1, cut) .. "…" -- raw UTF-8, not \u{} -- see bullet note above
 end
 
 -- Runs the whole request off the main UI thread via Trapper's subprocess
