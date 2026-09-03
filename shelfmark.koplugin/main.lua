@@ -2227,10 +2227,32 @@ function Shelfmark:browseReleases(book, manual_query)
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
             UIManager:close(releases_menu)
-            if item.is_custom_query then
-                self:promptCustomReleaseQuery(book, manual_query)
-            else
-                self:confirmReleaseRequest(book, item.release_data)
+            -- Reported live: tapping a release sometimes drops straight back
+            -- to the file-browser/home view with nothing in crash.log at all
+            -- -- and the process itself stays alive (confirmed: same PID
+            -- before and after), which rules out the native/untraceable
+            -- crash class already fixed elsewhere in this file (that one
+            -- takes the whole process down). This callback runs synchronously
+            -- on the main UI thread, outside any Trapper:wrap, so an error
+            -- here isn't even reaching Trapper's own swallow-and-warn --
+            -- something in KOReader's own event dispatch is eating it before
+            -- it hits crash.log. xpcall + debug.traceback is the one thing
+            -- that can still catch it *before* that happens, so this can
+            -- finally get a real traceback into shelfmark-debug.log (already
+            -- readable over SSH) next time this reproduces, instead of
+            -- silence.
+            local ok, err = xpcall(function()
+                if item.is_custom_query then
+                    self:promptCustomReleaseQuery(book, manual_query)
+                else
+                    self:confirmReleaseRequest(book, item.release_data)
+                end
+            end, debug.traceback)
+            if not ok then
+                debugLog("onMenuSelect (release) ERROR: " .. tostring(err))
+                UIManager:show(InfoMessage:new{
+                    text = _("Something went wrong opening that release. Details were logged."),
+                })
             end
         end,
     }
