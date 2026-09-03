@@ -2253,18 +2253,26 @@ function Shelfmark:doSearch(params, existing_books)
         -- Confirmed on-device: cramming metrics+byline into "mandatory"
         -- made that column wide enough to squeeze the title itself down
         -- to a handful of visible characters -- the exact opposite of
-        -- legible. Title needs its own full line; author/year go on a
-        -- second line underneath it (multilines_forced is already set),
-        -- and "mandatory" goes back to being short -- just the rating,
-        -- which is what was actually asked for as the at-a-glance signal.
+        -- legible. Title gets its own full line, author/year a second
+        -- (multilines_forced is already set) -- and by explicit request,
+        -- metrics now gets a full third line of its own instead of being
+        -- squeezed into "mandatory" and truncated to 20 chars: the rating
+        -- AND reader count both show in full now, not just whichever fit.
+        -- 140, not 80, for the title itself for the same reason -- the
+        -- vast majority of real titles fit outright, and the ones that
+        -- don't still get meaningfully more of themselves shown before
+        -- the truncate() ellipsis kicks in.
         local byline = describeAuthor(book) .. describeYear(book)
-        local title_text = truncate(book.title, 80) or _("Untitled")
+        local metrics = describeMetrics(book)
+        local title_text = truncate(book.title, 140) or _("Untitled")
         if byline ~= "" then
             title_text = title_text .. "\n" .. byline
         end
+        if metrics ~= "" then
+            title_text = title_text .. "\n" .. metrics
+        end
         item_table[i] = {
             text = title_text,
-            mandatory = truncate(describeMetrics(book), 20),
             book_data = book,
         }
     end
