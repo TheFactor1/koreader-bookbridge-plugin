@@ -791,7 +791,18 @@ local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
     if not decode_ok or not decoded or not decoded.results then
         return nil, code, _("Anna's Archive returned an unreadable response.")
     end
-    return decoded.results, code
+    -- stripJsonNull, not the raw decoded table -- see its own note above:
+    -- rapidjson's null sentinel is a function value, and LuaJIT's
+    -- string.buffer serializer refuses to cross a Trapper subprocess
+    -- boundary with any function/userdata/thread in the payload. Confirmed
+    -- live, the hard way: real search results (title/author/format/md5
+    -- all present, 20 of them, JSON-decodes and #'s correctly when tested
+    -- directly on-device) still came back as a flat nil on the parent
+    -- side, no error, nothing logged past this point -- exactly this
+    -- same "searching does not bring up anything" symptom the doRawRequest
+    -- version of this fix already documents. Some AA result almost
+    -- certainly had a null author/cover_url/downloads field.
+    return stripJsonNull(decoded.results), code
 end
 
 local function doAnnasFetchDownloadUrl(annas_url, download_key, tld, md5, socks5_proxy)
