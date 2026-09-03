@@ -1313,10 +1313,21 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
                 "/opds/search/" .. socketurl.escape(query), socks5_proxy)
             local matches = {}
+            -- Separate from #matches -- see below. CWA's search genuinely
+            -- returning nothing is the only case safe to treat as "not in
+            -- CWA yet"; a search that DID return entries, just none our
+            -- strict word-matcher trusted, is a different situation
+            -- entirely and was silently falling into the same "upload it"
+            -- branch as a real zero-result search -- confirmed live as the
+            -- actual cause of a genuine "Dune Messiah" duplicate: CWA's
+            -- search returned a real, non-empty response, the matcher just
+            -- didn't recognize it, and the old logic uploaded anyway.
+            local raw_entry_count = 0
             if resp_body and code == 200 then
                 local fname_words = normalizeTitleWords(fname)
                 local seen_uuids = {}
                 for _, e in ipairs(parseOpdsEntries(resp_body)) do
+                    raw_entry_count = raw_entry_count + 1
                     if e.uuid and not seen_uuids[e.uuid] then
                         if titleWordsSubsetOf(normalizeTitleWords(e.title), fname_words) then
                             table.insert(matches, e)
@@ -1337,6 +1348,15 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 local titles = {}
                 for _, m in ipairs(matches) do table.insert(titles, m.title) end
                 addLine(T(_("  [%1] matched more than one CWA book (%2) -- ambiguous, skipped."), fname, table.concat(titles, ", ")))
+            elseif raw_entry_count > 0 then
+                -- CWA's search found something for this query, just nothing
+                -- the strict word-matcher trusted as the same book -- safer
+                -- to leave it for a human to check than to risk a duplicate
+                -- upload. Not registered either, so it's re-checked (and
+                -- can self-resolve once a future fix improves the matcher)
+                -- on every subsequent sync rather than being silently
+                -- dropped forever.
+                addLine(T(_("  [%1] CWA search returned %2 result(s) for this query but none matched confidently -- skipped, check manually."), fname, tostring(raw_entry_count)))
             else
                 table.insert(to_upload, path)
             end
