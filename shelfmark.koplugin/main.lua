@@ -2263,29 +2263,17 @@ function Shelfmark:browseReleases(book, manual_query)
         is_popout = false,
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
-            -- First line, before anything else -- the xpcall below caught
-            -- nothing on the last reproduction despite the process staying
-            -- alive, which means either this callback never actually fires
-            -- for the tap that's disappearing the UI (a KOReader-level
-            -- gesture/hit-testing issue, not this file's code), or it fires
-            -- and something past the xpcall's own scope is at fault. This
-            -- line settles which, and logs the exact release text either way.
-            debugLog("onMenuSelect (release) fired, item=" .. tostring(item and item.text))
             UIManager:close(releases_menu)
-            -- Reported live: tapping a release sometimes drops straight back
-            -- to the file-browser/home view with nothing in crash.log at all
-            -- -- and the process itself stays alive (confirmed: same PID
-            -- before and after), which rules out the native/untraceable
-            -- crash class already fixed elsewhere in this file (that one
-            -- takes the whole process down). This callback runs synchronously
-            -- on the main UI thread, outside any Trapper:wrap, so an error
-            -- here isn't even reaching Trapper's own swallow-and-warn --
-            -- something in KOReader's own event dispatch is eating it before
-            -- it hits crash.log. xpcall + debug.traceback is the one thing
-            -- that can still catch it *before* that happens, so this can
-            -- finally get a real traceback into shelfmark-debug.log (already
-            -- readable over SSH) next time this reproduces, instead of
-            -- silence.
+            -- This callback runs synchronously on the main UI thread,
+            -- outside any Trapper:wrap, so an error here isn't even
+            -- reaching Trapper's own swallow-and-warn -- xpcall +
+            -- debug.traceback is what actually gets a real traceback into
+            -- shelfmark-debug.log if something ever does throw here,
+            -- instead of a silent drop back to the previous screen with
+            -- nothing in any log. (The actual root cause behind the
+            -- disappearing-UI reports turned out to be external -- see
+            -- showResilientConfirmBox -- but this stays as a genuine safety
+            -- net for anything that does throw a real Lua error here.)
             local ok, err = xpcall(function()
                 if item.is_custom_query then
                     self:promptCustomReleaseQuery(book, manual_query)
@@ -2298,18 +2286,6 @@ function Shelfmark:browseReleases(book, manual_query)
                 UIManager:show(InfoMessage:new{
                     text = _("Something went wrong opening that release. Details were logged."),
                 })
-            else
-                -- Brackets the entry log from last commit: if this line
-                -- shows up, confirmReleaseRequest's ConfirmBox:new/
-                -- UIManager:show calls both returned normally at the Lua
-                -- level, meaning the disappearing UI is happening somewhere
-                -- past this function entirely (e.g. in the actual paint/
-                -- repaint of the widget, or something unrelated to this
-                -- code path) -- not inside anything this file controls
-                -- directly. If it's MISSING despite the entry log being
-                -- present, execution never returned from the xpcall at all
-                -- (hung, or a crash xpcall itself couldn't intercept).
-                debugLog("onMenuSelect (release) xpcall returned ok")
             end
         end,
     }
@@ -2368,37 +2344,87 @@ local function withAuthorField(book)
     return book
 end
 
-function Shelfmark:confirmReleaseRequest(book, release)
+-- Confirmed live: something else on the device (a third-party home-screen
+-- plugin's own periodic UI refresh -- see the Discover exposure-window note
+-- above) can silently call UIManager:close() on Shelfmark's own confirmation
+-- dialog, with no Lua error and no crash.log entry anywhere -- the tap just
+-- appears to do nothing. UIManager:close() always fires onCloseWidget on
+-- whatever it's closing, no matter who called it, which is the one hook
+-- available to detect this: ok_callback/cancel_callback are wrapped to flag
+-- a legitimate dismissal first (ConfirmBox's own onClose/onTapClose --
+-- tap-outside-to-dismiss -- also call cancel_callback before closing, so
+-- those count as legitimate too), and an onCloseWidget firing *without*
+-- that flag set can only mean something else closed it directly. Re-shows
+-- the same dialog automatically (bounded, so this can't turn into an
+-- endless fight with whatever keeps closing it), and tells the user plainly
+-- if it still loses the race after that.
+function Shelfmark:showResilientConfirmBox(opts)
     local ConfirmBox = require("ui/widget/confirmbox")
+    local dismissed = false
+    local retries = 0
+    local MAX_RETRIES = 2
+    local user_ok = opts.ok_callback or function() end
+    local user_cancel = opts.cancel_callback or function() end
+
+    local confirm_box
+    confirm_box = ConfirmBox:new{
+        text = opts.text,
+        ok_text = opts.ok_text,
+        ok_callback = function()
+            dismissed = true
+            user_ok()
+        end,
+        cancel_callback = function()
+            dismissed = true
+            user_cancel()
+        end,
+    }
+    local base_on_close_widget = confirm_box.onCloseWidget
+    confirm_box.onCloseWidget = function(self_box)
+        base_on_close_widget(self_box)
+        if dismissed then return end
+        debugLog("showResilientConfirmBox: force-closed externally (retries=" .. retries .. "): "
+            .. tostring(opts.text):sub(1, 60))
+        if retries < MAX_RETRIES then
+            retries = retries + 1
+            UIManager:scheduleIn(0.2, function() UIManager:show(confirm_box) end)
+        else
+            UIManager:show(InfoMessage:new{
+                text = _("This dialog kept getting closed by something else on this device. Try again, or use Search instead of Discover."),
+            })
+        end
+    end
+    UIManager:show(confirm_box)
+    return confirm_box
+end
+
+function Shelfmark:confirmReleaseRequest(book, release)
     -- truncate() here, not just in the release list -- raw Prowlarr/scene
     -- release filenames run 100-150+ chars (quality/codec tags, group
     -- names), and this ConfirmBox was the one place in the file still
-    -- passing that text through unclipped. Matches the exact symptom
-    -- reported live: the UI disappearing right after tapping a release,
-    -- no error in either log -- consistent with the native, untraceable
-    -- crash already confirmed earlier this session to correlate with long
-    -- text into certain widgets, not a Lua-level exception this file's
-    -- own logging could ever have caught.
-    UIManager:show(ConfirmBox:new{
+    -- passing that text through unclipped. Matches part of the symptom
+    -- reported live (the UI disappearing right after tapping a release) --
+    -- the other part turned out to be the external-close issue
+    -- showResilientConfirmBox now handles above.
+    self:showResilientConfirmBox{
         text = (truncate(release.title, 90) or _("This release")) .. "\n\n" .. _("Request this release?"),
         ok_text = _("Request"),
         ok_callback = function()
             local Trapper = require("ui/trapper")
             Trapper:wrap(function() self:submitRequest(withAuthorField(book), release) end)
         end,
-    })
+    }
 end
 
 function Shelfmark:confirmBookLevelRequest(book)
-    local ConfirmBox = require("ui/widget/confirmbox")
-    UIManager:show(ConfirmBox:new{
+    self:showResilientConfirmBox{
         text = describeBook(book) .. "\n\n" .. _("Submit a plain request for this book (no specific release found)?"),
         ok_text = _("Request"),
         ok_callback = function()
             local Trapper = require("ui/trapper")
             Trapper:wrap(function() self:submitRequest(withAuthorField(book), nil) end)
         end,
-    })
+    }
 end
 
 -- release is optional: nil submits a book-level request (Shelfmark finds a
