@@ -1309,7 +1309,25 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- returns zero results even when the book is already in the
             -- catalog, which is what actually caused the fresh "Fourth
             -- Wing" duplicate this fixes.
-            local query = stripTrailingParenGroups(fname):gsub("[_%-%[%]%(%)]", " ")
+            local cleaned_fname = stripTrailingParenGroups(fname)
+            -- Search on the title alone, not "Title - Author" combined --
+            -- confirmed live: CWA's own OPDS search appears to AND across
+            -- every word in the query, and "Dune Messiah   Frank Herbert"
+            -- (title+author combined, this file's own convention for
+            -- z-library-sourced filenames) returned zero entries even
+            -- though "Dune Messiah" alone finds the book immediately --
+            -- caught the same way as the two fixes above, a genuine
+            -- "Dune Messiah" duplicate. The word-matching step below still
+            -- checks the FULL fname (title and author both) for precision,
+            -- so this only broadens the initial CWA search, not the actual
+            -- match decision -- a real different-book match still needs
+            -- the author to show up in its own title too, same as before.
+            -- Only splits on a *spaced* " - " (an author separator in
+            -- this convention); a hyphen with no surrounding spaces, as in
+            -- an actual hyphenated title word, is left alone.
+            local title_part = cleaned_fname:match("^(.-)%s+%-%s+")
+            local search_title = (title_part and title_part ~= "") and title_part or cleaned_fname
+            local query = search_title:gsub("[_%-%[%]%(%)]", " ")
             local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
                 "/opds/search/" .. socketurl.escape(query), socks5_proxy)
             local matches = {}
