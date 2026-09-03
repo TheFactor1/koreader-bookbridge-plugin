@@ -2137,6 +2137,27 @@ function Shelfmark:browseReleases(book, manual_query)
     -- so that's the actual signal used here: an exact book-title
     -- substring match plus an author-surname match scores highest.
     local book_author = describeAuthor(book)
+    -- Release titles that are ADAPTATIONS/COMPANIONS about a book, not the
+    -- book itself, routinely still contain the searched title and author as
+    -- a substring -- a radio dramatization or "making of" book both
+    -- legitimately mention the original work by name. Confirmed live:
+    -- searching "The Hitchhiker's Guide to the Galaxy" surfaced both "Don't
+    -- Panic" (Neil Gaiman's biography of Douglas Adams) and "...Further
+    -- Radio Scripts" (a BBC radio-drama script collection) scoring as high
+    -- as an actual copy of the novel. Two cheap, targeted signals catch
+    -- these without trying to solve the general problem: (1) a curated
+    -- keyword list of adaptation/companion markers, penalized rather than
+    -- excluded -- if it's genuinely all that's available it should still be
+    -- requestable; (2) the author bonus only counts when the surname
+    -- appears before the release's first " - " separator (the scene-release
+    -- "Author - Title" convention) -- "Don't Panic" credits Neil Gaiman
+    -- there and only mentions "Douglas Adams" afterward as the subject, not
+    -- the author of the release.
+    local ADAPTATION_KEYWORDS = {
+        "radio script", "radio drama", "screenplay", "teleplay",
+        "study guide", "book club guide", "cliffsnotes", "sparknotes",
+        "companion", "making of", "unauthorized biography",
+    }
     local function releaseRelevanceScore(release_title)
         if type(release_title) ~= "string" then return 0 end
         local rt = release_title:lower()
@@ -2146,8 +2167,20 @@ function Shelfmark:browseReleases(book, manual_query)
         end
         if book_author ~= "" then
             local surname = book_author:match("(%S+)%s*$")
-            if surname and #surname > 2 and rt:find(surname:lower(), 1, true) then
-                score = score + 50
+            if surname and #surname > 2 then
+                local surname_pos = rt:find(surname:lower(), 1, true)
+                if surname_pos then
+                    local sep_pos = rt:find(" - ", 1, true)
+                    if not sep_pos or surname_pos < sep_pos then
+                        score = score + 50
+                    end
+                end
+            end
+        end
+        for _, kw in ipairs(ADAPTATION_KEYWORDS) do
+            if rt:find(kw, 1, true) then
+                score = score - 200
+                break
             end
         end
         return score
