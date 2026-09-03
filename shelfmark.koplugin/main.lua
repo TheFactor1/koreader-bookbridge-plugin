@@ -2226,6 +2226,14 @@ function Shelfmark:browseReleases(book, manual_query)
         is_popout = false,
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
+            -- First line, before anything else -- the xpcall below caught
+            -- nothing on the last reproduction despite the process staying
+            -- alive, which means either this callback never actually fires
+            -- for the tap that's disappearing the UI (a KOReader-level
+            -- gesture/hit-testing issue, not this file's code), or it fires
+            -- and something past the xpcall's own scope is at fault. This
+            -- line settles which, and logs the exact release text either way.
+            debugLog("onMenuSelect (release) fired, item=" .. tostring(item and item.text))
             UIManager:close(releases_menu)
             -- Reported live: tapping a release sometimes drops straight back
             -- to the file-browser/home view with nothing in crash.log at all
