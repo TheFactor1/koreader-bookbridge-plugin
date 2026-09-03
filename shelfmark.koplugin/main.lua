@@ -26,6 +26,7 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
 local http = require("socket.http")
+local https = require("ssl.https")
 local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
 local logger = require("logger")
@@ -80,6 +81,15 @@ function Shelfmark:loadSettings()
     -- for lazily the first time either is used rather than living in one
     -- of the main settings dialogs, since it's a one-off/rare setting.
     self.pairing_relay_url = self.sm_settings.data.shelfmark.pairing_relay_url
+    -- The annas-archive-api companion service (github.com/bitesized/
+    -- annas-archive-api) -- see the note above doAnnasSearch for why this
+    -- exists alongside Shelfmark's own direct_download integration.
+    -- Defaults match what's already deployed; no dedicated settings-dialog
+    -- UI for these yet (edit settings/shelfmark.lua directly if they ever
+    -- need to change) -- same treatment as pairing_relay_url above.
+    self.annas_url = self.sm_settings.data.shelfmark.annas_url or "http://REDACTED_TAILSCALE_IP:8087"
+    self.annas_download_key = self.sm_settings.data.shelfmark.annas_download_key or "REDACTED_AA_DONATOR_KEY"
+    self.annas_tld = self.sm_settings.data.shelfmark.annas_tld or "gd"
 end
 
 function Shelfmark:defaultDownloadDir()
@@ -108,6 +118,9 @@ function Shelfmark:saveAllSettings(msg)
         cwa_password = self.cwa_password,
         download_dir = self.download_dir,
         pairing_relay_url = self.pairing_relay_url,
+        annas_url = self.annas_url,
+        annas_download_key = self.annas_download_key,
+        annas_tld = self.annas_tld,
     })
     self.sm_settings:flush()
     self.session_cookie = nil -- force re-login with new creds
@@ -477,7 +490,7 @@ local function makeSocks5Socket(proxy_host, proxy_port)
     return wrapper
 end
 
-local function doRawRequest(server_url, cookie, method, path, body, socks5_proxy)
+local function doRawRequest(server_url, cookie, method, path, body, socks5_proxy, block_timeout, total_timeout)
     if not server_url or server_url == "" then
         return nil, nil, cookie, _("Shelfmark server URL isn't set -- check Settings.")
     end
@@ -505,8 +518,19 @@ local function doRawRequest(server_url, cookie, method, path, body, socks5_proxy
     -- read; total_timeout bounds the whole request once data starts
     -- arriving (needs socketutil.table_sink, not plain ltn12.sink.table,
     -- to actually be honored -- see socketutil.lua's own comment on why
-    -- block_timeout alone is not enough).
-    socketutil:set_timeout(15, 45)
+    -- block_timeout alone is not enough). 15/45 is the default, right for
+    -- login/status/metadata-search calls (every one of those has
+    -- consistently finished in 1-10s in real use) -- but /api/releases can
+    -- legitimately run far longer than that: Shelfmark's own docs say a
+    -- release search that needs a fresh Anna's Archive bot-challenge solve
+    -- can take 60-120s on a cold cache, and its own server-side search
+    -- budget is 300s specifically to accommodate that. Confirmed live: a
+    -- real release search hit exactly this and got cut off by this
+    -- 45s default with "Request timed out" -- the server would likely have
+    -- answered fine given more room. browseReleases passes a longer
+    -- override; everything else keeps the tight default so a genuinely
+    -- dead connection on those still fails fast.
+    socketutil:set_timeout(block_timeout or 15, total_timeout or 45)
     local sink, sink_table = socketutil.table_sink()
 
     local request = {
@@ -575,7 +599,7 @@ end
 -- The full operation: log in first if we don't have a session yet, do the
 -- request, retry once on 401 in case the session expired mid-use. Returns
 -- (decoded_body, http_code, cookie_to_remember, error_string).
-local function doApiRequest(server_url, username, password, cookie, method, path, body, socks5_proxy)
+local function doApiRequest(server_url, username, password, cookie, method, path, body, socks5_proxy, block_timeout, total_timeout)
     if not cookie then
         if not username or username == "" then
             return nil, nil, nil, _("No Shelfmark username set -- check Settings.")
@@ -585,7 +609,7 @@ local function doApiRequest(server_url, username, password, cookie, method, path
         cookie = new_cookie
     end
 
-    local resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body, socks5_proxy)
+    local resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body, socks5_proxy, block_timeout, total_timeout)
     if err then return nil, nil, cookie, err end
     cookie = new_cookie
 
@@ -593,7 +617,7 @@ local function doApiRequest(server_url, username, password, cookie, method, path
         local ok, relog_cookie, login_err = doLogin(server_url, username, password, socks5_proxy)
         if not ok then return nil, nil, nil, login_err end
         cookie = relog_cookie
-        resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body, socks5_proxy)
+        resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body, socks5_proxy, block_timeout, total_timeout)
         if err then return nil, nil, cookie, err end
         cookie = new_cookie
     end
@@ -699,6 +723,151 @@ local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy
         return nil, nil, _("Download from CWA timed out.")
     end
     debugLog("[cwa] <- HTTP " .. tostring(code) .. " saved to " .. tostring(save_path))
+    return true, code
+end
+
+-- ===== Anna's Archive (via the annas-archive-api companion service) =====
+--
+-- A separate, self-hosted service (github.com/bitesized/annas-archive-api)
+-- -- not part of Shelfmark itself. Every request is authenticated with an
+-- Anna's Archive account secret key (never stored here, always passed
+-- per-request via the Authorization header), which Anna's Archive
+-- apparently doesn't challenge the way it challenges anonymous requests.
+-- Confirmed live: Shelfmark's own built-in direct_download integration
+-- needs a real headless-Chrome DDoS-guard solve on every single search
+-- (10-15s minimum, 60-120s+ on a cold cache per Shelfmark's own docs, and
+-- it got rate-limited by Anna's Archive during testing the same day this
+-- was found -- the actual cause of a real "Shelfmark request timeout"
+-- report) -- this path instead completed in 3-6s across every test.
+--
+-- Reached over the same Tailscale SOCKS5 proxy as Shelfmark/CWA (it's a
+-- Tailscale-only internal service, same constraint as those); the actual
+-- book/cover files that come out of it are Anna's Archive's own public
+-- mirror URLs, reached directly over the device's normal connection with
+-- no proxy involved at all -- same as how CWA-delivered files already
+-- work.
+
+local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
+    if not annas_url or annas_url == "" then
+        return nil, nil, _("Anna's Archive API URL isn't set.")
+    end
+    local url = annas_url .. "/api/search?query=" .. socketurl.escape(query)
+        .. "&limit=20&tld=" .. socketurl.escape(tld or "")
+    local headers = {}
+    if download_key and download_key ~= "" then
+        headers["authorization"] = "Bearer " .. download_key
+    end
+    debugLog("[annas] -> GET " .. url)
+
+    socketutil:set_timeout(10, 30)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "GET", url = url, headers = headers, sink = sink }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        debugLog("[annas] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the Anna's Archive service.")
+    end
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        debugLog("[annas] <- timed out: " .. tostring(code))
+        return nil, nil, _("Anna's Archive search timed out.")
+    end
+    local body = table.concat(sink_table)
+    debugLog("[annas] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#body))
+    if code ~= 200 then
+        return nil, code, T(_("Anna's Archive search failed (HTTP %1)."), tostring(code))
+    end
+    local decode_ok, decoded = pcall(JSON.decode, body)
+    if not decode_ok or not decoded or not decoded.results then
+        return nil, code, _("Anna's Archive returned an unreadable response.")
+    end
+    return decoded.results, code
+end
+
+local function doAnnasFetchDownloadUrl(annas_url, download_key, tld, md5, socks5_proxy)
+    local url = annas_url .. "/api/download?md5=" .. socketurl.escape(md5)
+        .. "&tld=" .. socketurl.escape(tld or "")
+    local headers = { ["authorization"] = "Bearer " .. (download_key or "") }
+    debugLog("[annas] -> GET " .. url)
+
+    socketutil:set_timeout(10, 30)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "GET", url = url, headers = headers, sink = sink }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        debugLog("[annas] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the Anna's Archive service.")
+    end
+    local body = table.concat(sink_table)
+    debugLog("[annas] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#body))
+    if code ~= 200 then
+        local d_ok, d = pcall(JSON.decode, body)
+        return nil, code, (d_ok and d and d.error) or T(_("Fetching the download link failed (HTTP %1)."), tostring(code))
+    end
+    local decode_ok, decoded = pcall(JSON.decode, body)
+    if not decode_ok then return nil, code, _("Unreadable response fetching the download link.") end
+    local dl_url = decoded.download_url or decoded.url
+    if not dl_url then return nil, code, _("No download URL in response.") end
+    return dl_url, code
+end
+
+-- No socks5_proxy param -- this is a direct request to a public-internet
+-- destination (Anna's Archive's own file mirror), not the Tailscale-only
+-- annas-archive-api service the two functions above talk to. https.request
+-- rather than http.request: these URLs are always https://, and plain
+-- socket.http can't speak TLS at all -- confirmed necessary building the
+-- companion koplugin (annasarchive.koplugin), which hit exactly this.
+local function doAnnasFileDownload(download_url, save_path)
+    local file, ferr = io.open(save_path, "wb")
+    if not file then
+        return nil, nil, _("Couldn't open file for writing: ") .. tostring(ferr)
+    end
+    debugLog("[annas] -> GET " .. download_url .. " (downloading to " .. save_path .. ")")
+
+    socketutil:set_timeout(15, 60)
+    local sink = socketutil.file_sink(file)
+    local requester = download_url:match("^https:") and https or http
+    local ok, code = pcall(function()
+        return socket.skip(1, requester.request{ method = "GET", url = download_url, sink = sink })
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        os.remove(save_path)
+        debugLog("[annas] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach Anna's Archive's file mirror.")
+    end
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        os.remove(save_path)
+        debugLog("[annas] <- timed out: " .. tostring(code))
+        return nil, nil, _("Download from Anna's Archive timed out.")
+    end
+    if type(code) ~= "number" or code >= 400 then
+        os.remove(save_path)
+        debugLog("[annas] <- HTTP " .. tostring(code) .. ", removed partial file")
+        return nil, code, T(_("Download failed (HTTP %1)."), tostring(code))
+    end
+    debugLog("[annas] <- HTTP " .. tostring(code) .. " saved to " .. save_path)
     return true, code
 end
 
@@ -1014,31 +1183,34 @@ end
 
 local SYNC_STOPWORDS = { the = true, a = true, an = true, of = true, ["and"] = true, novel = true }
 
-local function normalizeTitleWords(text)
-    if not text then return {} end
-    text = text:lower():gsub("%(z%-library%)", "")
-    -- CWA's own metadata enrichment routinely appends a trailing
-    -- parenthetical -- "(Red Rising Series Book 2)", "(Book 3)", etc --
-    -- that the original, pre-import filename never had and never could
-    -- have predicted. Left in, title_words picks up "red"/"rising"/
-    -- "series"/"book"/"2" that titleWordsSubsetOf then requires the
-    -- filename to also contain, which it never will. Confirmed live: this
-    -- made doSyncLibrary fail to recognize an already-uploaded book on
-    -- every subsequent run, silently re-uploading a genuine duplicate into
-    -- CWA each time (caught via CWA's own ingest logs: three separate
-    -- "Golden Son" uploads over two days, the moment CWA had enriched the
-    -- catalog title to "Golden Son (Red Rising Series Book 2)"). Stripped
-    -- repeatedly (in case of more than one trailing group) before
-    -- tokenizing, so both sides of the comparison see the same bare title
-    -- either way. Only trims a *trailing* group -- doesn't touch
-    -- parenthetical content in the middle of a title, which is far more
-    -- likely to be meaningfully title-distinguishing rather than
-    -- CWA-added series/edition context.
+-- Repeatedly strips a *trailing* "(...)" group -- never content in the
+-- middle of a title, which is far more likely to be meaningfully
+-- title-distinguishing rather than noise. Two independent, confirmed-live
+-- reasons this exists: (1) CWA's own metadata enrichment routinely appends
+-- a trailing parenthetical -- "(Red Rising Series Book 2)", "(Book 3)",
+-- etc -- that the original, pre-import filename never had and never could
+-- have predicted, which broke titleWordsSubsetOf's match and caused
+-- doSyncLibrary to silently re-upload a genuine duplicate on every
+-- subsequent run (caught via CWA's own ingest logs: three separate "Golden
+-- Son" uploads over two days). (2) Some sources -- confirmed live for
+-- zlibrary.koplugin -- save files as "Title (Author) (mirror domains
+-- tried).epub"; searching CWA with that trailing domain-list junk left in
+-- returns zero results even when the book is already in the catalog under
+-- a clean title, which is a different failure mode with the same
+-- symptom -- caught the same way, "Fourth Wing" uploaded twice.
+local function stripTrailingParenGroups(text)
     while true do
         local stripped = text:gsub("%s*%b()%s*$", " ")
         if stripped == text then break end
         text = stripped
     end
+    return text
+end
+
+local function normalizeTitleWords(text)
+    if not text then return {} end
+    text = text:lower():gsub("%(z%-library%)", "")
+    text = stripTrailingParenGroups(text)
     text = text:gsub("[^%w]+", " ")
     local words = {}
     for w in text:gmatch("%S+") do
@@ -1119,7 +1291,14 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         -- real, thrown from the addLine(_(...)) calls below).
         for _idx, path in ipairs(unregistered) do
             local fname = path:match("([^/]+)%.[Ee][Pp][Uu][Bb]$") or path
-            local query = fname:gsub("[_%-%[%]%(%)]", " ")
+            -- Trailing paren groups stripped first, on the real fname
+            -- (with real parens still intact) -- see stripTrailingParenGroups's
+            -- note above on why: zlibrary.koplugin-style filenames end in
+            -- "(mirror domains tried)", and searching CWA with that left in
+            -- returns zero results even when the book is already in the
+            -- catalog, which is what actually caused the fresh "Fourth
+            -- Wing" duplicate this fixes.
+            local query = stripTrailingParenGroups(fname):gsub("[_%-%[%]%(%)]", " ")
             local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
                 "/opds/search/" .. socketurl.escape(query), socks5_proxy)
             local matches = {}
@@ -1280,13 +1459,13 @@ end
 -- earlier native crashes too, if Android's watchdog decided the
 -- unresponsive app needed to be force-killed. Must be called from within a
 -- Trapper:wrap()'d coroutine (every entry point below is).
-function Shelfmark:apiRequest(method, path, body, progress_text)
+function Shelfmark:apiRequest(method, path, body, progress_text, block_timeout, total_timeout)
     local Trapper = require("ui/trapper")
     local server_url, username, password, cookie, socks5_proxy =
         self.server_url, self.username, self.password, self.session_cookie, self.socks5_proxy
 
     local completed, resp, code, new_cookie, err = Trapper:dismissableRunInSubprocess(function()
-        return doApiRequest(server_url, username, password, cookie, method, path, body, socks5_proxy)
+        return doApiRequest(server_url, username, password, cookie, method, path, body, socks5_proxy, block_timeout, total_timeout)
     end, progress_text or _("Talking to Shelfmark..."))
 
     if not completed then
@@ -1322,6 +1501,43 @@ function Shelfmark:cwaFileDownload(path, save_path, progress_text)
     local completed, ok, code, err = Trapper:dismissableRunInSubprocess(function()
         return doCwaFileDownload(cwa_url, cwa_username, cwa_password, path, socks5_proxy, save_path)
     end, progress_text or _("Downloading book..."))
+
+    if not completed then return nil, nil, _("Cancelled.") end
+    return ok, code, err
+end
+
+-- Mirrors apiRequest/cwaRequest's Trapper-subprocess wrapping above.
+function Shelfmark:annasSearch(query, progress_text)
+    local Trapper = require("ui/trapper")
+    local annas_url, download_key, tld, socks5_proxy =
+        self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
+
+    local completed, results, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
+    end, progress_text or _("Searching Anna's Archive..."))
+
+    if not completed then return nil, nil, _("Cancelled.") end
+    return results, code, err
+end
+
+function Shelfmark:annasFetchDownloadUrl(md5, progress_text)
+    local Trapper = require("ui/trapper")
+    local annas_url, download_key, tld, socks5_proxy =
+        self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
+
+    local completed, dl_url, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doAnnasFetchDownloadUrl(annas_url, download_key, tld, md5, socks5_proxy)
+    end, progress_text or _("Fetching download link..."))
+
+    if not completed then return nil, nil, _("Cancelled.") end
+    return dl_url, code, err
+end
+
+function Shelfmark:annasFileDownload(download_url, save_path, progress_text)
+    local Trapper = require("ui/trapper")
+    local completed, ok, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doAnnasFileDownload(download_url, save_path)
+    end, progress_text or _("Downloading from Anna's Archive..."))
 
     if not completed then return nil, nil, _("Cancelled.") end
     return ok, code, err
@@ -2142,38 +2358,103 @@ end
 -- into an author-qualified query except manual_query. So "the Prowlarr
 -- query itself doesn't include the author" is Shelfmark's own intentional
 -- design, not something this plugin's title=/author= params control.
-function Shelfmark:browseReleases(book, manual_query)
-    UIManager:show(InfoMessage:new{ text = _("Searching release sources (Prowlarr etc.)..."), timeout = 2 })
-
-    local qs = {
-        "provider=" .. socketurl.escape(book.provider or ""),
-        "book_id=" .. socketurl.escape(book.provider_id or ""),
-        "content_type=ebook",
+-- Shapes an Anna's Archive search result into the same {title, format,
+-- indexer, source, extra={grabs=}} structure Prowlarr/direct_download
+-- releases already carry, so describeRelease/releaseRelevanceScore/the
+-- menu-building code below all work unchanged regardless of which source a
+-- given release actually came from. "Author - Title" (not "Title -
+-- Author") specifically to match the scene-release convention
+-- releaseRelevanceScore's author bonus already looks for -- Anna's
+-- Archive's title/author fields are clean and reliably separated, unlike a
+-- scraped release filename, but formatting them this way means a genuine
+-- primary-work match still earns the full relevance score, and a
+-- companion/adaptation result credited to a different author still gets
+-- caught by the same adaptation-keyword penalty.
+local function annasResultToRelease(result)
+    local title = result.title or "?"
+    if type(result.author) == "string" and result.author ~= "" then
+        title = result.author .. " - " .. title
+    end
+    return {
+        title = title,
+        format = result.format,
+        indexer = "Anna's Archive",
+        source = "annasarchive",
+        md5 = result.md5,
+        extra = { grabs = result.downloads },
     }
-    if book.title then table.insert(qs, "title=" .. socketurl.escape(book.title)) end
-    local author = describeAuthor(book)
-    if author ~= "" then table.insert(qs, "author=" .. socketurl.escape(author)) end
-    if manual_query and manual_query ~= "" then
-        table.insert(qs, "manual_query=" .. socketurl.escape(manual_query))
+end
+
+function Shelfmark:browseReleases(book, manual_query)
+    -- Anna's Archive as the primary source, Prowlarr/Shelfmark's own
+    -- direct_download only as a fallback when Anna's Archive genuinely has
+    -- nothing -- explicit choice per user request ("Prowlarr as the
+    -- backup and annas as main"), not a merge of both on every search.
+    -- annasSearch is fast enough (3-6s typical, see the note above
+    -- doAnnasSearch) that trying it first costs little even on the
+    -- occasions it comes up empty and Prowlarr ends up doing the real
+    -- work anyway.
+    local aa_query = (manual_query and manual_query ~= "") and manual_query or defaultReleaseQuery(book)
+    local aa_results, _aa_code, aa_err = self:annasSearch(aa_query)
+    if aa_err == _("Cancelled.") then return end
+
+    local releases
+    if aa_results and #aa_results > 0 then
+        releases = {}
+        for _, r in ipairs(aa_results) do
+            table.insert(releases, annasResultToRelease(r))
+        end
     end
 
-    local resp, code, err = self:apiRequest("GET", "/api/releases?" .. table.concat(qs, "&"))
-    if err then
-        UIManager:show(InfoMessage:new{ text = err })
-        return
-    end
-    if code ~= 200 or not resp or not resp.releases then
-        local msg = (resp and (resp.message or resp.error)) or _("Release search failed.")
-        UIManager:show(InfoMessage:new{ text = msg })
-        return
-    end
-    if #resp.releases == 0 then
-        UIManager:show(InfoMessage:new{
-            text = _("No releases found for this book. You can still submit a plain request and let Shelfmark keep looking."),
-            timeout = 3,
-        })
-        self:confirmBookLevelRequest(book)
-        return
+    if not releases then
+        UIManager:show(InfoMessage:new{ text = _("Searching release sources (Prowlarr etc.)..."), timeout = 2 })
+
+        local qs = {
+            "provider=" .. socketurl.escape(book.provider or ""),
+            "book_id=" .. socketurl.escape(book.provider_id or ""),
+            "content_type=ebook",
+        }
+        if book.title then table.insert(qs, "title=" .. socketurl.escape(book.title)) end
+        local author = describeAuthor(book)
+        if author ~= "" then table.insert(qs, "author=" .. socketurl.escape(author)) end
+        if manual_query and manual_query ~= "" then
+            table.insert(qs, "manual_query=" .. socketurl.escape(manual_query))
+        end
+
+        -- Longer timeout than apiRequest's 15/45 default -- confirmed live,
+        -- this endpoint alone can legitimately run past 45s: Shelfmark's
+        -- own docs say a release search needing a fresh Anna's Archive
+        -- bot-challenge solve can take 60-120s on a cold cache (its own
+        -- server-side search budget is 300s for exactly that reason). This
+        -- is exactly the case this whole function now tries to avoid by
+        -- trying annasSearch first -- but if that came back empty (rather
+        -- than erroring), Shelfmark's own direct_download might still
+        -- have something annasSearch's specific query/mirror didn't, so
+        -- it's still worth the wait here rather than giving up. The
+        -- Trapper progress dialog is dismissable, so a longer timeout
+        -- doesn't trap anyone -- they can still cancel any time they
+        -- don't want to wait.
+        local resp, code, err = self:apiRequest("GET", "/api/releases?" .. table.concat(qs, "&"),
+            _("Searching release sources (Prowlarr, Anna's Archive, etc. -- can take a couple of minutes)..."),
+            30, 150)
+        if err then
+            UIManager:show(InfoMessage:new{ text = err })
+            return
+        end
+        if code ~= 200 or not resp or not resp.releases then
+            local msg = (resp and (resp.message or resp.error)) or _("Release search failed.")
+            UIManager:show(InfoMessage:new{ text = msg })
+            return
+        end
+        if #resp.releases == 0 then
+            UIManager:show(InfoMessage:new{
+                text = _("No releases found for this book. You can still submit a plain request and let Shelfmark keep looking."),
+                timeout = 3,
+            })
+            self:confirmBookLevelRequest(book)
+            return
+        end
+        releases = resp.releases
     end
 
     -- Relevance first, then EPUB, then the server's own ordering (a plain
@@ -2238,7 +2519,8 @@ function Shelfmark:browseReleases(book, manual_query)
         return score
     end
 
-    local releases = resp.releases
+    -- releases is already set above -- either from Anna's Archive or from
+    -- resp.releases in the Prowlarr/Shelfmark fallback branch.
     for _, r in ipairs(releases) do
         r.title = decodeHtmlEntities(r.title)
     end
@@ -2458,7 +2740,69 @@ function Shelfmark:showResilientConfirmBox(opts)
     show_box()
 end
 
+-- release.source == "annasarchive" releases skip Shelfmark's own
+-- request/fulfillment queue entirely -- there's nothing to wait for, the
+-- file is fetched and saved right here, same as the standalone
+-- annasarchive.koplugin's own download flow (see doAnnasFileDownload's
+-- note on why). Landing in the same download_dir Shelfmark itself uses
+-- means "Sync library with CWA" picks it up naturally on its next run,
+-- same as any other externally-acquired book (Z-Library, the standalone
+-- plugin, etc).
+function Shelfmark:downloadFromAnnasArchive(release)
+    local dl_url, _code, err = self:annasFetchDownloadUrl(release.md5)
+    if err then
+        UIManager:show(InfoMessage:new{ text = err })
+        return
+    end
+    if not dl_url then
+        UIManager:show(InfoMessage:new{ text = _("No download URL returned.") })
+        return
+    end
+
+    local dir = (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
+    if lfs.attributes(dir, "mode") ~= "directory" then
+        -- One level at a time -- lfs.mkdir isn't recursive.
+        local built = ""
+        for segment in dir:gmatch("[^/]+") do
+            built = built .. "/" .. segment
+            if lfs.attributes(built, "mode") ~= "directory" then
+                lfs.mkdir(built)
+            end
+        end
+        if lfs.attributes(dir, "mode") ~= "directory" then
+            UIManager:show(InfoMessage:new{ text = T(_("Couldn't create download folder: %1"), dir) })
+            return
+        end
+    end
+
+    local ext = (type(release.format) == "string" and release.format ~= "") and release.format:lower() or "epub"
+    local safe_title = (release.title or "book"):gsub('[/\\:%*%?"<>|]', "_"):sub(1, 120)
+    local save_path = dir .. "/" .. safe_title .. "." .. ext
+
+    local ok, _dl_code, dl_err = self:annasFileDownload(dl_url, save_path)
+    if not ok then
+        UIManager:show(InfoMessage:new{ text = dl_err or _("Download failed.") })
+        return
+    end
+    UIManager:show(InfoMessage:new{ text = T(_("Saved to %1"), save_path), timeout = 4 })
+end
+
 function Shelfmark:confirmReleaseRequest(book, release)
+    if release.source == "annasarchive" then
+        -- Immediate download, not a queued request -- see
+        -- downloadFromAnnasArchive's note on why this branch exists at
+        -- all.
+        self:showResilientConfirmBox{
+            text = (truncate(release.title, 90) or _("This release")) .. "\n\n" .. _("Download from Anna's Archive now?"),
+            ok_text = _("Download"),
+            ok_callback = function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:downloadFromAnnasArchive(release) end)
+            end,
+        }
+        return
+    end
+
     -- truncate() here, not just in the release list -- raw Prowlarr/scene
     -- release filenames run 100-150+ chars (quality/codec tags, group
     -- names), and this ConfirmBox was the one place in the file still
