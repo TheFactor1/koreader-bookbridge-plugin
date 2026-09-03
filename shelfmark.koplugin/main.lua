@@ -2366,36 +2366,48 @@ function Shelfmark:showResilientConfirmBox(opts)
     local user_ok = opts.ok_callback or function() end
     local user_cancel = opts.cancel_callback or function() end
 
-    local confirm_box
-    confirm_box = ConfirmBox:new{
-        text = opts.text,
-        ok_text = opts.ok_text,
-        ok_callback = function()
-            dismissed = true
-            user_ok()
-        end,
-        cancel_callback = function()
-            dismissed = true
-            user_cancel()
-        end,
-    }
-    local base_on_close_widget = confirm_box.onCloseWidget
-    confirm_box.onCloseWidget = function(self_box)
-        base_on_close_widget(self_box)
-        if dismissed then return end
-        debugLog("showResilientConfirmBox: force-closed externally (retries=" .. retries .. "): "
-            .. tostring(opts.text):sub(1, 60))
-        if retries < MAX_RETRIES then
-            retries = retries + 1
-            UIManager:scheduleIn(0.2, function() UIManager:show(confirm_box) end)
-        else
-            UIManager:show(InfoMessage:new{
-                text = _("This dialog kept getting closed by something else on this device. Try again, or use Search instead of Discover."),
-            })
+    -- A retry MUST build a brand new ConfirmBox, never re-UIManager:show()
+    -- the one that just got closed -- confirmed live, the hard way:
+    -- onCloseWidget tears the widget down for real (TextBoxWidget:free()
+    -- nils out its internal render buffer), and re-showing that same
+    -- now-freed instance crashed the entire app on the next repaint
+    -- ("attempt to index field '_bb' (a nil value)" in paintTo, escaping
+    -- uncaught from UIManager's own repaint loop -- outside anything a
+    -- pcall in this file could ever have caught). show_box is a self-
+    -- referencing local specifically so each retry gets a fresh instance.
+    local show_box
+    show_box = function()
+        local confirm_box
+        confirm_box = ConfirmBox:new{
+            text = opts.text,
+            ok_text = opts.ok_text,
+            ok_callback = function()
+                dismissed = true
+                user_ok()
+            end,
+            cancel_callback = function()
+                dismissed = true
+                user_cancel()
+            end,
+        }
+        local base_on_close_widget = confirm_box.onCloseWidget
+        confirm_box.onCloseWidget = function(self_box)
+            base_on_close_widget(self_box)
+            if dismissed then return end
+            debugLog("showResilientConfirmBox: force-closed externally (retries=" .. retries .. "): "
+                .. tostring(opts.text):sub(1, 60))
+            if retries < MAX_RETRIES then
+                retries = retries + 1
+                UIManager:scheduleIn(0.2, show_box)
+            else
+                UIManager:show(InfoMessage:new{
+                    text = _("This dialog kept getting closed by something else on this device. Try again, or use Search instead of Discover."),
+                })
+            end
         end
+        UIManager:show(confirm_box)
     end
-    UIManager:show(confirm_box)
-    return confirm_box
+    show_box()
 end
 
 function Shelfmark:confirmReleaseRequest(book, release)
