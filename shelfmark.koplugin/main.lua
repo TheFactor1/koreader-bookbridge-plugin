@@ -838,7 +838,14 @@ local function doAnnasFetchDownloadUrl(annas_url, download_key, tld, md5, socks5
     local decode_ok, decoded = pcall(JSON.decode, body)
     if not decode_ok then return nil, code, _("Unreadable response fetching the download link.") end
     local dl_url = decoded.download_url or decoded.url
-    if not dl_url then return nil, code, _("No download URL in response.") end
+    if not dl_url then
+        -- decoded.error over a generic message when present -- this is the
+        -- one path a daily quota exhaustion (the account_fast_download_info
+        -- quota confirmed live: 50/day, shared across both Kindles) would
+        -- actually surface through, and "No download URL in response"
+        -- alone gives no hint that's what happened.
+        return nil, code, decoded.error or _("No download URL in response.")
+    end
     return dl_url, code
 end
 
