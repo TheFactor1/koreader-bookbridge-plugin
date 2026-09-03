@@ -2774,7 +2774,14 @@ function Shelfmark:downloadFromAnnasArchive(release)
     end
 
     local ext = (type(release.format) == "string" and release.format ~= "") and release.format:lower() or "epub"
-    local safe_title = (release.title or "book"):gsub('[/\\:%*%?"<>|]', "_"):sub(1, 120)
+    -- truncate(), not a raw :sub() -- byte-position slicing can cut a
+    -- multi-byte UTF-8 character in half (see truncate's own note at its
+    -- definition); release.title here is "Author - Title" from Anna's
+    -- Archive, which genuinely has multi-byte names/titles (confirmed live
+    -- elsewhere this session, e.g. "Joandomènec Ros i Aragonès").
+    -- Filesystem-unsafe characters stripped first so the cut lands on the
+    -- already-sanitized string.
+    local safe_title = truncate((release.title or "book"):gsub('[/\\:%*%?"<>|]', "_"), 120)
     local save_path = dir .. "/" .. safe_title .. "." .. ext
 
     local ok, _dl_code, dl_err = self:annasFileDownload(dl_url, save_path)
@@ -2857,7 +2864,13 @@ function Shelfmark:submitRequest(book, release)
         -- still succeeded either way.
         if resp and resp.id then
             local pending = loadPendingNotifyList()
-            pending[tostring(resp.id)] = (resp.book_data and resp.book_data.title) or book.title or _("Untitled")
+            -- truncate() here, same as every other title that reaches a
+            -- widget in this file (see confirmReleaseRequest/describeBook's
+            -- own notes on why) -- this one reaches checkPendingRequestNotifications's
+            -- InfoMessage completely unguarded otherwise, on a delay (device
+            -- resume, possibly much later) that makes it easy to miss this
+            -- gap testing the request flow itself.
+            pending[tostring(resp.id)] = truncate((resp.book_data and resp.book_data.title) or book.title, 90) or _("Untitled")
             savePendingNotifyList(pending)
         end
         UIManager:show(InfoMessage:new{
