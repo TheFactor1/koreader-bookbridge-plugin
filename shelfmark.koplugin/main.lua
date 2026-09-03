@@ -344,6 +344,32 @@ local function saveSyncRegistry(registry)
     return true
 end
 
+-- Requests this device has submitted and is still waiting to hear back on,
+-- keyed by Shelfmark's own numeric request id (as a string -- JSON object
+-- keys are always strings, and this round-trips through JSON.encode/decode
+-- on every save/load anyway) -> the book title, so the on-device
+-- notification can name what's ready without a second API round-trip.
+local PENDING_NOTIFY_PATH = DataStorage:getSettingsDir() .. "/shelfmark_pending_notify.json"
+
+local function loadPendingNotifyList()
+    local f = io.open(PENDING_NOTIFY_PATH, "r")
+    if not f then return {} end
+    local content = f:read("*a")
+    f:close()
+    if not content or content == "" then return {} end
+    local ok, decoded = pcall(JSON.decode, content)
+    if ok and type(decoded) == "table" then return decoded end
+    return {}
+end
+
+local function savePendingNotifyList(list)
+    local out = io.open(PENDING_NOTIFY_PATH, "w")
+    if not out then return false end
+    out:write(JSON.encode(list))
+    out:close()
+    return true
+end
+
 local function registerSyncedBook(uuid, path, title)
     if not uuid or uuid == "" then return end
     local registry = loadSyncRegistry()
@@ -2457,8 +2483,21 @@ function Shelfmark:submitRequest(book, release)
         return
     end
     if code == 200 or code == 201 then
+        -- Watch this one so a completion notification can actually fire on
+        -- this device -- see checkPendingRequestNotifications -- rather than
+        -- the message below being an empty promise like it was before that
+        -- existed. resp.id is Shelfmark's own request id (confirmed live on
+        -- a real POST /api/requests: 201 responses return the full created
+        -- request object, id included) -- silently skips watching if it's
+        -- somehow missing rather than erroring, since the request itself
+        -- still succeeded either way.
+        if resp and resp.id then
+            local pending = loadPendingNotifyList()
+            pending[tostring(resp.id)] = (resp.book_data and resp.book_data.title) or book.title or _("Untitled")
+            savePendingNotifyList(pending)
+        end
         UIManager:show(InfoMessage:new{
-            text = _("Requested. You'll be notified separately once it's ready -- check the ingest folder / your OPDS catalog then."),
+            text = _("Requested. You'll get a notification on this device once it's ready."),
             timeout = 4,
         })
     else
@@ -2468,6 +2507,98 @@ function Shelfmark:submitRequest(book, release)
 end
 
 -- ===== my requests =====
+
+-- Reconciles the pending-notification watch list (see submitRequest) against
+-- an already-fetched /api/requests list: drops entries that reached a
+-- terminal state -- delivered, or cancelled/rejected/declined -- or vanished
+-- from the list entirely, and returns the titles that just became delivered
+-- (empty if none) so the caller can decide whether to show anything. Takes
+-- the list rather than fetching its own, since showMyRequests already has
+-- one on hand -- checkPendingRequestNotifications below (used from onResume,
+-- where nothing's been fetched yet) is the one place that calls the API.
+local TERMINAL_NON_DELIVERED_STATUSES = { cancelled = true, rejected = true, declined = true }
+local function reconcilePendingNotifications(requests)
+    local pending = loadPendingNotifyList()
+    if next(pending) == nil then return {} end
+
+    local by_id = {}
+    for _, r in ipairs(requests or {}) do
+        if r.id then by_id[tostring(r.id)] = r end
+    end
+
+    local newly_ready = {}
+    local changed = false
+    for id_str, title in pairs(pending) do
+        local r = by_id[id_str]
+        if not r then
+            -- Vanished from the list entirely (removed some other way) --
+            -- nothing more to learn about it here, stop watching.
+            pending[id_str] = nil
+            changed = true
+        elseif r.delivery_state == "complete" then
+            table.insert(newly_ready, title)
+            pending[id_str] = nil
+            changed = true
+        elseif TERMINAL_NON_DELIVERED_STATUSES[r.status] then
+            pending[id_str] = nil
+            changed = true
+        end
+    end
+    if changed then savePendingNotifyList(pending) end
+    return newly_ready
+end
+
+-- Checks whether anything this device requested (see submitRequest) has
+-- since been delivered, and shows an on-device notification naming it if
+-- so. Called from onResume (waking the device is the natural "might want to
+-- know now" moment) and once from showMyRequests below. Skips the API call
+-- entirely when nothing's being watched, and fails silent on a network
+-- error -- this runs unprompted, most often right after waking when
+-- Tailscale may not have reconnected yet (see the note on
+-- onNetworkConnected-style reconnection delay elsewhere in this session's
+-- work), so surfacing an error the user didn't ask for would be worse than
+-- just quietly retrying next time something triggers a check.
+function Shelfmark:checkPendingRequestNotifications()
+    local pending = loadPendingNotifyList()
+    if next(pending) == nil then return end
+
+    local resp, code, err = self:apiRequest("GET", "/api/requests")
+    if err or code ~= 200 or not resp then return end
+    local requests = resp.requests or resp
+    if type(requests) ~= "table" then return end
+
+    local newly_ready = reconcilePendingNotifications(requests)
+    if #newly_ready == 0 then return end
+
+    local text
+    if #newly_ready == 1 then
+        text = T(_("Ready to read: %1"), newly_ready[1])
+    else
+        text = T(_("%1 books are ready to read:"), tostring(#newly_ready))
+            .. "\n\n" .. table.concat(newly_ready, "\n")
+    end
+    -- No timeout -- stays on screen until dismissed rather than flashing by,
+    -- since this can appear unprompted right as the screen wakes up.
+    UIManager:show(InfoMessage:new{ text = text })
+end
+
+function Shelfmark:onResume()
+    -- scheduleIn rather than checking immediately -- confirmed live earlier
+    -- this session that Tailscale's userspace daemon isn't necessarily
+    -- reconnected the instant the device wakes, so an immediate check would
+    -- routinely just fail silently for no good reason. Throttled separately
+    -- (self._last_notify_check) so a quick series of wake/sleep cycles
+    -- (e.g. repeatedly checking the time) doesn't spam requests.
+    local now = os.time()
+    if self._last_notify_check and (now - self._last_notify_check) < 300 then
+        return
+    end
+    self._last_notify_check = now
+    UIManager:scheduleIn(5, function()
+        local Trapper = require("ui/trapper")
+        Trapper:wrap(function() self:checkPendingRequestNotifications() end)
+    end)
+end
 
 function Shelfmark:showMyRequests()
     local resp, code, err = self:apiRequest("GET", "/api/requests")
@@ -2483,6 +2614,10 @@ function Shelfmark:showMyRequests()
     -- The endpoint may return either a bare list or {requests: [...]} --
     -- handle both rather than guessing which.
     local requests = resp.requests or resp
+    -- Silent reconcile (no popup -- the list about to be shown already
+    -- makes delivered status visible) so the watch list doesn't grow stale
+    -- just because the user checked here instead of waiting for onResume.
+    if type(requests) == "table" then reconcilePendingNotifications(requests) end
     if type(requests) ~= "table" or #requests == 0 then
         UIManager:show(InfoMessage:new{ text = _("No requests yet.") })
         return
