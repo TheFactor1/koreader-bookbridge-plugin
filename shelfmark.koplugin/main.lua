@@ -2261,6 +2261,18 @@ function Shelfmark:browseReleases(book, manual_query)
                 UIManager:show(InfoMessage:new{
                     text = _("Something went wrong opening that release. Details were logged."),
                 })
+            else
+                -- Brackets the entry log from last commit: if this line
+                -- shows up, confirmReleaseRequest's ConfirmBox:new/
+                -- UIManager:show calls both returned normally at the Lua
+                -- level, meaning the disappearing UI is happening somewhere
+                -- past this function entirely (e.g. in the actual paint/
+                -- repaint of the widget, or something unrelated to this
+                -- code path) -- not inside anything this file controls
+                -- directly. If it's MISSING despite the entry log being
+                -- present, execution never returned from the xpcall at all
+                -- (hung, or a crash xpcall itself couldn't intercept).
+                debugLog("onMenuSelect (release) xpcall returned ok")
             end
         end,
     }
