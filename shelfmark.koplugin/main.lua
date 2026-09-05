@@ -249,7 +249,12 @@ function Shelfmark:editHardcoverSettings()
     self.hardcover_settings_dialog = MultiInputDialog:new{
         title = _("Hardcover settings"),
         fields = {
-            { text = self.hardcover_token, text_type = "password", hint = _("Hardcover API token (from hardcover.app account settings)") },
+            {
+                description = _("Get a token at hardcover.app/account/api"),
+                text = self.hardcover_token,
+                text_type = "password",
+                hint = _("Hardcover API token"),
+            },
         },
         buttons = {
             {
