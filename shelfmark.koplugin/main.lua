@@ -2518,7 +2518,15 @@ end
 
 local function normalizeTitleWords(text)
     if not text then return {} end
-    text = text:lower():gsub("%(z%-library%)", "")
+    -- Parens optional: the tag shows up both as "(Z-Library)" and bare,
+    -- as in "Recursion Blake Crouch Z-Library.epub". Only the
+    -- parenthesized form used to be stripped, which left a stray
+    -- "library" word behind for the bare form -- and since the matcher
+    -- below requires every filename word to be explained by the
+    -- candidate's own title+author, that one leftover word made a book
+    -- fail to match *itself* (confirmed by a regression test: CWA title
+    -- "Recursion" + author "Blake Crouch" vs. this exact filename).
+    text = text:lower():gsub("%(?z%-library%)?", "")
     text = stripTrailingParenGroups(text)
     text = text:gsub("[^%w]+", " ")
     local words = {}
@@ -2714,8 +2722,54 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- the author side of the split above), but it's a live,
             -- waiting failure for the next title where it doesn't.
             local query = search_title:match("^([^_%[%(]+)") or search_title
-            local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
-                "/opds/search/" .. socketurl.escape(query), socks5_proxy)
+
+            -- A filename with no " - " separator at all (e.g. "Recursion
+            -- Blake Crouch Z-Library.epub") leaves the whole thing --
+            -- title, author and any source tag -- as the query, and since
+            -- CWA matches an exact substring of the stored title, that
+            -- finds nothing no matter how much of it is genuinely the
+            -- title. Found by sweeping every book in the real library
+            -- through this exact code path against live CWA: 39/40 found
+            -- themselves, this shape was the lone holdout.
+            --
+            -- So: if the first query comes back empty, retry with
+            -- progressively shorter leading word-prefixes. Only ever runs
+            -- when the full query already failed, so it can't change the
+            -- outcome for anything that currently works. Broadening the
+            -- *search* is safe here in a way that loosening the *match*
+            -- would not be -- titleWordsSubsetOf below still decides what
+            -- actually counts as the same book, and it requires the
+            -- candidate's whole title to appear in the filename AND every
+            -- filename word to be explained by that candidate's own
+            -- title+author. Bounded to a few attempts. Narrows all the way
+            -- to a single word when needed -- a one-word title is exactly
+            -- the case that motivated this (confirmed live: "Recursion
+            -- Blake Crouch" and "Recursion Blake" both return nothing,
+            -- while "Recursion" returns that one book and nothing else),
+            -- and each longer prefix is tried first, so a generic single
+            -- word is only ever reached once everything more specific has
+            -- already come back empty. Even then the worst case is
+            -- "returned results but none matched confidently -- skipped,
+            -- check manually" below, which is reported, not silent, and
+            -- never a duplicate upload.
+            local queries = { query }
+            local words = {}
+            for w in query:gmatch("%S+") do words[#words + 1] = w end
+            local attempts = 0
+            for count = #words - 1, 1, -1 do
+                if attempts >= 3 then break end
+                queries[#queries + 1] = table.concat(words, " ", 1, count)
+                attempts = attempts + 1
+            end
+
+            local resp_body, code
+            for _, q in ipairs(queries) do
+                resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+                    "/opds/search/" .. socketurl.escape(q), socks5_proxy)
+                if resp_body and code == 200 and resp_body:find("<entry>", 1, true) then
+                    break
+                end
+            end
             local matches = {}
             -- Separate from #matches -- see below. CWA's search genuinely
             -- returning nothing is the only case safe to treat as "not in
