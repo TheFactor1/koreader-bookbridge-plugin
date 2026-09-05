@@ -2546,6 +2546,15 @@ function Shelfmark:addToMainMenu(menu_items)
                         keep_menu_open = true,
                         callback = function() self:promptHardcoverFollowAuthor() end,
                     },
+                    {
+                        text = _("Browse a Hardcover list..."),
+                        keep_menu_open = true,
+                        separator = true,
+                        callback = function()
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() self:browseHardcoverLists() end)
+                        end,
+                    },
                 },
             },
             -- Everything below is either one-time setup or rarely touched
@@ -3331,6 +3340,57 @@ function Shelfmark:promptHardcoverFollowAuthor()
             end,
         })
     end)
+end
+
+-- Browses whatever the Shelfmark server's own connected Hardcover account
+-- follows -- this goes through the server's existing Hardcover connection
+-- (self:apiRequest, same auth as "Most popular"), not the device's own
+-- hardcover_token from Settings above, which is a separate, unrelated
+-- credential used only for writing (marking books read, following authors).
+-- Nothing to configure here beyond following lists on hardcover.app itself.
+function Shelfmark:browseHardcoverLists()
+    local resp, code, err = self:apiRequest("GET", "/api/metadata/field-options?provider=hardcover&field=hardcover_list")
+    if err then
+        UIManager:show(InfoMessage:new{ text = err })
+        return
+    end
+    if code ~= 200 or not resp or not resp.options then
+        local msg = (resp and (resp.message or resp.error)) or _("Couldn't load Hardcover lists.")
+        UIManager:show(InfoMessage:new{ text = msg })
+        return
+    end
+    if #resp.options == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No lists found -- follow some on hardcover.app first.") })
+        return
+    end
+
+    local item_table = {}
+    for i, opt in ipairs(resp.options) do
+        item_table[i] = {
+            text = opt.group and T(_("%1  [%2]"), opt.label, opt.group) or opt.label,
+            value = opt.value,
+            label = opt.label,
+        }
+    end
+
+    local lists_menu
+    lists_menu = Menu:new{
+        title = _("Browse a Hardcover list"),
+        item_table = item_table,
+        multilines_forced = true,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_menu_self, item)
+            UIManager:close(lists_menu)
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
+                self:doSearch({ fields = { hardcover_list = item.value }, limit = 30, title_override = item.label })
+            end)
+        end,
+    }
+    UIManager:show(lists_menu)
 end
 
 function Shelfmark:promptCustomReleaseQuery(book, prefill)
