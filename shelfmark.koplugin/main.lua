@@ -104,6 +104,7 @@ end
 function Shelfmark:init()
     self:loadSettings()
     self.ui.menu:registerToMainMenu(self)
+    self:registerFileDialogButtons()
 end
 
 -- Writes every self.* setting field currently in memory -- shared by both
@@ -1224,6 +1225,269 @@ local function doHardcoverFollowAuthor(token, author_id)
     return true
 end
 
+-- Lists authors currently followed on Hardcover -- read fresh every time
+-- rather than mirrored locally, so a follow made on hardcover.app's own
+-- website (or via the long-press action below) shows up immediately with
+-- nothing to keep in sync. `me`/`authors` are array-returning root fields on
+-- this schema (confirmed live: a plain `{me{id}}` query returned
+-- `{"me":[{"id":...}]}`), not single objects -- indexing [1] is required.
+local function doHardcoverListFollowedAuthors(token)
+    local data, err = doHardcoverGraphQL(token, [[
+        query FollowedAuthors {
+            me {
+                follows(where: {followable_type: {_eq: "Author"}}, order_by: {author: {name: asc}}) {
+                    author { id name books_count cached_image }
+                }
+            }
+        }
+    ]], {})
+    if not data then return nil, err end
+    local me = data.me and data.me[1]
+    local follows = me and me.follows
+    if not follows then return {} end
+    local authors = {}
+    for _, f in ipairs(follows) do
+        if f.author then
+            table.insert(authors, {
+                id = f.author.id,
+                name = f.author.name,
+                books_count = f.author.books_count,
+                cover_url = type(f.author.cached_image) == "table" and f.author.cached_image.url or nil,
+            })
+        end
+    end
+    return authors
+end
+
+-- Thousands-comma grouping for Hardcover's raw GraphQL numbers (unlike the
+-- Shelfmark-server-side Hardcover provider, which pre-formats these as
+-- strings before this plugin ever sees them via /api/metadata/search).
+local function formatCount(n)
+    if type(n) ~= "number" then return tostring(n) end
+    local out = tostring(math.floor(n)):reverse():gsub("(%d%d%d)", "%1,"):reverse()
+    if out:sub(1, 1) == "," then out = out:sub(2) end
+    return out
+end
+
+-- An author's full bibliography, paginated. Query shape (the
+-- canonical_id/state filters and the nested book-scoped order_by) copied
+-- verbatim from calibrain/shelfmark's own production Hardcover provider
+-- (shelfmark/metadata_providers/hardcover.py) rather than guessed, since
+-- that's the same account/API this plugin's own annas_download_key-style
+-- server integration already relies on for "Most popular". Returns each
+-- book already shaped the way describeBook/describeMetrics/browseReleases
+-- expect from any other source (title/authors/publish_year/display_fields/
+-- provider/provider_id) -- see the note above doSearch's book_data shape.
+local function doHardcoverAuthorBibliography(token, author_id, limit, offset)
+    local data, err = doHardcoverGraphQL(token, [[
+        query AuthorBooks($authorId: Int!, $limit: Int!, $offset: Int!) {
+            authors(where: {id: {_eq: $authorId}}, limit: 1) {
+                name
+                contributions(
+                    where: {
+                        contributable_type: {_eq: "Book"}
+                        book: { canonical_id: {_is_null: true}, state: {_in: ["normalized", "normalizing"]} }
+                    }
+                    order_by: [
+                        {book: {users_count: desc_nulls_last}},
+                        {book: {ratings_count: desc_nulls_last}},
+                        {book: {id: asc}}
+                    ]
+                    limit: $limit
+                    offset: $offset
+                ) {
+                    book {
+                        id
+                        title
+                        release_year
+                        release_date
+                        rating
+                        ratings_count
+                        users_count
+                        cached_image
+                        contributions(where: {contribution: {_eq: "Author"}}) { author { name } }
+                    }
+                }
+                contributions_aggregate(
+                    where: {
+                        contributable_type: {_eq: "Book"}
+                        book: { canonical_id: {_is_null: true}, state: {_in: ["normalized", "normalizing"]} }
+                    }
+                ) { aggregate { count } }
+            }
+        }
+    ]], { authorId = author_id, limit = limit, offset = offset })
+    if not data then return nil, nil, nil, err end
+    local author = data.authors and data.authors[1]
+    if not author then return nil, nil, nil, _("Author not found on Hardcover.") end
+
+    local books = {}
+    for _, c in ipairs(author.contributions or {}) do
+        local b = c.book
+        if b then
+            local authors = {}
+            for _, bc in ipairs(b.contributions or {}) do
+                if bc.author and bc.author.name then table.insert(authors, bc.author.name) end
+            end
+            if #authors == 0 then authors = { author.name } end
+
+            -- Same type-checked pattern doSearch's describeYear already uses:
+            -- a missing value decodes as KOReader's JSON-null sentinel, which
+            -- is truthy but not a number.
+            local publish_year = nil
+            if type(b.release_year) == "number" then
+                publish_year = b.release_year
+            elseif type(b.release_date) == "string" then
+                local y = b.release_date:match("^(%d%d%d%d)")
+                if y then publish_year = tonumber(y) end
+            end
+
+            local display_fields = {}
+            if type(b.rating) == "number" then
+                local rating_str = string.format("%.1f", b.rating)
+                if type(b.ratings_count) == "number" and b.ratings_count > 0 then
+                    rating_str = rating_str .. " (" .. formatCount(b.ratings_count) .. ")"
+                end
+                table.insert(display_fields, { label = "Rating", value = rating_str })
+            end
+            if type(b.users_count) == "number" and b.users_count > 0 then
+                table.insert(display_fields, { label = "Readers", value = formatCount(b.users_count) })
+            end
+
+            table.insert(books, {
+                title = b.title,
+                authors = authors,
+                publish_year = publish_year,
+                display_fields = display_fields,
+                cover_url = type(b.cached_image) == "table" and b.cached_image.url or nil,
+                provider = "hardcover",
+                provider_id = tostring(b.id),
+            })
+        end
+    end
+
+    local total = author.contributions_aggregate
+        and author.contributions_aggregate.aggregate
+        and author.contributions_aggregate.aggregate.count
+        or #books
+    return books, total, author.name
+end
+
+-- ===== long-press-on-cover Hardcover actions (FileManager extension) =====
+--
+-- FileManager:addFileDialogButtons is a real, first-class KOReader
+-- extension point -- confirmed live against this device's own installed
+-- files: coverbrowser.koplugin (the only real first-party consumer of this
+-- API) uses exactly this pattern to add its own "Ignore cover"/"Refresh
+-- cached info" rows to the same long-press dialog. Four separate calls are
+-- required, one per FileManager-family class table -- confirmed via
+-- coverbrowser.koplugin's own `_modified_widgets` table, which maps
+-- "filemanager"/"history"/"collections"/"filesearcher" directly to the four
+-- required()'d class tables themselves (not instances) -- the "long-press
+-- file_dialog in FileManager, History, Collections, FileSearcher" comment in
+-- KOReader's own source only documents that all four *read* the same kind
+-- of registered-buttons table, not that one registration reaches all of
+-- them.
+
+-- book_props is nil for any file that's never been opened and has no
+-- CoverBrowser cache -- confirmed live by reading filemanager.lua's own
+-- showFileDialog: it's only populated via CoverBrowser's cache or a book's
+-- saved doc_settings, neither of which exist for a freshly downloaded,
+-- never-opened book. Falls back to a metadata-only document open (no
+-- render, no page count -- the same fallback FileManagerBookInfo's own
+-- getDocProps uses) and finally to the filename itself. Deliberately only
+-- ever called from a long-press button's own tap callback, never from
+-- row_func below -- row_func runs on every single long-press on every book,
+-- so opening a document there would add real cost to an action that
+-- doesn't need it.
+local function deriveFileDialogMetadata(file, book_props)
+    if book_props and book_props.title then
+        return book_props.title, book_props.authors
+    end
+
+    local title, authors
+    local DocumentRegistry = require("document/documentregistry")
+    if DocumentRegistry:hasProvider(file) then
+        local open_ok, document = pcall(function() return DocumentRegistry:openDocument(file) end)
+        if open_ok and document then
+            if document.loadDocument then
+                pcall(function() document:loadDocument(false) end)
+            end
+            local props_ok, props = pcall(function() return document:getProps() end)
+            if props_ok and props then
+                title = props.title
+                authors = props.authors
+            end
+            DocumentRegistry:closeDocument(file)
+        end
+    end
+
+    if not title or title == "" then
+        title = require("apps/filemanager/filemanagerutil").splitFileNameType(file)
+    end
+    return title, authors
+end
+
+function Shelfmark:registerFileDialogButtons()
+    local FileManager = require("apps/filemanager/filemanager")
+    local FileManagerHistory = require("apps/filemanager/filemanagerhistory")
+    local FileManagerCollection = require("apps/filemanager/filemanagercollection")
+    local FileManagerFileSearcher = require("apps/filemanager/filemanagerfilesearcher")
+    local DocumentRegistry = require("document/documentregistry")
+    local self_ref = self
+
+    local function row_func(file, is_file, book_props)
+        if not is_file or not DocumentRegistry:hasProvider(file) then return nil end
+
+        local function logCallback(status_id, status_label)
+            return function()
+                local title = deriveFileDialogMetadata(file, book_props)
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function()
+                    self_ref:promptHardcoverLogBookForFile(title, status_id, status_label)
+                end)
+            end
+        end
+
+        local row = {
+            { text = _("Currently Reading"), callback = logCallback(HARDCOVER_STATUS_CURRENTLY_READING, _("Currently Reading")) },
+            { text = _("Read"), callback = logCallback(HARDCOVER_STATUS_READ, _("Read")) },
+        }
+
+        -- Cheap check (no document open) when book_props is already known;
+        -- otherwise show the button anyway and let the tap-time fallback
+        -- (which does open the document) decide -- see
+        -- deriveFileDialogMetadata's own note on why that lookup only ever
+        -- happens lazily, at tap time, never here.
+        local known_author = book_props and book_props.authors and book_props.authors ~= ""
+        if known_author or not book_props then
+            table.insert(row, {
+                text = _("Follow Author"),
+                callback = function()
+                    local _title, author = deriveFileDialogMetadata(file, book_props)
+                    if not author or author == "" then
+                        UIManager:show(InfoMessage:new{ text = _("Couldn't determine this book's author.") })
+                        return
+                    end
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        self_ref:promptHardcoverFollowAuthorForFile(author)
+                    end)
+                end,
+            })
+        end
+
+        return row
+    end
+
+    -- Idempotent (addFileDialogButtons dedups on row_id per target table),
+    -- safe to call unconditionally every time any Shelfmark instance inits.
+    FileManager.addFileDialogButtons(FileManager, "shelfmark_hardcover", row_func)
+    FileManager.addFileDialogButtons(FileManagerHistory, "shelfmark_hardcover", row_func)
+    FileManager.addFileDialogButtons(FileManagerCollection, "shelfmark_hardcover", row_func)
+    FileManager.addFileDialogButtons(FileManagerFileSearcher, "shelfmark_hardcover", row_func)
+end
+
 -- ===== self-update check (GitHub releases) =====
 
 local function isNewerVersion(remote_version, local_version)
@@ -2053,6 +2317,26 @@ function Shelfmark:hardcoverFollowAuthor(author_id)
     return ok, err
 end
 
+function Shelfmark:hardcoverListFollowedAuthors()
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, authors, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverListFollowedAuthors(token)
+    end, _("Loading followed authors..."))
+    if not completed then return nil, _("Cancelled.") end
+    return authors, err
+end
+
+function Shelfmark:hardcoverAuthorBibliography(author_id, limit, offset)
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, books, total, author_name, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverAuthorBibliography(token, author_id, limit, offset)
+    end, _("Loading author's books..."))
+    if not completed then return nil, nil, nil, _("Cancelled.") end
+    return books, total, author_name, err
+end
+
 function Shelfmark:annasFetchDownloadUrl(md5, progress_text)
     local Trapper = require("ui/trapper")
     local annas_url, download_key, tld, socks5_proxy =
@@ -2550,6 +2834,14 @@ function Shelfmark:addToMainMenu(menu_items)
                         text = _("Follow an author..."),
                         keep_menu_open = true,
                         callback = function() self:promptHardcoverFollowAuthor() end,
+                    },
+                    {
+                        text = _("Followed authors..."),
+                        keep_menu_open = true,
+                        callback = function()
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() self:browseFollowedAuthors() end)
+                        end,
                     },
                     {
                         text = _("Browse a Hardcover list..."),
@@ -3283,7 +3575,15 @@ local function promptHardcoverText(title, hint, on_confirm)
                         local text = dialog:getInputText()
                         UIManager:close(dialog)
                         if text and text:gsub("%s", "") ~= "" then
-                            on_confirm(text)
+                            -- Without this wrap, on_confirm's own network calls
+                            -- (hardcoverFindBook/FindAuthor, which use
+                            -- Trapper:dismissableRunInSubprocess) run outside any
+                            -- coroutine -- confirmed by reading ui/trapper.lua:
+                            -- that silently degrades to a blocking, non-
+                            -- cancelable synchronous call instead of the normal
+                            -- dismissable progress dialog.
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() on_confirm(text) end)
                         end
                     end,
                 },
@@ -3294,31 +3594,72 @@ local function promptHardcoverText(title, hint, on_confirm)
     dialog:onShowKeyboard()
 end
 
+-- Shared by the manual "Log a book..." menu flow and the long-press-on-cover
+-- action below -- search, show exactly what matched, write only on explicit
+-- confirmation. Must already be running inside a Trapper-wrapped coroutine
+-- (both call sites ensure this).
+local function confirmAndLogBookOnHardcover(self, title, status_id, status_label)
+    local id, found_title, found_author, err = self:hardcoverFindBook(title)
+    if not id then
+        UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
+        return
+    end
+    local ConfirmBox = require("ui/widget/confirmbox")
+    local desc = found_author and T(_("\"%1\" by %2"), found_title, found_author) or found_title
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Found %1 on Hardcover. Mark as %2?"), desc, status_label),
+        ok_text = _("Mark as ") .. status_label,
+        ok_callback = function()
+            local ok, set_err = self:hardcoverSetStatus(id, status_id)
+            UIManager:show(InfoMessage:new{
+                text = ok and T(_("Marked as %1 on Hardcover."), status_label) or (set_err or _("Failed to update Hardcover.")),
+                timeout = ok and 2 or nil,
+            })
+        end,
+    })
+end
+
+-- Shared by the manual "Follow an author..." menu flow and the long-press
+-- action below -- same search/confirm/write shape as the function above.
+local function confirmAndFollowAuthorOnHardcover(self, author_name)
+    local id, found_name, err = self:hardcoverFindAuthor(author_name)
+    if not id then
+        UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
+        return
+    end
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Found \"%1\" on Hardcover. Follow this author?"), found_name),
+        ok_text = _("Follow"),
+        ok_callback = function()
+            local ok, follow_err = self:hardcoverFollowAuthor(id)
+            UIManager:show(InfoMessage:new{
+                text = ok and T(_("Now following %1 on Hardcover."), found_name) or (follow_err or _("Failed to follow.")),
+                timeout = ok and 2 or nil,
+            })
+        end,
+    })
+end
+
 function Shelfmark:promptHardcoverLogBook(status_id, status_label)
     if not self.hardcover_token or self.hardcover_token == "" then
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
     end
     promptHardcoverText(_("Log a book on Hardcover"), _("Book title"), function(title)
-        local id, found_title, found_author, err = self:hardcoverFindBook(title)
-        if not id then
-            UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
-            return
-        end
-        local ConfirmBox = require("ui/widget/confirmbox")
-        local desc = found_author and T(_("\"%1\" by %2"), found_title, found_author) or found_title
-        UIManager:show(ConfirmBox:new{
-            text = T(_("Found %1 on Hardcover. Mark as %2?"), desc, status_label),
-            ok_text = _("Mark as ") .. status_label,
-            ok_callback = function()
-                local ok, set_err = self:hardcoverSetStatus(id, status_id)
-                UIManager:show(InfoMessage:new{
-                    text = ok and T(_("Marked as %1 on Hardcover."), status_label) or (set_err or _("Failed to update Hardcover.")),
-                    timeout = ok and 2 or nil,
-                })
-            end,
-        })
+        confirmAndLogBookOnHardcover(self, title, status_id, status_label)
     end)
+end
+
+-- Long-press-on-cover entry point (see registerFileDialogButtons below) --
+-- the title is already known from the file itself, so this skips straight
+-- to search+confirm with no typing at all.
+function Shelfmark:promptHardcoverLogBookForFile(title, status_id, status_label)
+    if not self.hardcover_token or self.hardcover_token == "" then
+        UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
+        return
+    end
+    confirmAndLogBookOnHardcover(self, title, status_id, status_label)
 end
 
 function Shelfmark:promptHardcoverFollowAuthor()
@@ -3327,24 +3668,17 @@ function Shelfmark:promptHardcoverFollowAuthor()
         return
     end
     promptHardcoverText(_("Follow an author on Hardcover"), _("Author name"), function(name)
-        local id, found_name, err = self:hardcoverFindAuthor(name)
-        if not id then
-            UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
-            return
-        end
-        local ConfirmBox = require("ui/widget/confirmbox")
-        UIManager:show(ConfirmBox:new{
-            text = T(_("Found \"%1\" on Hardcover. Follow this author?"), found_name),
-            ok_text = _("Follow"),
-            ok_callback = function()
-                local ok, follow_err = self:hardcoverFollowAuthor(id)
-                UIManager:show(InfoMessage:new{
-                    text = ok and T(_("Now following %1 on Hardcover."), found_name) or (follow_err or _("Failed to follow.")),
-                    timeout = ok and 2 or nil,
-                })
-            end,
-        })
+        confirmAndFollowAuthorOnHardcover(self, name)
     end)
+end
+
+-- Long-press-on-cover entry point -- see promptHardcoverLogBookForFile above.
+function Shelfmark:promptHardcoverFollowAuthorForFile(author_name)
+    if not self.hardcover_token or self.hardcover_token == "" then
+        UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
+        return
+    end
+    confirmAndFollowAuthorOnHardcover(self, author_name)
 end
 
 -- Browses whatever the Shelfmark server's own connected Hardcover account
@@ -3396,6 +3730,123 @@ function Shelfmark:browseHardcoverLists()
         end,
     }
     UIManager:show(lists_menu)
+end
+
+-- Fixed page size for browseAuthorBibliography's "Load more" pagination --
+-- matches Hardcover's own documented per-page convention.
+local HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE = 25
+
+-- Reads "who do I follow" fresh from Hardcover every time (see the note
+-- above doHardcoverListFollowedAuthors) -- no local list to keep in sync,
+-- so a follow made here, on hardcover.app's own website, or via the
+-- long-press "Follow Author" action all show up the same way.
+function Shelfmark:browseFollowedAuthors()
+    if not self.hardcover_token or self.hardcover_token == "" then
+        UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
+        return
+    end
+    local authors, err = self:hardcoverListFollowedAuthors()
+    if not authors then
+        UIManager:show(InfoMessage:new{ text = err or _("Couldn't load followed authors.") })
+        return
+    end
+    if #authors == 0 then
+        UIManager:show(InfoMessage:new{ text = _("You're not following any authors yet -- use \"Follow an author...\" first.") })
+        return
+    end
+
+    local item_table = {}
+    for i, author in ipairs(authors) do
+        item_table[i] = {
+            text = author.books_count and T(_("%1  (%2 books)"), author.name, author.books_count) or author.name,
+            author_id = author.id,
+            author_name = author.name,
+        }
+    end
+
+    local authors_menu
+    authors_menu = Menu:new{
+        title = _("Followed authors"),
+        item_table = item_table,
+        multilines_forced = true,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_menu_self, item)
+            UIManager:close(authors_menu)
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
+                self:browseAuthorBibliography(item.author_id, item.author_name, 0, nil)
+            end)
+        end,
+    }
+    UIManager:show(authors_menu)
+end
+
+-- Mirrors doSearch's own accumulate-and-"Load more" idiom exactly (see
+-- that function) so tapping a book here reaches browseReleases with the
+-- exact same book_data shape a normal search result already carries --
+-- title/authors/publish_year/display_fields/provider/provider_id, all
+-- built by doHardcoverAuthorBibliography to match what
+-- describeBook/describeMetrics already expect.
+function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, existing_books)
+    local new_books, total, resolved_name, err = self:hardcoverAuthorBibliography(
+        author_id, HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE, offset or 0)
+    if not new_books then
+        UIManager:show(InfoMessage:new{ text = err or _("Couldn't load this author's books.") })
+        return
+    end
+
+    local books = existing_books or {}
+    for _, book in ipairs(new_books) do
+        table.insert(books, book)
+    end
+
+    if #books == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No books found for this author.") })
+        return
+    end
+
+    local item_table = {}
+    for i, book in ipairs(books) do
+        local byline = describeAuthor(book) .. describeYear(book)
+        local metrics = describeMetrics(book)
+        local title_text = truncate(book.title, 140) or _("Untitled")
+        if byline ~= "" then title_text = title_text .. "\n" .. byline end
+        if metrics ~= "" then title_text = title_text .. "\n" .. metrics end
+        item_table[i] = { text = title_text, book_data = book }
+    end
+    if total and #books < total then
+        item_table[#item_table + 1] = { text = _("-- Load more results --"), is_load_more = true }
+    end
+
+    local menu_title = T(_("%1 (%2)"), author_name or resolved_name or _("Author"), #books)
+
+    local bibliography_menu
+    bibliography_menu = Menu:new{
+        title = menu_title,
+        item_table = item_table,
+        multilines_forced = true,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_menu_self, item)
+            UIManager:close(bibliography_menu)
+            local Trapper = require("ui/trapper")
+            if item.is_load_more then
+                Trapper:wrap(function()
+                    self:browseAuthorBibliography(author_id, author_name or resolved_name, #books, books)
+                end)
+            else
+                Trapper:wrap(function()
+                    self:browseReleases(item.book_data, defaultReleaseQuery(item.book_data))
+                end)
+            end
+        end,
+    }
+    UIManager:show(bibliography_menu)
 end
 
 function Shelfmark:promptCustomReleaseQuery(book, prefill)
