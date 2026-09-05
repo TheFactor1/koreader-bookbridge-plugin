@@ -1226,6 +1226,25 @@ local function attachCoverSupport(menu)
     local Geom = require("ui/geometry")
     local Size = require("ui/size")
 
+    -- Confirmed live: KOReader's Menu never sizes a row to fit its content
+    -- -- item_dimen.h is a fixed available_height/items_per_page slice
+    -- (frontend/ui/widget/menu.lua:_recalculateDimen), set once from
+    -- whatever generic per-page default was already in effect (sized for
+    -- short, mostly single-line rows) and never revisited afterward. A
+    -- cover's state_w reservation narrows the text column, which needs
+    -- more lines to say the same thing -- so text was getting clipped
+    -- vertically well before it ran out of content, not because wrapping
+    -- itself failed. zlibrary.koplugin's own cover list hits this same
+    -- tension and fixes it the same way: force a smaller items_per_page
+    -- and re-run dimension calc *before* ever sizing the cover off
+    -- item_dimen.h, rather than trying to fit a cover into whatever
+    -- generic row height happened to already be in effect. 5, not a
+    -- computed value like zlibrary's own getCoverItemsPerPage -- matches
+    -- what's actually visible per page in zlibrary's own reference
+    -- screenshot, which is the density being matched here.
+    menu.items_per_page = 5
+    menu:_recalculateDimen(false)
+
     local cover_h = math.max(60, (menu.item_dimen and menu.item_dimen.h or 120) - 2 * Size.line.medium)
     local cover_w = math.floor(cover_h * 2 / 3)
     menu.state_w = cover_w + 8 * Size.padding.small
