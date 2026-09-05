@@ -1073,6 +1073,16 @@ local COVER_CACHE_DIR = DataStorage:getFullDataDir() .. "/shelfmark_covers"
 -- for this.
 local COVER_CACHE_MAX_BYTES = 75 * 1024 * 1024
 
+-- How many books' covers to prefetch synchronously before a results/
+-- bibliography menu is ever shown -- matches attachCoverSupport's own
+-- forced items_per_page, so the first page a reader actually sees never
+-- needs its own lazy top-up. Covers for every page past the first are
+-- fetched on demand, the first time that page is scrolled/paged to (see
+-- attachCoverSupport's updateItems override) -- fetching all of them up
+-- front, as before, meant waiting on covers for books the reader might
+-- never scroll to, per explicit request for faster initial results.
+local COVER_ITEMS_PER_PAGE = 5
+
 local function evictOldCovers()
     local files = {}
     local total = 0
@@ -1220,7 +1230,7 @@ end
 -- item_table. So: null every item's state first, then rebuild only the
 -- page actually being shown, on every single updateItems call -- never let
 -- a widget survive past the call that painted it.
-local function attachCoverSupport(menu)
+local function attachCoverSupport(menu, shelfmark_self)
     local ImageWidget = require("ui/widget/imagewidget")
     local CenterContainer = require("ui/widget/container/centercontainer")
     local Geom = require("ui/geometry")
@@ -1241,13 +1251,18 @@ local function attachCoverSupport(menu)
     -- generic row height happened to already be in effect. 5, not a
     -- computed value like zlibrary's own getCoverItemsPerPage -- matches
     -- what's actually visible per page in zlibrary's own reference
-    -- screenshot, which is the density being matched here.
-    menu.items_per_page = 5
+    -- screenshot, which is the density being matched here, and matches
+    -- COVER_ITEMS_PER_PAGE (how many covers doSearch/browseAuthorBibliography
+    -- prefetch up front) so the very first page shown never needs a lazy
+    -- top-up of its own.
+    menu.items_per_page = COVER_ITEMS_PER_PAGE
     menu:_recalculateDimen(false)
 
     local cover_h = math.max(60, (menu.item_dimen and menu.item_dimen.h or 120) - 2 * Size.line.medium)
     local cover_w = math.floor(cover_h * 2 / 3)
     menu.state_w = cover_w + 8 * Size.padding.small
+
+    local server_url, session_cookie = shelfmark_self.server_url, shelfmark_self.session_cookie
 
     local orig_updateItems = menu.updateItems
     menu.updateItems = function(self, select_number, no_recalculate_dimen)
@@ -1257,6 +1272,40 @@ local function attachCoverSupport(menu)
         local perpage = self.perpage or #self.item_table
         local page = self.page or 1
         local idx_offset = (page - 1) * perpage
+
+        -- Lazy top-up: only the first COVER_ITEMS_PER_PAGE books get
+        -- prefetched before the menu is ever shown (see doSearch/
+        -- browseAuthorBibliography) -- with items_per_page forced down to
+        -- make room for covers, most result sets now span many more pages
+        -- than that, and downloading every one of them up front meant
+        -- waiting on covers for books the reader might never scroll to.
+        -- This fetches only the page that's actually about to be painted,
+        -- the first time it's visited. Plain direct calls, not wrapped in
+        -- Trapper's dismissable subprocess: this runs from a page-turn
+        -- tap, well after the Trapper:wrap() coroutine covering the
+        -- original search has already ended, so
+        -- dismissableRunInSubprocess would just silently fall back to an
+        -- equivalent blocking call anyway (confirmed by reading
+        -- ui/trapper.lua) -- a handful of images blocking briefly on a
+        -- page flip is a fair trade for a page load that no longer waits
+        -- on covers it may never need.
+        local fetched_any = false
+        for idx = 1, perpage do
+            local item = self.item_table[idx_offset + idx]
+            if item and item.cover_url and not item.cover_path and not item._cover_fetch_failed then
+                local path = downloadCoverToPath(server_url, session_cookie, item.cover_url)
+                if path then
+                    item.cover_path = path
+                    fetched_any = true
+                else
+                    item._cover_fetch_failed = true
+                end
+            end
+        end
+        if fetched_any and lfs.attributes(COVER_CACHE_DIR, "mode") == "directory" then
+            evictOldCovers()
+        end
+
         for idx = 1, perpage do
             local item = self.item_table[idx_offset + idx]
             if item and item.cover_path then
@@ -1267,7 +1316,25 @@ local function attachCoverSupport(menu)
                         width = cover_w,
                         height = cover_h,
                         scale_factor = 0,
-                        file_do_cache = true,
+                        -- false, not true: at scale_factor=0, ImageWidget
+                        -- decodes at the source's *native* resolution before
+                        -- scaling down to fit the container (needed to
+                        -- preserve aspect ratio -- see the class comment
+                        -- above ImageWidget:_loadfile on why width/height
+                        -- alone would double-scale). Confirmed live: caching
+                        -- that full-resolution decode in KOReader's shared,
+                        -- fixed-size ImageCache crashed the reader outright
+                        -- with "not enough storage for cache" -- a single
+                        -- Hardcover cover (source images run up to ~1500px)
+                        -- decoded larger than the cache's entire budget, so
+                        -- no amount of evicting other entries could ever
+                        -- make room. file_do_cache=false keeps each
+                        -- decoded bitmap scoped to its own widget instead,
+                        -- freed the moment updateItems rebuilds the page
+                        -- (item.state is already nulled out above every
+                        -- time) -- the small re-decode cost on each repaint
+                        -- is cheap for a disk-cached, already-small file.
+                        file_do_cache = false,
                         alpha = false,
                         use_legacy_image_scaling = true,
                     },
@@ -3426,10 +3493,16 @@ function Shelfmark:doSearch(params, existing_books)
         return
     end
 
-    -- Only the newly-fetched page needs a cover fetch -- books carried over
-    -- via existing_books already have cover_path set on the same table
-    -- (mutated in place, not copied) from their own original prefetch.
-    self:prefetchCovers(resp.books)
+    -- Only prefetch enough covers for the page actually shown first --
+    -- books carried over via existing_books already have cover_path set on
+    -- the same table (mutated in place, not copied) from their own
+    -- original prefetch; the rest of this batch loads lazily as the reader
+    -- pages to it (see attachCoverSupport).
+    local first_page_books = {}
+    for i = 1, math.min(#resp.books, COVER_ITEMS_PER_PAGE) do
+        first_page_books[i] = resp.books[i]
+    end
+    self:prefetchCovers(first_page_books)
 
     local item_table = {}
     for i, book in ipairs(books) do
@@ -3437,6 +3510,7 @@ function Shelfmark:doSearch(params, existing_books)
             text = formatBookRowText(book),
             book_data = book,
             cover_path = book.cover_path,
+            cover_url = book.cover_url,
         }
     end
     if resp.has_more then
@@ -3477,7 +3551,7 @@ function Shelfmark:doSearch(params, existing_books)
             end
         end,
     }
-    attachCoverSupport(results_menu)
+    attachCoverSupport(results_menu, self)
     UIManager:show(results_menu)
 end
 
@@ -3845,7 +3919,7 @@ function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
             end
         end,
     }
-    attachCoverSupport(releases_menu)
+    attachCoverSupport(releases_menu, self)
     UIManager:show(releases_menu)
 end
 
@@ -4101,13 +4175,22 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
         return
     end
 
-    -- Only the newly-fetched page needs a cover fetch -- see the identical
-    -- note in doSearch above.
-    self:prefetchCovers(new_books)
+    -- Only prefetch enough covers for the page shown first -- see the
+    -- identical note in doSearch above.
+    local first_page_books = {}
+    for i = 1, math.min(#new_books, COVER_ITEMS_PER_PAGE) do
+        first_page_books[i] = new_books[i]
+    end
+    self:prefetchCovers(first_page_books)
 
     local item_table = {}
     for i, book in ipairs(books) do
-        item_table[i] = { text = formatBookRowText(book), book_data = book, cover_path = book.cover_path }
+        item_table[i] = {
+            text = formatBookRowText(book),
+            book_data = book,
+            cover_path = book.cover_path,
+            cover_url = book.cover_url,
+        }
     end
     if total and #books < total then
         item_table[#item_table + 1] = { text = _("-- Load more results --"), is_load_more = true }
@@ -4138,7 +4221,7 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
             end
         end,
     }
-    attachCoverSupport(bibliography_menu)
+    attachCoverSupport(bibliography_menu, self)
     UIManager:show(bibliography_menu)
 end
 
