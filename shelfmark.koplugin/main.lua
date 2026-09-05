@@ -1286,7 +1286,7 @@ local function doHardcoverAuthorBibliography(token, author_id, limit, offset)
                 contributions(
                     where: {
                         contributable_type: {_eq: "Book"}
-                        book: { canonical_id: {_is_null: true}, state: {_in: ["normalized", "normalizing"]} }
+                        book: { canonical_id: {_is_null: true}, state: {_in: ["normalized", "normalizing"]}, compilation: {_eq: false} }
                     }
                     order_by: [
                         {book: {users_count: desc_nulls_last}},
@@ -1311,7 +1311,7 @@ local function doHardcoverAuthorBibliography(token, author_id, limit, offset)
                 contributions_aggregate(
                     where: {
                         contributable_type: {_eq: "Book"}
-                        book: { canonical_id: {_is_null: true}, state: {_in: ["normalized", "normalizing"]} }
+                        book: { canonical_id: {_is_null: true}, state: {_in: ["normalized", "normalizing"]}, compilation: {_eq: false} }
                     }
                 ) { aggregate { count } }
             }
@@ -1321,10 +1321,17 @@ local function doHardcoverAuthorBibliography(token, author_id, limit, offset)
     local author = data.authors and data.authors[1]
     if not author then return nil, nil, nil, _("Author not found on Hardcover.") end
 
+    -- Safety net alongside the compilation:false filter above -- cheap
+    -- insurance against any other duplicate source (a book credited to this
+    -- author under more than one contribution row, translated editions that
+    -- slip past canonical_id, etc.) rather than a fix for a specific known
+    -- cause.
+    local seen_ids = {}
     local books = {}
     for _, c in ipairs(author.contributions or {}) do
         local b = c.book
-        if b then
+        if b and not seen_ids[b.id] then
+            seen_ids[b.id] = true
             local authors = {}
             for _, bc in ipairs(b.contributions or {}) do
                 if bc.author and bc.author.name then table.insert(authors, bc.author.name) end
@@ -2817,20 +2824,6 @@ function Shelfmark:addToMainMenu(menu_items)
                 separator = true,
                 sub_item_table = {
                     {
-                        text = _("Mark a book as Currently Reading..."),
-                        keep_menu_open = true,
-                        callback = function()
-                            self:promptHardcoverLogBook(HARDCOVER_STATUS_CURRENTLY_READING, _("Currently Reading"))
-                        end,
-                    },
-                    {
-                        text = _("Mark a book as Read..."),
-                        keep_menu_open = true,
-                        callback = function()
-                            self:promptHardcoverLogBook(HARDCOVER_STATUS_READ, _("Read"))
-                        end,
-                    },
-                    {
                         text = _("Follow an author..."),
                         keep_menu_open = true,
                         callback = function() self:promptHardcoverFollowAuthor() end,
@@ -3641,16 +3634,6 @@ local function confirmAndFollowAuthorOnHardcover(self, author_name)
     })
 end
 
-function Shelfmark:promptHardcoverLogBook(status_id, status_label)
-    if not self.hardcover_token or self.hardcover_token == "" then
-        UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
-        return
-    end
-    promptHardcoverText(_("Log a book on Hardcover"), _("Book title"), function(title)
-        confirmAndLogBookOnHardcover(self, title, status_id, status_label)
-    end)
-end
-
 -- Long-press-on-cover entry point (see registerFileDialogButtons below) --
 -- the title is already known from the file itself, so this skips straight
 -- to search+confirm with no typing at all.
@@ -3812,7 +3795,11 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
     for i, book in ipairs(books) do
         local byline = describeAuthor(book) .. describeYear(book)
         local metrics = describeMetrics(book)
-        local title_text = truncate(book.title, 140) or _("Untitled")
+        -- 300, not doSearch's 140 -- there's no author/relevance-driven
+        -- title-length pressure here the way a broad keyword search has, so
+        -- there's less reason to truncate a real title at all; this is
+        -- generous enough that the ellipsis should essentially never fire.
+        local title_text = truncate(book.title, 300) or _("Untitled")
         if byline ~= "" then title_text = title_text .. "\n" .. byline end
         if metrics ~= "" then title_text = title_text .. "\n" .. metrics end
         item_table[i] = { text = title_text, book_data = book }
