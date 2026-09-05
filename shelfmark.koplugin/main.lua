@@ -3228,7 +3228,11 @@ end
 -- different in practice: search CWA's own OPDS catalog by title (the book
 -- should already be imported there by the time a request shows
 -- delivery_state "complete") and let you download straight from there.
-function Shelfmark:downloadFromCwa(title)
+-- caller_menu, when given, is closed here rather than by the caller before
+-- invoking this -- see the identical note on doSearch's own caller_menu.
+function Shelfmark:downloadFromCwa(title, caller_menu)
+    if caller_menu then UIManager:close(caller_menu) end
+
     if not self.cwa_url or self.cwa_url == "" then
         UIManager:show(InfoMessage:new{
             text = _("Add a CWA URL under Shelfmark Settings to enable downloading from here."),
@@ -3274,15 +3278,18 @@ function Shelfmark:downloadFromCwa(title)
         is_popout = false,
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
-            UIManager:close(results_menu)
             local Trapper = require("ui/trapper")
-            Trapper:wrap(function() self:saveCwaEntry(item.entry) end)
+            Trapper:wrap(function() self:saveCwaEntry(item.entry, results_menu) end)
         end,
     }
     UIManager:show(results_menu)
 end
 
-function Shelfmark:saveCwaEntry(entry)
+-- caller_menu, when given, is closed here rather than by the caller before
+-- invoking this -- see the identical note on doSearch's own caller_menu.
+function Shelfmark:saveCwaEntry(entry, caller_menu)
+    if caller_menu then UIManager:close(caller_menu) end
+
     local dir = (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
     if lfs.attributes(dir, "mode") ~= "directory" then
         -- One level at a time -- lfs.mkdir isn't recursive (no "mkdir -p"),
@@ -3687,8 +3694,16 @@ end
 -- through before reaching a release -- see the note there on why that
 -- exposure window matters. existing_books, when given, is the accumulated
 -- result list so far (used by "Load more" to append rather than replace).
-function Shelfmark:doSearch(params, existing_books)
-    UIManager:show(InfoMessage:new{ text = _("Searching..."), timeout = 1 })
+-- caller_menu, when given, is closed here rather than by the caller before
+-- invoking this -- keeps whatever menu the reader is coming from on screen
+-- through this function's own synchronous setup, so the screen doesn't go
+-- blank (revealing whatever's underneath) before apiRequest's own Trapper
+-- progress dialog appears. The standalone "Searching..." toast that used to
+-- be here was removed for the same reason: apiRequest already shows its own
+-- "Talking to Shelfmark..." dialog for this exact wait, so it was a second,
+-- redundant refresh announcing the same thing.
+function Shelfmark:doSearch(params, existing_books, caller_menu)
+    if caller_menu then UIManager:close(caller_menu) end
 
     local qs = { "limit=" .. tostring(params.limit or 100), "sort=popularity", "page=" .. tostring(params.page or 1) }
     if params.query and params.query ~= "" then
@@ -3805,7 +3820,6 @@ function Shelfmark:doSearch(params, existing_books)
         is_popout = false,
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
-            UIManager:close(results_menu)
             if item.is_load_more then
                 local Trapper = require("ui/trapper")
                 Trapper:wrap(function()
@@ -3817,12 +3831,12 @@ function Shelfmark:doSearch(params, existing_books)
                         title_override = params.title_override,
                         prefer_popular_edition = params.prefer_popular_edition,
                         page = (params.page or 1) + 1,
-                    }, books)
+                    }, books, results_menu)
                 end)
             else
                 local Trapper = require("ui/trapper")
                 Trapper:wrap(function()
-                    self:browseReleases(item.book_data, defaultReleaseQuery(item.book_data))
+                    self:browseReleases(item.book_data, defaultReleaseQuery(item.book_data), results_menu)
                 end)
             end
         end,
@@ -3903,7 +3917,13 @@ end
 -- working one before falling through to Prowlarr -- see mirror-watch.js in
 -- annas-archive-api for why this is a manual, on-demand action rather than
 -- something checked automatically in the background.
-function Shelfmark:browseReleases(book, manual_query)
+-- caller_menu, when given, is closed here rather than by the caller before
+-- invoking this -- see the identical note on doSearch's own caller_menu.
+-- Only needed on this, the entry point: annasSearch retries below already
+-- run after caller_menu has been closed on the very first call.
+function Shelfmark:browseReleases(book, manual_query, caller_menu)
+    if caller_menu then UIManager:close(caller_menu) end
+
     -- Anna's Archive as the primary source, Prowlarr/Shelfmark's own
     -- direct_download only as a fallback when Anna's Archive genuinely has
     -- nothing -- explicit choice per user request ("Prowlarr as the
@@ -3962,8 +3982,10 @@ function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
     end
 
     if not releases then
-        UIManager:show(InfoMessage:new{ text = _("Searching release sources (Prowlarr etc.)..."), timeout = 2 })
-
+        -- No standalone "Searching..." toast here -- the apiRequest call
+        -- below already shows its own Trapper progress dialog with a more
+        -- specific message for this exact wait; a toast first would just be
+        -- a second, redundant refresh announcing the same thing.
         local qs = {
             "provider=" .. socketurl.escape(book.provider or ""),
             "book_id=" .. socketurl.escape(book.provider_id or ""),
@@ -4365,7 +4387,6 @@ function Shelfmark:browseHardcoverLists()
         is_popout = false,
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
-            UIManager:close(lists_menu)
             local Trapper = require("ui/trapper")
             Trapper:wrap(function()
                 self:doSearch({
@@ -4373,7 +4394,7 @@ function Shelfmark:browseHardcoverLists()
                     limit = 30,
                     title_override = item.label,
                     prefer_popular_edition = true,
-                })
+                }, nil, lists_menu)
             end)
         end,
     }
@@ -4422,10 +4443,9 @@ function Shelfmark:browseFollowedAuthors()
         is_popout = false,
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
-            UIManager:close(authors_menu)
             local Trapper = require("ui/trapper")
             Trapper:wrap(function()
-                self:browseAuthorBibliography(item.author_id, item.author_name, 0, nil)
+                self:browseAuthorBibliography(item.author_id, item.author_name, 0, nil, authors_menu)
             end)
         end,
     }
@@ -4438,7 +4458,11 @@ end
 -- title/authors/publish_year/display_fields/provider/provider_id, all
 -- built by doHardcoverAuthorBibliography to match what
 -- describeBook/describeMetrics already expect.
-function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, existing_books)
+-- caller_menu, when given, is closed here rather than by the caller before
+-- invoking this -- see the identical note on doSearch's own caller_menu.
+function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, existing_books, caller_menu)
+    if caller_menu then UIManager:close(caller_menu) end
+
     local new_books, total, resolved_name, err = self:hardcoverAuthorBibliography(
         author_id, HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE, offset or 0)
     if not new_books then
@@ -4489,15 +4513,14 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
         is_popout = false,
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
-            UIManager:close(bibliography_menu)
             local Trapper = require("ui/trapper")
             if item.is_load_more then
                 Trapper:wrap(function()
-                    self:browseAuthorBibliography(author_id, author_name or resolved_name, #books, books)
+                    self:browseAuthorBibliography(author_id, author_name or resolved_name, #books, books, bibliography_menu)
                 end)
             else
                 Trapper:wrap(function()
-                    self:browseReleases(item.book_data, defaultReleaseQuery(item.book_data))
+                    self:browseReleases(item.book_data, defaultReleaseQuery(item.book_data), bibliography_menu)
                 end)
             end
         end,
@@ -4980,9 +5003,8 @@ function Shelfmark:showMyRequests()
                 UIManager:show(InfoMessage:new{ text = _("Not delivered yet."), timeout = 2 })
                 return
             end
-            UIManager:close(requests_menu)
             local Trapper = require("ui/trapper")
-            Trapper:wrap(function() self:downloadFromCwa(item.title) end)
+            Trapper:wrap(function() self:downloadFromCwa(item.title, requests_menu) end)
         end,
         -- Explicit, separate from tap: tapping a delivered request already
         -- searches CWA and re-downloads, so this is functionally the same
@@ -5006,9 +5028,8 @@ function Shelfmark:showMyRequests()
                             text = _("Redownload"),
                             callback = function()
                                 UIManager:close(hold_dialog)
-                                UIManager:close(requests_menu)
                                 local Trapper = require("ui/trapper")
-                                Trapper:wrap(function() self:downloadFromCwa(item.title) end)
+                                Trapper:wrap(function() self:downloadFromCwa(item.title, requests_menu) end)
                             end,
                         },
                     },
