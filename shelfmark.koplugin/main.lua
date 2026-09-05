@@ -2698,6 +2698,7 @@ function Shelfmark:browseReleases(book, manual_query)
     if aa_err == _("Cancelled.") then return end
 
     if aa_err_code == "MIRROR_DOWN" then
+        local ConfirmBox = require("ui/widget/confirmbox")
         UIManager:show(ConfirmBox:new{
             text = _("Anna's Archive's usual address seems to be down. Look for a working mirror, or skip it and search other sources?"),
             ok_text = _("Find a working mirror"),
