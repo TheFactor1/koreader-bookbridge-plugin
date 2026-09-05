@@ -838,7 +838,13 @@ local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
     local body = table.concat(sink_table)
     debugLog("[annas] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#body))
     if code ~= 200 then
-        return nil, code, T(_("Anna's Archive search failed (HTTP %1)."), tostring(code))
+        -- The backend's error code (e.g. "MIRROR_DOWN") rides in the JSON
+        -- body, not the HTTP status -- previously discarded here, which is
+        -- why a dead mirror looked identical to any other failure.
+        local d_ok, d = pcall(JSON.decode, body)
+        local err_code = d_ok and d and d.code or nil
+        local err_msg = (d_ok and d and d.error) or T(_("Anna's Archive search failed (HTTP %1)."), tostring(code))
+        return nil, code, err_msg, err_code
     end
     local decode_ok, decoded = pcall(JSON.decode, body)
     if not decode_ok or not decoded or not decoded.results then
@@ -856,6 +862,48 @@ local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
     -- version of this fix already documents. Some AA result almost
     -- certainly had a null author/cover_url/downloads field.
     return stripJsonNull(decoded.results), code
+end
+
+-- Called only when a search just failed with err_code "MIRROR_DOWN" (see
+-- Shelfmark:annasSearch's caller) -- never on a timer. Asks the backend to
+-- check whether its configured Anna's Archive mirror is actually still
+-- Anna's Archive and, if not, switch to another known-alive one.
+local function doAnnasMirrorRefresh(annas_url, socks5_proxy)
+    if not annas_url or annas_url == "" then
+        return nil, nil, _("Anna's Archive API URL isn't set.")
+    end
+    local url = annas_url .. "/api/mirror-refresh"
+    debugLog("[annas] -> GET " .. url)
+
+    socketutil:set_timeout(10, 30)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "GET", url = url, sink = sink }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        debugLog("[annas] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the Anna's Archive service.")
+    end
+    local body = table.concat(sink_table)
+    debugLog("[annas] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#body))
+    if code ~= 200 then
+        return nil, code, T(_("Checking for a working mirror failed (HTTP %1)."), tostring(code))
+    end
+    local decode_ok, decoded = pcall(JSON.decode, body)
+    if not decode_ok or not decoded then
+        return nil, code, _("Anna's Archive returned an unreadable response.")
+    end
+    return decoded, code
 end
 
 local function doAnnasFetchDownloadUrl(annas_url, download_key, tld, md5, socks5_proxy)
@@ -1729,12 +1777,25 @@ function Shelfmark:annasSearch(query, progress_text)
     local annas_url, download_key, tld, socks5_proxy =
         self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
 
-    local completed, results, code, err = Trapper:dismissableRunInSubprocess(function()
+    local completed, results, code, err, err_code = Trapper:dismissableRunInSubprocess(function()
         return doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
     end, progress_text or _("Searching Anna's Archive..."))
 
     if not completed then return nil, nil, _("Cancelled.") end
-    return results, code, err
+    return results, code, err, err_code
+end
+
+-- See doAnnasMirrorRefresh above for when this actually gets called.
+function Shelfmark:annasMirrorRefresh()
+    local Trapper = require("ui/trapper")
+    local annas_url, socks5_proxy = self.annas_url, self.socks5_proxy
+
+    local completed, result, code, err = Trapper:dismissableRunInSubprocess(function()
+        return doAnnasMirrorRefresh(annas_url, socks5_proxy)
+    end, _("Looking for a working Anna's Archive mirror..."))
+
+    if not completed then return nil, nil, _("Cancelled.") end
+    return result, code, err
 end
 
 function Shelfmark:annasFetchDownloadUrl(md5, progress_text)
@@ -2617,6 +2678,12 @@ local function annasResultToRelease(result)
     }
 end
 
+-- Entry point: runs the Anna's Archive search, and only when it fails
+-- specifically because the mirror looks dead (err_code "MIRROR_DOWN", not a
+-- bad key, a bot challenge, or a plain "no results") offers to look for a
+-- working one before falling through to Prowlarr -- see mirror-watch.js in
+-- annas-archive-api for why this is a manual, on-demand action rather than
+-- something checked automatically in the background.
 function Shelfmark:browseReleases(book, manual_query)
     -- Anna's Archive as the primary source, Prowlarr/Shelfmark's own
     -- direct_download only as a fallback when Anna's Archive genuinely has
@@ -2627,9 +2694,45 @@ function Shelfmark:browseReleases(book, manual_query)
     -- occasions it comes up empty and Prowlarr ends up doing the real
     -- work anyway.
     local aa_query = (manual_query and manual_query ~= "") and manual_query or defaultReleaseQuery(book)
-    local aa_results, _aa_code, aa_err = self:annasSearch(aa_query)
+    local aa_results, _aa_code, aa_err, aa_err_code = self:annasSearch(aa_query)
     if aa_err == _("Cancelled.") then return end
 
+    if aa_err_code == "MIRROR_DOWN" then
+        UIManager:show(ConfirmBox:new{
+            text = _("Anna's Archive's usual address seems to be down. Look for a working mirror, or skip it and search other sources?"),
+            ok_text = _("Find a working mirror"),
+            cancel_text = _("Skip, search other sources"),
+            ok_callback = function()
+                local result = self:annasMirrorRefresh()
+                if result and result.switched then
+                    UIManager:show(InfoMessage:new{
+                        text = T(_("Switched to annas-archive.%1 — searching again..."), result.activeTld),
+                        timeout = 2,
+                    })
+                    self:browseReleases(book, manual_query)
+                elseif result and result.allDead then
+                    UIManager:show(InfoMessage:new{
+                        text = _("Every known Anna's Archive mirror is unreachable right now. Searching other sources instead..."),
+                        timeout = 3,
+                    })
+                    self:browseReleasesContinue(book, manual_query, nil)
+                else
+                    UIManager:show(InfoMessage:new{
+                        text = _("That mirror looks fine now — the earlier failure may have been temporary. Try your search again."),
+                    })
+                end
+            end,
+            cancel_callback = function()
+                self:browseReleasesContinue(book, manual_query, nil)
+            end,
+        })
+        return
+    end
+
+    self:browseReleasesContinue(book, manual_query, aa_results)
+end
+
+function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
     local releases
     if aa_results and #aa_results > 0 then
         releases = {}
