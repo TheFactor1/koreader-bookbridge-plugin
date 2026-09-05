@@ -433,6 +433,45 @@ local function debugLog(msg)
     end
 end
 
+-- Drops KOReader's own cached metadata/cover row for a book file this
+-- plugin just overwrote, so the file browser and bookshelf re-read the
+-- new file instead of showing the replaced copy's title/author/cover.
+--
+-- Confirmed live, the hard way: after a CWA-side metadata edit synced a
+-- corrected file down (right title, right authors, description embedded),
+-- the bookshelf still showed the OLD title and authors and no
+-- description -- the file on disk was correct the whole time, hidden
+-- behind coverbrowser's cached row for the previous copy.
+-- coverbrowser's cache does record filesize/filemtime, and
+-- bookshelf.koplugin's own startup "stale-sweep" purges rows whose
+-- file changed underneath them -- which is why restarting KOReader
+-- resolved it -- but nothing invalidated the row *during* a running
+-- session, so a sync's own replacement stayed invisible until the next
+-- restart. This closes that window.
+--
+-- MUST only be called from the main process: doSyncLibrary runs inside a
+-- forked Trapper subprocess, and BookInfoManager opens its own SQLite
+-- connection to a WAL database the parent also has open -- hence
+-- doSyncLibrary collecting paths and syncLibrary invalidating them after
+-- the fork has exited, rather than invalidating inline. Same
+-- pcall-and-feature-check idiom bookshelf.koplugin's own stale-sweep
+-- uses (lib/bookshelf_stale_sweep.lua), since coverbrowser is a separate
+-- plugin that may not be installed at all.
+local function invalidateBookInfoCache(path)
+    if type(path) ~= "string" or path == "" then return end
+    local ok_bim, BIM = pcall(require, "bookinfomanager")
+    if not (ok_bim and BIM and BIM.deleteBookInfo) then
+        debugLog("[cache] coverbrowser BookInfoManager unavailable, skipping invalidation")
+        return
+    end
+    local ok_del, del_err = pcall(function() BIM:deleteBookInfo(path) end)
+    if ok_del then
+        debugLog("[cache] invalidated cached book info for " .. path)
+    else
+        debugLog("[cache] failed to invalidate " .. path .. ": " .. tostring(del_err))
+    end
+end
+
 -- Registry of books this plugin has downloaded, keyed by CWA's uuid --
 -- read by a separate homeserver-side script (shelfmark-kindle-sync in
 -- homeserver-configs/scripts/) that polls CWA for metadata changes and
@@ -2532,6 +2571,11 @@ end
 local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir)
     local report = {}
     local function addLine(s) table.insert(report, s) end
+    -- Paths this run actually overwrote, handed back to the caller so it
+    -- can drop KOReader's cached metadata for them -- see
+    -- invalidateBookInfoCache on why that can't happen here (this whole
+    -- function runs inside a forked subprocess).
+    local replaced_paths = {}
 
     if not cwa_url or cwa_url == "" then
         return { _("CWA URL isn't set -- add it under Shelfmark Settings.") }
@@ -2783,6 +2827,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                             local dl_ok = doCwaFileDownload(cwa_url, cwa_username, cwa_password, epub_path, socks5_proxy, entry.path)
                             if dl_ok then
                                 entry.last_modified = last_modified
+                                replaced_paths[#replaced_paths + 1] = entry.path
                                 addLine(T(_("  [%1] synced."), entry.title or uuid))
                             else
                                 addLine(T(_("  [%1] re-download failed."), entry.title or uuid))
@@ -2796,7 +2841,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
 
     saveSyncRegistry(registry)
     addLine(_("Done."))
-    return report
+    return report, replaced_paths
 end
 
 -- KOReader's own equivalent list (readersearch.lua's find-results Menu)
@@ -3018,11 +3063,20 @@ function Shelfmark:syncLibrary()
     local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
         or self:defaultDownloadDir()
 
-    local completed, report = Trapper:dismissableRunInSubprocess(function()
+    local completed, report, replaced_paths = Trapper:dismissableRunInSubprocess(function()
         return doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir)
     end, _("Syncing library with CWA..."))
 
     if not completed then return end
+
+    -- Back on the main process now that the fork has exited -- the only
+    -- safe place to touch KOReader's own cache DB. See
+    -- invalidateBookInfoCache for why this is needed at all.
+    if type(replaced_paths) == "table" then
+        for i = 1, #replaced_paths do
+            invalidateBookInfoCache(replaced_paths[i])
+        end
+    end
     if type(report) ~= "table" or #report == 0 then
         UIManager:show(InfoMessage:new{ text = _("Sync finished with no output.") })
         return
@@ -3397,6 +3451,11 @@ function Shelfmark:saveCwaEntry(entry, caller_menu)
         UIManager:show(InfoMessage:new{ text = T(_("Download failed (HTTP %1)"), tostring(code)) })
         return
     end
+    -- In case this overwrote an existing copy of the same book -- see
+    -- invalidateBookInfoCache. Runs on the main process (cwaFileDownload
+    -- did its own forking internally and has already returned).
+    invalidateBookInfoCache(save_path)
+
     UIManager:show(InfoMessage:new{
         text = T(_("Saved to %1"), save_path),
         timeout = 4,
@@ -4835,6 +4894,11 @@ function Shelfmark:downloadFromAnnasArchive(release)
         UIManager:show(InfoMessage:new{ text = _("Download succeeded but couldn't be saved.") })
         return
     end
+
+    -- In case this overwrote an existing copy of the same book -- see
+    -- invalidateBookInfoCache.
+    invalidateBookInfoCache(save_path)
+
     UIManager:show(InfoMessage:new{ text = T(_("Saved to %1"), save_path), timeout = 4 })
 end
 
