@@ -2894,6 +2894,31 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         end
     end
 
+    -- Drop rows whose local file is gone before checking anything against
+    -- CWA. Two reasons, one cosmetic and one not: stale rows otherwise
+    -- accumulate forever (confirmed live -- a book re-downloaded under a
+    -- cleaner filename left its old row pointing at a path that no longer
+    -- existed), and more importantly the CWA-side check below re-downloads
+    -- to entry.path without ever confirming the file is still there, so a
+    -- book deliberately deleted off the device would silently reappear the
+    -- next time its metadata changed in CWA.
+    --
+    -- Safe against a mass-prune: doSyncLibrary already returned early at
+    -- the top if download_dir itself doesn't exist, so an unmounted or
+    -- renamed books folder can't wipe the whole registry here. Setting an
+    -- existing key to nil mid-pairs() is explicitly allowed in Lua (adding
+    -- keys is not).
+    local pruned = 0
+    for uuid, entry in pairs(registry) do
+        if type(entry) == "table" and entry.path
+                and not lfs.attributes(entry.path, "mode") then
+            registry[uuid] = nil
+            pruned = pruned + 1
+            addLine(T(_("  [%1] no longer on this device -- stopped tracking."), entry.title or uuid))
+        end
+    end
+    if pruned > 0 then saveSyncRegistry(registry) end
+
     local tracked_count = 0
     for _ in pairs(registry) do tracked_count = tracked_count + 1 end
     addLine(T(_("Checking %1 tracked book(s) for CWA-side changes..."), tracked_count))
