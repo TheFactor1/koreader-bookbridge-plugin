@@ -2558,17 +2558,23 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- Wing" duplicate this fixes.
             local cleaned_fname = stripTrailingParenGroups(fname)
             -- Search on the title alone, not "Title - Author" combined --
-            -- confirmed live: CWA's own OPDS search appears to AND across
-            -- every word in the query, and "Dune Messiah   Frank Herbert"
+            -- CWA's own OPDS search does an exact substring/phrase match
+            -- against its stored title (confirmed live -- see the note
+            -- below on the Dungeon Anarchist's Cookbook bug -- this
+            -- comment used to say "AND across every word", which happened
+            -- to predict the same outcome for the case that followed but
+            -- was the wrong mental model). "Dune Messiah   Frank Herbert"
             -- (title+author combined, this file's own convention for
             -- z-library-sourced filenames) returned zero entries even
-            -- though "Dune Messiah" alone finds the book immediately --
-            -- caught the same way as the two fixes above, a genuine
-            -- "Dune Messiah" duplicate. The word-matching step below still
-            -- checks the FULL fname (title and author both) for precision,
-            -- so this only broadens the initial CWA search, not the actual
-            -- match decision -- a real different-book match still needs
-            -- the author to show up in its own title too, same as before.
+            -- though "Dune Messiah" alone finds the book immediately,
+            -- simply because the real stored title doesn't contain "Frank
+            -- Herbert" as literal title text -- caught the same way as the
+            -- two fixes above, a genuine "Dune Messiah" duplicate. The
+            -- word-matching step below still checks the FULL fname (title
+            -- and author both) for precision, so this only broadens the
+            -- initial CWA search, not the actual match decision -- a real
+            -- different-book match still needs the author to show up in
+            -- its own title too, same as before.
             -- Only splits on a *spaced* " - " (an author separator in
             -- this convention); a hyphen with no surrounding spaces, as in
             -- an actual hyphenated title word, is left alone.
@@ -2586,6 +2592,15 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- was never actually looking for it in the first place. A comma
             -- in the pre-separator segment is a reliable signal it's a
             -- "Last, First" author, not a title -- use the other side then.
+            -- (A natural-order "Author - Title" filename with no comma,
+            -- e.g. "Cixin Liu - The Three-Body Problem", isn't caught by
+            -- this and falls through to the "Title - Author" branch below,
+            -- searching CWA for the author name instead of the title --
+            -- no comma-independent way to tell the two conventions apart
+            -- exists. Confirmed live this doesn't currently break anything:
+            -- CWA's search also matches against the author field, so an
+            -- accidentally-author-shaped query still usually finds the
+            -- right book by author instead of title.)
             local before_sep, after_sep = cleaned_fname:match("^(.-)%s+%-%s+(.+)$")
             local search_title
             if before_sep and before_sep:find(",") and after_sep and after_sep ~= "" then
@@ -2596,24 +2611,37 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 search_title = cleaned_fname
             end
             -- Anna's Archive (and similar sources) can't put a literal
-            -- colon in a filename, so it substitutes an underscore -- but
-            -- CWA's OPDS search does an exact substring/phrase match
-            -- against its stored title, not a tokenized word-AND match.
-            -- Confirmed live, the hard way: CWA's catalog already had 3
-            -- duplicate copies of "The Dungeon Anarchist's Cookbook:
-            -- Dungeon Crawler Carl Book 3" -- this exact bug re-uploading
-            -- it every single sync run, because searching the exact
-            -- stored title (colon intact) finds all 3 real entries, but
-            -- searching anything else -- even just one extra or
-            -- substituted word after "Cookbook" -- finds none at all, no
-            -- matter how it's spelled or how many words overlap.
-            -- Truncating the query at the first underscore, rather than
-            -- turning it into a space and continuing into whatever the
-            -- real title said after the colon, keeps the query to the one
-            -- substring guaranteed unmangled: everything before wherever
-            -- a colon most likely used to be.
-            local query_source = search_title:match("^([^_]+)") or search_title
-            local query = query_source:gsub("[%-%[%]%(%)]", " ")
+            -- colon in a filename, so it substitutes an underscore, and
+            -- can't put a bracket-qualified annotation inline either
+            -- without it looking like part of the title -- but CWA's OPDS
+            -- search does an exact substring/phrase match against its
+            -- stored title, not a tokenized word-AND match. Confirmed
+            -- live, the hard way: CWA's catalog already had 3 duplicate
+            -- copies of "The Dungeon Anarchist's Cookbook: Dungeon Crawler
+            -- Carl Book 3" -- this exact bug re-uploading it every single
+            -- sync run, because searching the exact stored title (colon
+            -- intact) finds all 3 real entries, but searching anything
+            -- else -- even just one extra or substituted word after
+            -- "Cookbook" -- finds none at all, no matter how it's spelled
+            -- or how many words overlap.
+            --
+            -- Truncating the query at the first underscore/bracket/paren,
+            -- rather than turning those into spaces and continuing into
+            -- whatever the real title said past that point, keeps the
+            -- query to the one substring guaranteed unmangled: everything
+            -- before wherever a colon or annotation most likely used to
+            -- be. Deliberately does NOT touch "-": unlike those, a plain
+            -- hyphen is routinely real title content once the spaced " - "
+            -- separator has already been split off above (e.g.
+            -- "Spider-Man", "The Three-Body Problem") -- blanking it here
+            -- would silently reintroduce the exact same class of bug this
+            -- whole fix exists to close, just via a different character.
+            -- No currently-broken title in this library hits this
+            -- specifically (every hyphenated filename found either has its
+            -- hyphen removed by stripTrailingParenGroups first or falls on
+            -- the author side of the split above), but it's a live,
+            -- waiting failure for the next title where it doesn't.
+            local query = search_title:match("^([^_%[%(]+)") or search_title
             local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
                 "/opds/search/" .. socketurl.escape(query), socks5_proxy)
             local matches = {}
