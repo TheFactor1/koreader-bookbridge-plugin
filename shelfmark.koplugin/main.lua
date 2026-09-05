@@ -2595,7 +2595,25 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             else
                 search_title = cleaned_fname
             end
-            local query = search_title:gsub("[_%-%[%]%(%)]", " ")
+            -- Anna's Archive (and similar sources) can't put a literal
+            -- colon in a filename, so it substitutes an underscore -- but
+            -- CWA's OPDS search does an exact substring/phrase match
+            -- against its stored title, not a tokenized word-AND match.
+            -- Confirmed live, the hard way: CWA's catalog already had 3
+            -- duplicate copies of "The Dungeon Anarchist's Cookbook:
+            -- Dungeon Crawler Carl Book 3" -- this exact bug re-uploading
+            -- it every single sync run, because searching the exact
+            -- stored title (colon intact) finds all 3 real entries, but
+            -- searching anything else -- even just one extra or
+            -- substituted word after "Cookbook" -- finds none at all, no
+            -- matter how it's spelled or how many words overlap.
+            -- Truncating the query at the first underscore, rather than
+            -- turning it into a space and continuing into whatever the
+            -- real title said after the colon, keeps the query to the one
+            -- substring guaranteed unmangled: everything before wherever
+            -- a colon most likely used to be.
+            local query_source = search_title:match("^([^_]+)") or search_title
+            local query = query_source:gsub("[%-%[%]%(%)]", " ")
             local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
                 "/opds/search/" .. socketurl.escape(query), socks5_proxy)
             local matches = {}
