@@ -2753,6 +2753,25 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- check manually" below, which is reported, not silent, and
             -- never a duplicate upload.
             local queries = { query }
+
+            -- An apostrophe is another place the same title gets written
+            -- two different ways, and an exact-substring search can't
+            -- bridge that. Confirmed live: CWA stores this library's copy
+            -- as "The Hitchhiker`s Guide to the Galaxy" -- a BACKTICK --
+            -- while the local filename has a proper apostrophe, so
+            -- searching the full title found only an unrelated "...Further
+            -- Radio Scripts" edition and never the actual novel sitting
+            -- right there in the catalog. Truncating at the apostrophe
+            -- ("The hitchhiker") matches either spelling, same reasoning
+            -- as the underscore/bracket/paren truncation above.
+            local apos = query:find("['\148\145\146`]")
+            if apos and apos > 1 then
+                local trimmed = query:sub(1, apos - 1):gsub("%s+$", "")
+                if trimmed ~= "" and trimmed ~= query then
+                    queries[#queries + 1] = trimmed
+                end
+            end
+
             local words = {}
             for w in query:gmatch("%S+") do words[#words + 1] = w end
             local attempts = 0
@@ -2762,71 +2781,71 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 attempts = attempts + 1
             end
 
-            local resp_body, code
-            for _, q in ipairs(queries) do
-                resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
-                    "/opds/search/" .. socketurl.escape(q), socks5_proxy)
-                if resp_body and code == 200 and resp_body:find("<entry>", 1, true) then
-                    break
-                end
-            end
+            -- Try candidates until one actually yields a confident match,
+            -- not merely until one yields any rows at all. The old
+            -- stop-on-first-rows rule meant a query that surfaced only a
+            -- *different* book (the Radio Scripts case above) ended the
+            -- search, so the real book was never looked for. Matches are
+            -- collected across candidates and de-duplicated by uuid, and
+            -- relevant-row counts accumulate, so the skip/upload decision
+            -- below sees everything that was actually found. Short-circuits
+            -- as soon as a match exists, so the common case still costs a
+            -- single request.
             local matches = {}
-            -- Separate from #matches -- see below. CWA's search genuinely
-            -- returning nothing is the only case safe to treat as "not in
-            -- CWA yet"; a search that DID return entries, just none our
-            -- strict word-matcher trusted, is a different situation
-            -- entirely and was silently falling into the same "upload it"
-            -- branch as a real zero-result search -- confirmed live as the
-            -- actual cause of a genuine "Dune Messiah" duplicate: CWA's
-            -- search returned a real, non-empty response, the matcher just
-            -- didn't recognize it, and the old logic uploaded anyway.
-            -- Only entries plausibly ABOUT this book count toward that
-            -- "skipped, check manually" decision -- an entry sharing not a
-            -- single title word with the local filename cannot be the same
-            -- book, so it is no evidence either way.
-            --
-            -- This matters because the query is frequently the author's
-            -- name rather than the title: a "Author - Title" filename with
-            -- no comma (e.g. "Stephen King - The Dark Tower 1_ The
-            -- Gunslinger.epub") is indistinguishable from "Title - Author"
-            -- by structure alone -- "Dune Messiah" and "Stephen King" are
-            -- both two capitalised words -- so the pre-separator half gets
-            -- taken as the title. CWA then searches the author field,
-            -- happily returns that author's OTHER books, and the old
-            -- unfiltered count treated those as "results we didn't
-            -- understand", skipping a genuinely new book. Confirmed live:
-            -- The Gunslinger sat through five consecutive syncs without
-            -- ever uploading, while being genuinely absent from CWA.
-            --
-            -- The protection this branch exists for is unchanged: for the
-            -- "Dune Messiah" case it guards against, CWA's response DOES
-            -- contain the real same-titled book, which shares title words
-            -- and is still counted -- so that still skips rather than
-            -- uploading a duplicate.
+            local seen_uuids = {}
             local raw_entry_count = 0
-            if resp_body and code == 200 then
-                local fname_words = normalizeTitleWords(fname)
-                local seen_uuids = {}
-                for _, e in ipairs(parseOpdsEntries(resp_body)) do
-                    local entry_words = normalizeTitleWords(e.title)
-                    local shares_a_word = false
-                    for w in pairs(entry_words) do
-                        if fname_words[w] then
-                            shares_a_word = true
-                            break
+            local any_response = false
+            local fname_words = normalizeTitleWords(fname)
+
+            for _, q in ipairs(queries) do
+                local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+                    "/opds/search/" .. socketurl.escape(q), socks5_proxy)
+                if resp_body and code == 200 then
+                    any_response = true
+                    for _, e in ipairs(parseOpdsEntries(resp_body)) do
+                        local entry_words = normalizeTitleWords(e.title)
+                        local shares_a_word = false
+                        for w in pairs(entry_words) do
+                            if fname_words[w] then
+                                shares_a_word = true
+                                break
+                            end
                         end
-                    end
-                    if shares_a_word then
-                        raw_entry_count = raw_entry_count + 1
-                    end
-                    if e.uuid and not seen_uuids[e.uuid] then
-                        if titleWordsSubsetOf(entry_words, normalizeTitleWords(e.author), fname_words) then
-                            table.insert(matches, e)
-                            seen_uuids[e.uuid] = true
+                        if shares_a_word and e.uuid and not seen_uuids[e.uuid] then
+                            raw_entry_count = raw_entry_count + 1
+                        end
+                        if e.uuid and not seen_uuids[e.uuid] then
+                            if titleWordsSubsetOf(entry_words, normalizeTitleWords(e.author), fname_words) then
+                                table.insert(matches, e)
+                                seen_uuids[e.uuid] = true
+                            end
                         end
                     end
                 end
+                if #matches > 0 then break end
             end
+            -- raw_entry_count is deliberately separate from #matches. CWA
+            -- genuinely returning nothing is the only case safe to treat
+            -- as "not in CWA yet"; a search that DID return a plausible
+            -- row, just none the strict word-matcher trusted, is a
+            -- different situation and used to fall into the same "upload
+            -- it" branch as a real zero-result search -- confirmed live as
+            -- the cause of a genuine "Dune Messiah" duplicate.
+            --
+            -- Only rows plausibly ABOUT this book count toward it: a row
+            -- sharing not one title word with the local filename cannot be
+            -- the same book, so it is no evidence either way. That matters
+            -- because the query is often the author's name rather than the
+            -- title -- an "Author - Title" filename with no comma (e.g.
+            -- "Stephen King - The Dark Tower 1_ The Gunslinger.epub") is
+            -- indistinguishable from "Title - Author" by structure alone,
+            -- so CWA searches the author field and returns that author's
+            -- OTHER books. Counting those unfiltered kept a genuinely new
+            -- book from ever uploading (confirmed live: The Gunslinger sat
+            -- through five consecutive syncs). The protection itself is
+            -- unchanged -- in the "Dune Messiah" case, CWA's response does
+            -- contain the real same-titled book, which shares title words,
+            -- still counts, and still forces a skip over a duplicate.
             if #matches == 1 then
                 local m = matches[1]
                 if registry[m.uuid] then
@@ -2848,6 +2867,15 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- on every subsequent sync rather than being silently
                 -- dropped forever.
                 addLine(T(_("  [%1] CWA search returned %2 result(s) for this query but none matched confidently -- skipped, check manually."), fname, tostring(raw_entry_count)))
+            elseif not any_response then
+                -- Every search failed outright (CWA unreachable, auth
+                -- rejected, 5xx...). "No results" and "couldn't ask" look
+                -- identical from raw_entry_count alone, and treating the
+                -- second as "not in CWA yet" would upload a book that may
+                -- well already be there -- exactly the duplicate this
+                -- whole path exists to avoid. Left untracked so the next
+                -- sync retries it normally.
+                addLine(T(_("  [%1] couldn't reach CWA to check -- skipped, will retry next sync."), fname))
             else
                 table.insert(to_upload, path)
             end
