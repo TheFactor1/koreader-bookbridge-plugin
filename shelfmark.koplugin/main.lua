@@ -459,16 +459,37 @@ end
 -- plugin that may not be installed at all.
 local function invalidateBookInfoCache(path)
     if type(path) ~= "string" or path == "" then return end
+
     local ok_bim, BIM = pcall(require, "bookinfomanager")
-    if not (ok_bim and BIM and BIM.deleteBookInfo) then
-        debugLog("[cache] coverbrowser BookInfoManager unavailable, skipping invalidation")
-        return
-    end
-    local ok_del, del_err = pcall(function() BIM:deleteBookInfo(path) end)
-    if ok_del then
-        debugLog("[cache] invalidated cached book info for " .. path)
+    if ok_bim and BIM and BIM.deleteBookInfo then
+        local ok_del, del_err = pcall(function() BIM:deleteBookInfo(path) end)
+        if ok_del then
+            debugLog("[cache] invalidated cached book info for " .. path)
+        else
+            debugLog("[cache] failed to invalidate " .. path .. ": " .. tostring(del_err))
+        end
     else
-        debugLog("[cache] failed to invalidate " .. path .. ": " .. tostring(del_err))
+        debugLog("[cache] coverbrowser BookInfoManager unavailable, skipping invalidation")
+    end
+
+    -- Dropping BIM's row alone refreshes the title/author/description but
+    -- NOT the cover: bookshelf.koplugin keeps its own scaled-cover cache
+    -- (in memory, mirrored to cache/bookshelf_covers on disk) keyed only
+    -- by the file PATH -- which a sync replacing a book in place does not
+    -- change. The superseded thumbnail therefore stayed valid-looking
+    -- forever, which is why a synced cover change only appeared after a
+    -- manual long-press "Refresh metadata". That is precisely the case
+    -- ScaledCoverCache:drop() exists for -- its own docs cite "the book's
+    -- source bytes changed ... must re-decode from BIM" -- and it clears
+    -- the disk layer as well as the resident one.
+    local ok_scc, SCC = pcall(require, "lib/bookshelf_scaled_cover_cache")
+    if ok_scc and SCC and SCC.drop then
+        local ok_drop, drop_err = pcall(function() SCC:drop(path) end)
+        if ok_drop then
+            debugLog("[cache] dropped scaled cover for " .. path)
+        else
+            debugLog("[cache] failed to drop scaled cover for " .. path .. ": " .. tostring(drop_err))
+        end
     end
 end
 
@@ -3212,10 +3233,39 @@ function Shelfmark:syncLibrary()
     -- Back on the main process now that the fork has exited -- the only
     -- safe place to touch KOReader's own cache DB. See
     -- invalidateBookInfoCache for why this is needed at all.
-    if type(replaced_paths) == "table" then
+    if type(replaced_paths) == "table" and #replaced_paths > 0 then
         for i = 1, #replaced_paths do
             invalidateBookInfoCache(replaced_paths[i])
         end
+
+        -- Dropping the caches makes the NEXT render correct, but whatever
+        -- is already on screen was painted before that and won't redraw on
+        -- its own -- which is why a synced cover only appeared after
+        -- navigating away and back. Both the file browser and the
+        -- bookshelf look their covers up cache-first at paint time
+        -- (bookshelf_spine_widget.lua's ScaledCoverCache:get in the paint
+        -- path), so simply forcing a repaint is enough: the lookup misses
+        -- the caches just cleared above and re-decodes from the freshly
+        -- re-extracted data.
+        --
+        -- setDirty("all", ...) rather than reaching into the bookshelf
+        -- plugin's own widget: its live-widget handle is a module-local
+        -- with no public accessor, and its refresh helpers are private
+        -- methods -- fine for it to call on itself, not something another
+        -- plugin should bind to. This is a documented UIManager API that
+        -- flags the whole window stack, so it works for whichever view
+        -- happens to be showing.
+        --
+        -- The FileManager re-list stays as well: setDirty only repaints
+        -- what the view already knows about, and the file browser needs to
+        -- be told to re-read the folder if a sync added a file rather than
+        -- replacing one.
+        local FileManager = require("apps/filemanager/filemanager")
+        if FileManager.instance then
+            pcall(function() FileManager.instance:onRefresh() end)
+        end
+        UIManager:setDirty("all", "full")
+        debugLog("[cache] forced a full repaint after " .. #replaced_paths .. " replaced file(s)")
     end
     if type(report) ~= "table" or #report == 0 then
         UIManager:show(InfoMessage:new{ text = _("Sync finished with no output.") })
