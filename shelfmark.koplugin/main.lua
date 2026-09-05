@@ -91,6 +91,10 @@ function Shelfmark:loadSettings()
     self.annas_url = self.sm_settings.data.shelfmark.annas_url
     self.annas_download_key = self.sm_settings.data.shelfmark.annas_download_key
     self.annas_tld = self.sm_settings.data.shelfmark.annas_tld or "gd"
+    -- Hardcover (hardcover.app) -- a public HTTPS GraphQL API, unlike Anna's
+    -- Archive/CWA/the Shelfmark server, so no self-hosted companion or
+    -- SOCKS5 proxy is needed for this one; it's reachable directly.
+    self.hardcover_token = self.sm_settings.data.shelfmark.hardcover_token
 end
 
 function Shelfmark:defaultDownloadDir()
@@ -122,6 +126,7 @@ function Shelfmark:saveAllSettings(msg)
         annas_url = self.annas_url,
         annas_download_key = self.annas_download_key,
         annas_tld = self.annas_tld,
+        hardcover_token = self.hardcover_token,
     })
     self.sm_settings:flush()
     self.session_cookie = nil -- force re-login with new creds
@@ -236,6 +241,39 @@ function Shelfmark:editAnnasSettings()
     }
     UIManager:show(self.annas_settings_dialog)
     self.annas_settings_dialog:onShowKeyboard()
+end
+
+-- hardcover.app account token, used to log reading status and follow
+-- authors. Generate one at hardcover.app -> Account Settings -> API Tokens.
+function Shelfmark:editHardcoverSettings()
+    self.hardcover_settings_dialog = MultiInputDialog:new{
+        title = _("Hardcover settings"),
+        fields = {
+            { text = self.hardcover_token, text_type = "password", hint = _("Hardcover API token (from hardcover.app account settings)") },
+        },
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.hardcover_settings_dialog)
+                    end,
+                },
+                {
+                    text = _("Apply"),
+                    callback = function()
+                        local fields = self.hardcover_settings_dialog:getFields()
+                        self.hardcover_token = fields[1] ~= "" and fields[1] or nil
+                        UIManager:close(self.hardcover_settings_dialog)
+                        self:saveAllSettings(_("Saved."))
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.hardcover_settings_dialog)
+    self.hardcover_settings_dialog:onShowKeyboard()
 end
 
 -- Folder picker for the tap-to-download save location, in place of typing
@@ -1007,6 +1045,178 @@ local function doAnnasFileDownload(download_url, save_path)
         end
     end
     return ok, code, err
+end
+
+-- ===== Hardcover (hardcover.app) =====
+--
+-- Unlike Anna's Archive, this is a normal public HTTPS GraphQL API with
+-- Bearer-token auth and no bot-challenge -- no self-hosted companion or
+-- SOCKS5 proxy needed, the device talks to it directly. Schema verified
+-- directly against github.com/hardcoverapp/hardcover-docs before writing
+-- any of this (search returns a plain ranked `ids` list alongside the
+-- complex Typesense `results` blob, so the id list is used here and the
+-- messy blob is never touched -- a plain books_by_pk/authors_by_pk lookup
+-- gets a clean title/name for the confirmation dialog instead).
+--
+-- Every action here is manual and explicit -- triggered by a menu tap, with
+-- a confirmation dialog showing exactly what was matched before anything is
+-- written -- deliberately not automatic (e.g. no "detect when a book is
+-- finished" heuristic), since that class of guess is exactly where a
+-- reading-tracker silently logs the wrong thing.
+local HARDCOVER_API_URL = "https://api.hardcover.app/v1/graphql"
+
+-- status_id values per Hardcover's own docs: 1 Want to Read, 2 Currently
+-- Reading, 3 Read, 4 Paused, 5 Did Not Finish. Only the two that matter for
+-- "track your reading habits" are exposed in the menu for now.
+local HARDCOVER_STATUS_CURRENTLY_READING = 2
+local HARDCOVER_STATUS_READ = 3
+
+local function doHardcoverGraphQL(token, query, variables)
+    if not token or token == "" then
+        return nil, _("Hardcover API token isn't set -- check Settings.")
+    end
+    local body_json = JSON.encode({ query = query, variables = variables or {} })
+    local headers = {
+        ["Content-Type"] = "application/json",
+        ["Content-Length"] = tostring(#body_json),
+        ["Authorization"] = "Bearer " .. token,
+    }
+    debugLog("[hardcover] -> POST " .. HARDCOVER_API_URL)
+
+    socketutil:set_timeout(10, 30)
+    local sink, sink_table = socketutil.table_sink()
+    local request = {
+        method = "POST",
+        url = HARDCOVER_API_URL,
+        headers = headers,
+        sink = sink,
+        source = ltn12.source.string(body_json),
+    }
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        debugLog("[hardcover] <- connection error: " .. tostring(code))
+        return nil, _("Couldn't reach Hardcover.")
+    end
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        return nil, _("Hardcover request timed out.")
+    end
+    local raw_body = table.concat(sink_table)
+    debugLog("[hardcover] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#raw_body))
+    if code ~= 200 then
+        return nil, T(_("Hardcover request failed (HTTP %1)."), tostring(code))
+    end
+    local decode_ok, decoded = pcall(JSON.decode, raw_body)
+    if not decode_ok or not decoded then
+        return nil, _("Hardcover returned an unreadable response.")
+    end
+    decoded = stripJsonNull(decoded)
+    -- Two different error shapes confirmed live: a bad/expired token gets
+    -- rejected by an auth layer in front of GraphQL entirely, in OAuth-style
+    -- {error, error_description} form (e.g. "invalid_token" / "Token is not
+    -- associated with a user") -- distinct from an actual GraphQL execution
+    -- error, which comes back as the standard {errors: [{message}]} array.
+    if decoded.error then
+        return nil, decoded.error_description or decoded.error
+    end
+    if decoded.errors and decoded.errors[1] then
+        return nil, decoded.errors[1].message or _("Hardcover rejected the request.")
+    end
+    return decoded.data
+end
+
+-- Searches by title (query_type "Book"), takes the top-ranked id from the
+-- plain `ids` array, then a separate simple lookup for a clean title/author
+-- to show in the confirmation dialog -- see the section note above for why
+-- the raw Typesense `results` blob is avoided entirely.
+local function doHardcoverFindBook(token, title)
+    local search_data, err = doHardcoverGraphQL(token, [[
+        query Search($q: String!) {
+            search(query: $q, query_type: "Book", per_page: 1) { ids }
+        }
+    ]], { q = title })
+    if not search_data then return nil, nil, nil, err end
+    local ids = search_data.search and search_data.search.ids
+    if not ids or not ids[1] then
+        return nil, nil, nil, _("No matching book found on Hardcover.")
+    end
+    local book_id = ids[1]
+
+    local book_data, lookup_err = doHardcoverGraphQL(token, [[
+        query BookById($id: Int!) {
+            books_by_pk(id: $id) {
+                title
+                contributions { author { name } }
+            }
+        }
+    ]], { id = book_id })
+    if not book_data or not book_data.books_by_pk then
+        return nil, nil, nil, lookup_err or _("Found a match but couldn't fetch its details.")
+    end
+    local found_title = book_data.books_by_pk.title
+    local found_author = nil
+    local contributions = book_data.books_by_pk.contributions
+    if contributions and contributions[1] and contributions[1].author then
+        found_author = contributions[1].author.name
+    end
+    return book_id, found_title, found_author
+end
+
+local function doHardcoverFindAuthor(token, name)
+    local search_data, err = doHardcoverGraphQL(token, [[
+        query Search($q: String!) {
+            search(query: $q, query_type: "Author", per_page: 1) { ids }
+        }
+    ]], { q = name })
+    if not search_data then return nil, nil, err end
+    local ids = search_data.search and search_data.search.ids
+    if not ids or not ids[1] then
+        return nil, nil, _("No matching author found on Hardcover.")
+    end
+    local author_id = ids[1]
+
+    local author_data, lookup_err = doHardcoverGraphQL(token, [[
+        query AuthorById($id: Int!) {
+            authors_by_pk(id: $id) { name }
+        }
+    ]], { id = author_id })
+    if not author_data or not author_data.authors_by_pk then
+        return nil, nil, lookup_err or _("Found a match but couldn't fetch its details.")
+    end
+    return author_id, author_data.authors_by_pk.name
+end
+
+local function doHardcoverSetStatus(token, book_id, status_id)
+    local data, err = doHardcoverGraphQL(token, [[
+        mutation SetStatus($book_id: Int!, $status_id: Int!) {
+            insert_user_book(object: { book_id: $book_id, status_id: $status_id }) {
+                id
+                error
+            }
+        }
+    ]], { book_id = book_id, status_id = status_id })
+    if not data then return false, err end
+    local result = data.insert_user_book
+    if not result or result.error then
+        return false, (result and result.error) or _("Hardcover didn't confirm the update.")
+    end
+    return true
+end
+
+local function doHardcoverFollowAuthor(token, author_id)
+    local data, err = doHardcoverGraphQL(token, [[
+        mutation FollowAuthor($id: Int!) {
+            insert_follow(followable_id: $id, followable_type: "Author") { id }
+        }
+    ]], { id = author_id })
+    if not data then return false, err end
+    if not data.insert_follow or not data.insert_follow.id then
+        return false, _("Hardcover didn't confirm the follow.")
+    end
+    return true
 end
 
 -- ===== self-update check (GitHub releases) =====
@@ -1798,6 +2008,46 @@ function Shelfmark:annasMirrorRefresh()
     return result, code, err
 end
 
+function Shelfmark:hardcoverFindBook(title)
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, id, found_title, found_author, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverFindBook(token, title)
+    end, _("Searching Hardcover..."))
+    if not completed then return nil, nil, nil, _("Cancelled.") end
+    return id, found_title, found_author, err
+end
+
+function Shelfmark:hardcoverSetStatus(book_id, status_id)
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverSetStatus(token, book_id, status_id)
+    end, _("Updating Hardcover..."))
+    if not completed then return false, _("Cancelled.") end
+    return ok, err
+end
+
+function Shelfmark:hardcoverFindAuthor(name)
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, id, found_name, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverFindAuthor(token, name)
+    end, _("Searching Hardcover..."))
+    if not completed then return nil, nil, _("Cancelled.") end
+    return id, found_name, err
+end
+
+function Shelfmark:hardcoverFollowAuthor(author_id)
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverFollowAuthor(token, author_id)
+    end, _("Following on Hardcover..."))
+    if not completed then return false, _("Cancelled.") end
+    return ok, err
+end
+
 function Shelfmark:annasFetchDownloadUrl(md5, progress_text)
     local Trapper = require("ui/trapper")
     local annas_url, download_key, tld, socks5_proxy =
@@ -2268,8 +2518,35 @@ function Shelfmark:addToMainMenu(menu_items)
             {
                 text = _("Sync library with CWA"),
                 keep_menu_open = true,
-                separator = true,
                 callback = function() self:syncLibrary() end,
+            },
+            -- Every action here is manual/explicit -- see the section note
+            -- above doHardcoverGraphQL for why there's no automatic
+            -- "detect when I've finished a book" step.
+            {
+                text = _("Hardcover"),
+                separator = true,
+                sub_item_table = {
+                    {
+                        text = _("Mark a book as Currently Reading..."),
+                        keep_menu_open = true,
+                        callback = function()
+                            self:promptHardcoverLogBook(HARDCOVER_STATUS_CURRENTLY_READING, _("Currently Reading"))
+                        end,
+                    },
+                    {
+                        text = _("Mark a book as Read..."),
+                        keep_menu_open = true,
+                        callback = function()
+                            self:promptHardcoverLogBook(HARDCOVER_STATUS_READ, _("Read"))
+                        end,
+                    },
+                    {
+                        text = _("Follow an author..."),
+                        keep_menu_open = true,
+                        callback = function() self:promptHardcoverFollowAuthor() end,
+                    },
+                },
             },
             -- Everything below is either one-time setup or rarely touched
             -- day to day -- folded into one submenu so the top level stays
@@ -2291,6 +2568,11 @@ function Shelfmark:addToMainMenu(menu_items)
                         text = _("Anna's Archive settings"),
                         keep_menu_open = true,
                         callback = function() self:editAnnasSettings() end,
+                    },
+                    {
+                        text = _("Hardcover settings"),
+                        keep_menu_open = true,
+                        callback = function() self:editHardcoverSettings() end,
                     },
                     {
                         text_func = function()
@@ -2963,6 +3245,94 @@ end
 -- sent to indexers verbatim instead of Shelfmark's default title-only
 -- search, so this is the way to actually get an author (or anything else,
 -- e.g. "epub") into what Prowlarr searches for.
+-- Shared shape for all four Hardcover actions below: ask for a title/name,
+-- search, show exactly what matched, and only write on explicit
+-- confirmation -- see the section note above doHardcoverGraphQL for why
+-- nothing here happens without that confirmation step.
+local function promptHardcoverText(title, hint, on_confirm)
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new{
+        title = title,
+        input_hint = hint,
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function() UIManager:close(dialog) end,
+                },
+                {
+                    text = _("Search"),
+                    is_enter_default = true,
+                    callback = function()
+                        local text = dialog:getInputText()
+                        UIManager:close(dialog)
+                        if text and text:gsub("%s", "") ~= "" then
+                            on_confirm(text)
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function Shelfmark:promptHardcoverLogBook(status_id, status_label)
+    if not self.hardcover_token or self.hardcover_token == "" then
+        UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
+        return
+    end
+    promptHardcoverText(_("Log a book on Hardcover"), _("Book title"), function(title)
+        local id, found_title, found_author, err = self:hardcoverFindBook(title)
+        if not id then
+            UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
+            return
+        end
+        local ConfirmBox = require("ui/widget/confirmbox")
+        local desc = found_author and T(_("\"%1\" by %2"), found_title, found_author) or found_title
+        UIManager:show(ConfirmBox:new{
+            text = T(_("Found %1 on Hardcover. Mark as %2?"), desc, status_label),
+            ok_text = _("Mark as ") .. status_label,
+            ok_callback = function()
+                local ok, set_err = self:hardcoverSetStatus(id, status_id)
+                UIManager:show(InfoMessage:new{
+                    text = ok and T(_("Marked as %1 on Hardcover."), status_label) or (set_err or _("Failed to update Hardcover.")),
+                    timeout = ok and 2 or nil,
+                })
+            end,
+        })
+    end)
+end
+
+function Shelfmark:promptHardcoverFollowAuthor()
+    if not self.hardcover_token or self.hardcover_token == "" then
+        UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
+        return
+    end
+    promptHardcoverText(_("Follow an author on Hardcover"), _("Author name"), function(name)
+        local id, found_name, err = self:hardcoverFindAuthor(name)
+        if not id then
+            UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
+            return
+        end
+        local ConfirmBox = require("ui/widget/confirmbox")
+        UIManager:show(ConfirmBox:new{
+            text = T(_("Found \"%1\" on Hardcover. Follow this author?"), found_name),
+            ok_text = _("Follow"),
+            ok_callback = function()
+                local ok, follow_err = self:hardcoverFollowAuthor(id)
+                UIManager:show(InfoMessage:new{
+                    text = ok and T(_("Now following %1 on Hardcover."), found_name) or (follow_err or _("Failed to follow.")),
+                    timeout = ok and 2 or nil,
+                })
+            end,
+        })
+    end)
+end
+
 function Shelfmark:promptCustomReleaseQuery(book, prefill)
     local InputDialog = require("ui/widget/inputdialog")
     local default_query = prefill or defaultReleaseQuery(book)
