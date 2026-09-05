@@ -791,6 +791,19 @@ end
 -- actually apply to a slow/stalled download, not just to the JSON-style
 -- requests -- see socketutil.lua's own comment on why the plain sink alone
 -- can't enforce it.
+-- Downloads into a sibling temp file, renamed onto save_path only on full
+-- success, and treats any non-200 status as a real failure -- confirmed
+-- live, the hard way, that this function previously did neither: it
+-- opened save_path directly in truncating write mode before the request
+-- even started, and reported "true" (success) after any completed HTTP
+-- exchange regardless of status code. A CWA-side metadata edit changed
+-- this exact book's title and broke its own file-serving path (still 404
+-- afterward, not transient) -- doSyncLibrary's "changed in CWA,
+-- re-downloading" step hit that 404, and this function destroyed the
+-- reader's existing, perfectly good 1.1MB epub, replacing it with CWA's
+-- own ~1.3KB HTML error page, silently reported as a successful sync.
+-- Same temp-file-then-rename fix downloadFromAnnasArchive already uses,
+-- for the identical reason.
 local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy, save_path)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting download")
@@ -801,14 +814,15 @@ local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy
         headers["Authorization"] = "Basic " .. mime.b64(username .. ":" .. (password or ""))
     end
 
-    local file, ferr = io.open(save_path, "wb")
+    local temp_path = save_path .. ".downloading"
+    local file, ferr = io.open(temp_path, "wb")
     if not file then
-        debugLog("[cwa] couldn't open " .. tostring(save_path) .. " for writing: " .. tostring(ferr))
+        debugLog("[cwa] couldn't open " .. tostring(temp_path) .. " for writing: " .. tostring(ferr))
         return nil, nil, _("Couldn't open file for writing: ") .. tostring(ferr)
     end
 
     local url = cwa_url .. path
-    debugLog("[cwa] -> GET " .. url .. " (downloading to " .. tostring(save_path) .. ")")
+    debugLog("[cwa] -> GET " .. url .. " (downloading to " .. tostring(temp_path) .. ")")
 
     socketutil:set_timeout(15, 60)
     local sink = socketutil.file_sink(file)
@@ -827,11 +841,25 @@ local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy
 
     if not ok then
         debugLog("[cwa] <- connection error: " .. tostring(code))
+        os.remove(temp_path)
         return nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
     end
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
         debugLog("[cwa] <- timed out: " .. tostring(code))
+        os.remove(temp_path)
         return nil, nil, _("Download from CWA timed out.")
+    end
+    if type(code) ~= "number" or code >= 400 then
+        debugLog("[cwa] <- HTTP " .. tostring(code) .. ", discarded -- left any existing file at "
+            .. tostring(save_path) .. " untouched")
+        os.remove(temp_path)
+        return nil, code, T(_("Download from CWA failed (HTTP %1)."), tostring(code))
+    end
+
+    if not os.rename(temp_path, save_path) then
+        debugLog("[cwa] <- HTTP " .. tostring(code) .. " but couldn't move " .. temp_path .. " into place")
+        os.remove(temp_path)
+        return nil, code, _("Download succeeded but couldn't be saved.")
     end
     debugLog("[cwa] <- HTTP " .. tostring(code) .. " saved to " .. tostring(save_path))
     return true, code
