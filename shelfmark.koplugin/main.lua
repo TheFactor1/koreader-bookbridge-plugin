@@ -1025,7 +1025,15 @@ local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, t
         debugLog(log_prefix .. " <- connection error: " .. tostring(code))
         return nil, nil, _("Couldn't reach the file server.")
     end
-    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+    -- SSL_HANDSHAKE_CODE ("wantread", confirmed as a real, named LuaSec
+    -- return value in socketutil.lua itself -- "from LuaSec's ssl.c") was
+    -- missing here, so a stalled HTTPS handshake fell through to the
+    -- generic branch below and surfaced as the literal, confusing
+    -- "Download failed (HTTP wantread)." instead of a real timeout
+    -- message -- confirmed live against an actual Anna's Archive mirror
+    -- connection that stalled mid-handshake.
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE
+            or code == socketutil.SSL_HANDSHAKE_CODE then
         os.remove(save_path)
         debugLog(log_prefix .. " <- timed out: " .. tostring(code))
         return nil, nil, _("Download timed out.")
