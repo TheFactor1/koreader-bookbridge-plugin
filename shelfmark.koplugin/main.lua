@@ -1934,19 +1934,35 @@ local function normalizeTitleWords(text)
     return words
 end
 
--- True only when every word of title_words is present in filename_words --
--- deliberately one-directional and exact, no fuzzy scoring. A looser
--- "closest match" approach already mixed up "Pines" and "Wayward Pines -
--- 02 Wayward" for two different files during the first (manual) pass at
--- this same kind of matching for the homeserver-side script -- better to
--- flag ambiguity than guess wrong silently.
-local function titleWordsSubsetOf(title_words, filename_words)
+-- True only when title_words is a subset of filename_words AND filename_words
+-- is fully explained by title_words plus author_words -- deliberately exact,
+-- no fuzzy scoring. A looser "closest match" approach already mixed up
+-- "Pines" and "Wayward Pines - 02 Wayward" for two different files during
+-- the first (manual) pass at this same kind of matching for the
+-- homeserver-side script -- better to flag ambiguity than guess wrong
+-- silently.
+--
+-- The author-bound check (added after the subset-only version let a real
+-- book get bounced) exists because a short series title is naturally a
+-- word-subset of a longer sibling's filename: "Mistborn" is fully contained
+-- in "Mistborn - The Well of Ascension - Brandon Sanderson.epub", so a
+-- subset-only check matched book 2's file to book 1's already-registered
+-- CWA entry and silently skipped a genuinely new book as a "duplicate".
+-- Requiring every leftover filename word to be explained by the candidate's
+-- own title or author rejects that case ("well"/"ascension" are neither)
+-- without reintroducing the fuzzy scoring this function's history already
+-- shows doesn't work here.
+local function titleWordsSubsetOf(title_words, author_words, filename_words)
     local any = false
     for w in pairs(title_words) do
         any = true
         if not filename_words[w] then return false end
     end
-    return any
+    if not any then return false end
+    for w in pairs(filename_words) do
+        if not title_words[w] and not author_words[w] then return false end
+    end
+    return true
 end
 
 -- Runs entirely inside a Trapper subprocess (see Shelfmark:syncLibrary
@@ -2049,7 +2065,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 for _, e in ipairs(parseOpdsEntries(resp_body)) do
                     raw_entry_count = raw_entry_count + 1
                     if e.uuid and not seen_uuids[e.uuid] then
-                        if titleWordsSubsetOf(normalizeTitleWords(e.title), fname_words) then
+                        if titleWordsSubsetOf(normalizeTitleWords(e.title), normalizeTitleWords(e.author), fname_words) then
                             table.insert(matches, e)
                             seen_uuids[e.uuid] = true
                         end
