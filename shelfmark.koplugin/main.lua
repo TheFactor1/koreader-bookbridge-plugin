@@ -1071,10 +1071,26 @@ local COVER_CACHE_DIR = DataStorage:getFullDataDir() .. "/shelfmark_covers"
 -- key -- collisions are harmless (worst case a stale image for one exact
 -- URL gets reused until it's next re-downloaded), and this avoids pulling
 -- in a hashing library for what's purely a best-effort cache.
+--
+-- The .jpg suffix is not cosmetic -- confirmed live, its absence crashes
+-- the whole reader. KOReader's DocumentRegistry:isImageFile() (which
+-- ImageWidget:_loadfile gates on before ever looking at the file's actual
+-- bytes) only checks the filename's extension against a fixed allow-list;
+-- with no recognized extension it hits ImageWidget's `error("Image file
+-- type not supported.")` -- an uncaught error thrown from inside paintTo,
+-- which takes the whole process down, not just that row. The %w-only
+-- sanitizing below previously mangled every real extension (".jpeg" ->
+-- "_jpeg", unrecognized), so every single cached cover hit exactly this.
+-- A fixed .jpg here doesn't need to match the real upstream format:
+-- confirmed by reading frontend/ui/renderimage.lua directly, the actual
+-- pixel decode (RenderImage:renderImageData) dispatches purely on the
+-- file's real magic bytes (GIF8/RIFF/<svg/JPEG SOI, MuPDF as the fallback
+-- for everything else including PNG) -- the extension only ever matters
+-- for isImageFile()'s upstream gate, never for picking a decoder.
 local function coverCacheKey(cover_url)
     local key = cover_url:gsub("[^%w]", "_")
     if #key > 100 then key = key:sub(-100) end
-    return key
+    return key .. ".jpg"
 end
 
 -- Standalone (no `self`) so it can run inside prefetchCovers' forked
@@ -1123,10 +1139,17 @@ function Shelfmark:prefetchCovers(books)
     for i = 1, n do urls[i] = books[i].cover_url end
 
     local Trapper = require("ui/trapper")
+    -- pcall per-book: one malformed URL/response shouldn't cost the rest of
+    -- the page their covers.
     local completed, paths = Trapper:dismissableRunInSubprocess(function()
         local results = {}
         for i = 1, n do
-            results[i] = downloadCoverToPath(server_url, session_cookie, urls[i])
+            local ok, res = pcall(downloadCoverToPath, server_url, session_cookie, urls[i])
+            if ok then
+                results[i] = res
+            else
+                debugLog("[cover] error for url " .. tostring(urls[i]) .. ": " .. tostring(res))
+            end
         end
         return results
     end, _("Fetching covers..."))
