@@ -1192,15 +1192,12 @@ end
 -- already smaller on average) are left untouched; there's no equivalent
 -- trick for those.
 --
--- Only applied to the direct-fetch (bibliography) path below, not the
--- general-search path's /api/covers proxy -- tried the equivalent rewrite
--- there too (decoding the proxy's own base64-encoded "url" query param,
--- shrinking it, re-encoding), but confirmed live against the real server
--- that it has no effect: requesting the exact same cover through the proxy
--- with the original 1500px URL and a rewritten 300px one returned
--- byte-for-byte identical, still-1500px images both times. That proxy
--- evidently caches by the hardcover_<id> alone, ignoring whatever URL is
--- actually passed -- so there was nothing to gain there, only complexity.
+-- Applies to both the bibliography's direct-fetch path and the
+-- general-search path below (which decodes and fetches the proxy's own
+-- target URL directly rather than asking the proxy for a smaller size --
+-- see downloadCoverToPath's own note on why: confirmed live the proxy
+-- ignores the url= parameter and caches by hardcover_<id> alone, so
+-- rewriting it while still going *through* the proxy has no effect).
 local COVER_TARGET_PX = 300
 local function shrinkAmazonImageUrl(url)
     local rewritten, n = url:gsub("(%._S[LX])%d+(_%.[%a]+)$", "%1" .. COVER_TARGET_PX .. "%2")
@@ -1224,9 +1221,32 @@ local function downloadCoverToPath(server_url, session_cookie, cover_url)
     if cover_url:match("^https?://") then
         full_url = shrinkAmazonImageUrl(cover_url)
     else
-        if not session_cookie then return nil end
-        full_url = server_url .. cover_url
-        headers = { Cookie = session_cookie }
+        -- Shelfmark's own /api/covers proxy carries the real upstream URL
+        -- base64-encoded in its own "url" query parameter, and that
+        -- upstream host (Hardcover's CDN, or the Amazon CDN it frequently
+        -- hotlinks -- confirmed live, both serve these with no auth at
+        -- all) can just be fetched directly instead of going through the
+        -- proxy, applying the same Amazon-suffix shrink used above.
+        -- Rewriting the size *within* the proxy's own url= param has no
+        -- effect (confirmed live: that proxy caches by hardcover_<id>
+        -- alone and ignores it) -- fetching the decoded target directly
+        -- sidesteps that entirely, and saves the extra hop plus Shelfmark's
+        -- own proxying bandwidth. Falls back to the proxied fetch (needs
+        -- the session cookie) if decoding doesn't produce something that
+        -- looks like a real URL -- never a hard failure, matching every
+        -- other cover helper in this section.
+        local prefix, encoded_url = cover_url:match("^(.-%?url=)(.+)$")
+        local decoded_ok, decoded = false, nil
+        if prefix then
+            decoded_ok, decoded = pcall(function() return mime.unb64(socketurl.unescape(encoded_url)) end)
+        end
+        if decoded_ok and decoded and decoded:match("^https?://") then
+            full_url = shrinkAmazonImageUrl(decoded)
+        else
+            if not session_cookie then return nil end
+            full_url = server_url .. cover_url
+            headers = { Cookie = session_cookie }
+        end
     end
 
     local ok = doHttpDownloadToFile(full_url, path, "[cover]", 10, 30, headers)
@@ -1809,6 +1829,84 @@ local function doHardcoverAuthorBibliography(token, author_id, limit, offset)
         and author.contributions_aggregate.aggregate.count
         or #books
     return books, total, author.name
+end
+
+-- Finds, for each given Hardcover book id, whichever sibling edition
+-- (grouped by canonical_id) actually has the most readers -- some
+-- editions logged as "Currently Reading"/"Read" carry no cover at all or
+-- a negligible reader count next to a far more popular edition of the
+-- exact same book (confirmed live: Blake Crouch's "Run" alone has 369
+-- users; three other editions of the same book have 0, none of them
+-- logged). Two batched queries regardless of how many ids are given --
+-- this runs once over a whole status list, not once per book, from
+-- doSearch's prefer_popular_edition path.
+--
+-- Returns a map of id (number) -> {title=, cover_url=} for entries whose
+-- winning edition differs from the one passed in; an id that's already
+-- the most popular in its own group is simply absent from the result, for
+-- the caller to leave untouched.
+local function doHardcoverBestEditions(token, provider_ids)
+    if #provider_ids == 0 then return {} end
+    local canon_data = doHardcoverGraphQL(token, [[
+        query CanonIds($ids: [Int!]) {
+            books(where: {id: {_in: $ids}}) { id canonical_id }
+        }
+    ]], { ids = provider_ids })
+    if not canon_data or not canon_data.books then return {} end
+
+    -- canonical_id is Hardcover's null sentinel (already normalized to
+    -- `false` by doHardcoverGraphQL's own stripJsonNull) when a book
+    -- already is the canonical record -- its own id is then the group to
+    -- search for siblings.
+    local group_ids_set = {}
+    local id_to_group = {}
+    for _, b in ipairs(canon_data.books) do
+        local group_id = (type(b.canonical_id) == "number") and b.canonical_id or b.id
+        id_to_group[b.id] = group_id
+        group_ids_set[group_id] = true
+    end
+    local group_ids = {}
+    for id in pairs(group_ids_set) do table.insert(group_ids, id) end
+    if #group_ids == 0 then return {} end
+
+    local sib_data = doHardcoverGraphQL(token, [[
+        query Siblings($ids: [Int!]) {
+            books(where: {_or: [{id: {_in: $ids}}, {canonical_id: {_in: $ids}}]}) {
+                id
+                canonical_id
+                title
+                users_count
+                cached_image
+            }
+        }
+    ]], { ids = group_ids })
+    if not sib_data or not sib_data.books then return {} end
+
+    -- Best (highest users_count) book per group.
+    local best_by_group = {}
+    for _, b in ipairs(sib_data.books) do
+        local group_id = (type(b.canonical_id) == "number") and b.canonical_id or b.id
+        local users_count = type(b.users_count) == "number" and b.users_count or 0
+        local current = best_by_group[group_id]
+        if not current or users_count > current.users_count then
+            best_by_group[group_id] = {
+                id = b.id,
+                title = b.title,
+                users_count = users_count,
+                cover_url = type(b.cached_image) == "table" and b.cached_image.url or nil,
+            }
+        end
+    end
+
+    local result = {}
+    for _, original_id in ipairs(provider_ids) do
+        local group_id = id_to_group[original_id]
+        local best = group_id and best_by_group[group_id]
+        if best and best.id ~= original_id then
+            result[original_id] = { title = best.title, cover_url = best.cover_url }
+        end
+    end
+    return result
 end
 
 -- ===== long-press-on-cover Hardcover actions (FileManager extension) =====
@@ -2812,6 +2910,16 @@ function Shelfmark:hardcoverAuthorBibliography(author_id, limit, offset)
     return books, total, author_name, err
 end
 
+function Shelfmark:hardcoverBestEditions(provider_ids)
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, result = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverBestEditions(token, provider_ids)
+    end, _("Checking for a more popular edition..."))
+    if not completed then return {} end
+    return result or {}
+end
+
 function Shelfmark:annasFetchDownloadUrl(md5, progress_text)
     local Trapper = require("ui/trapper")
     local annas_url, download_key, tld, socks5_proxy =
@@ -3616,6 +3724,38 @@ function Shelfmark:doSearch(params, existing_books)
         return
     end
 
+    -- Per explicit request: status lists (Currently Reading/Read/etc, via
+    -- browseHardcoverLists) show whichever specific edition happens to be
+    -- logged on Hardcover -- some of those carry no cover or a negligible
+    -- reader count next to a far more popular edition of the exact same
+    -- book (confirmed live: Blake Crouch's "Run" has three duplicate,
+    -- unlogged editions with 0 readers each, while the one actually logged
+    -- has 369). Substitutes the most-popular edition's title/cover for
+    -- *display* only -- book.provider_id is left untouched, so
+    -- browseReleases/downloading still act on the edition that's actually
+    -- logged, not the one just being shown. Only ever set from
+    -- browseHardcoverLists's own call, never for a plain keyword search.
+    if params.prefer_popular_edition and self.hardcover_token and self.hardcover_token ~= "" then
+        local ids = {}
+        for _, book in ipairs(resp.books) do
+            if book.provider == "hardcover" and book.provider_id then
+                local id = tonumber(book.provider_id)
+                if id then table.insert(ids, id) end
+            end
+        end
+        if #ids > 0 then
+            local substitutions = self:hardcoverBestEditions(ids)
+            for _, book in ipairs(resp.books) do
+                local id = tonumber(book.provider_id)
+                local sub = id and substitutions[id]
+                if sub then
+                    book.title = sub.title
+                    if sub.cover_url then book.cover_url = sub.cover_url end
+                end
+            end
+        end
+    end
+
     -- Only prefetch enough covers for the page actually shown first --
     -- books carried over via existing_books already have cover_path set on
     -- the same table (mutated in place, not copied) from their own
@@ -3640,8 +3780,20 @@ function Shelfmark:doSearch(params, existing_books)
         item_table[#item_table + 1] = { text = _("-- Load more results --"), is_load_more = true }
     end
 
-    local menu_title = params.title_override and T(_("%1 (%2)"), params.title_override, #books)
-        or T(_("Search results (%1)"), #books)
+    -- Hardcover's own list labels already end in a count of their own
+    -- (e.g. "Read (5)") -- confirmed live, appending another unconditionally
+    -- produced "Read (5) (5)" on the browseHardcoverLists screen. Only add
+    -- one when title_override doesn't already end with "(<number>)".
+    local menu_title
+    if params.title_override then
+        if params.title_override:match("%(%d+%)%s*$") then
+            menu_title = params.title_override
+        else
+            menu_title = T(_("%1 (%2)"), params.title_override, #books)
+        end
+    else
+        menu_title = T(_("Search results (%1)"), #books)
+    end
 
     local results_menu
     results_menu = Menu:new{
@@ -3663,6 +3815,7 @@ function Shelfmark:doSearch(params, existing_books)
                         fields = params.fields,
                         limit = params.limit,
                         title_override = params.title_override,
+                        prefer_popular_edition = params.prefer_popular_edition,
                         page = (params.page or 1) + 1,
                     }, books)
                 end)
@@ -4215,7 +4368,12 @@ function Shelfmark:browseHardcoverLists()
             UIManager:close(lists_menu)
             local Trapper = require("ui/trapper")
             Trapper:wrap(function()
-                self:doSearch({ fields = { hardcover_list = item.value }, limit = 30, title_override = item.label })
+                self:doSearch({
+                    fields = { hardcover_list = item.value },
+                    limit = 30,
+                    title_override = item.label,
+                    prefer_popular_edition = true,
+                })
             end)
         end,
     }
