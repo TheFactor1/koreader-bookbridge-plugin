@@ -1511,10 +1511,25 @@ end
 -- plain `ids` array, then a separate simple lookup for a clean title/author
 -- to show in the confirmation dialog -- see the section note above for why
 -- the raw Typesense `results` blob is avoided entirely.
-local function doHardcoverFindBook(token, title)
+-- author is optional (an embedded EPUB author, when the caller has one --
+-- never user-typed) and used only to pick among several same-titled
+-- candidates, never as part of the search query itself.
+--
+-- per_page was 1 here -- confirmed live this is a real problem, not a
+-- theoretical one: Hardcover's own title search for "Run" ranks John
+-- Lewis & Andrew Aydin's graphic novel first, ahead of Blake Crouch's
+-- same-titled thriller, despite Crouch's edition having more Hardcover
+-- users (368 vs 53) -- title relevance there evidently isn't popularity-
+-- ordered. Long-press "Mark as Read" on a Crouch book named exactly "Run"
+-- would silently log the wrong book (the confirmation dialog does show
+-- the found author first, but that's a safety net, not a fix). Widening
+-- to 5 and checking each candidate's actual contributors against the
+-- given author closes that gap; falls back to the plain #1 result when no
+-- author is available or none of the candidates match it.
+local function doHardcoverFindBook(token, title, author)
     local search_data, err = doHardcoverGraphQL(token, [[
         query Search($q: String!) {
-            search(query: $q, query_type: "Book", per_page: 1) { ids }
+            search(query: $q, query_type: "Book", per_page: 5) { ids }
         }
     ]], { q = title })
     if not search_data then return nil, nil, nil, err end
@@ -1522,26 +1537,69 @@ local function doHardcoverFindBook(token, title)
     if not ids or not ids[1] then
         return nil, nil, nil, _("No matching book found on Hardcover.")
     end
-    local book_id = ids[1]
 
-    local book_data, lookup_err = doHardcoverGraphQL(token, [[
-        query BookById($id: Int!) {
-            books_by_pk(id: $id) {
-                title
-                contributions { author { name } }
+    local candidates = {}
+    for i = 1, math.min(#ids, 5) do
+        local book_data = doHardcoverGraphQL(token, [[
+            query BookById($id: Int!) {
+                books_by_pk(id: $id) {
+                    title
+                    contributions { contribution author { name } }
+                }
             }
-        }
-    ]], { id = book_id })
-    if not book_data or not book_data.books_by_pk then
-        return nil, nil, nil, lookup_err or _("Found a match but couldn't fetch its details.")
+        ]], { id = ids[i] })
+        if book_data and book_data.books_by_pk then
+            table.insert(candidates, { id = ids[i], data = book_data.books_by_pk })
+        end
     end
-    local found_title = book_data.books_by_pk.title
-    local found_author = nil
-    local contributions = book_data.books_by_pk.contributions
-    if contributions and contributions[1] and contributions[1].author then
-        found_author = contributions[1].author.name
+    if #candidates == 0 then
+        return nil, nil, nil, _("Found a match but couldn't fetch its details.")
     end
-    return book_id, found_title, found_author
+
+    -- Prefer a contributor explicitly tagged "Author" over the first
+    -- contribution listed -- confirmed live, this same "Run" audiobook
+    -- edition lists its narrator (Phil Gigante) ahead of Blake Crouch,
+    -- so contributions[1] alone would report the wrong "found author"
+    -- even once the right *book* is chosen. Untyped contributions (nil
+    -- role) are accepted too, matching entries that never got tagged.
+    local function primaryAuthorName(book)
+        for _, c in ipairs(book.contributions or {}) do
+            if c.author and (c.contribution == nil or c.contribution == "Author") then
+                return c.author.name
+            end
+        end
+        local contributions = book.contributions
+        return contributions and contributions[1] and contributions[1].author
+            and contributions[1].author.name or nil
+    end
+
+    local chosen = candidates[1]
+    if author and author ~= "" then
+        -- Surname only, matching releaseRelevanceScore's own convention
+        -- elsewhere in this file -- robust to "Blake Crouch" vs.
+        -- "Crouch, Blake" ordering differences between an EPUB's embedded
+        -- metadata and Hardcover's own contributor names.
+        local surname = author:match("(%S+)%s*$")
+        if surname and #surname > 1 then
+            surname = surname:lower()
+            for _, c in ipairs(candidates) do
+                local matched = false
+                for _, contribution in ipairs(c.data.contributions or {}) do
+                    if contribution.author and contribution.author.name
+                            and contribution.author.name:lower():find(surname, 1, true) then
+                        matched = true
+                        break
+                    end
+                end
+                if matched then
+                    chosen = c
+                    break
+                end
+            end
+        end
+    end
+
+    return chosen.id, chosen.data.title, primaryAuthorName(chosen.data)
 end
 
 local function doHardcoverFindAuthor(token, name)
@@ -1821,10 +1879,10 @@ function Shelfmark:registerFileDialogButtons()
 
         local function logCallback(status_id, status_label)
             return function()
-                local title = deriveFileDialogMetadata(file, book_props)
+                local title, author = deriveFileDialogMetadata(file, book_props)
                 local Trapper = require("ui/trapper")
                 Trapper:wrap(function()
-                    self_ref:promptHardcoverLogBookForFile(title, status_id, status_label)
+                    self_ref:promptHardcoverLogBookForFile(title, author, status_id, status_label)
                 end)
             end
         end
@@ -2694,11 +2752,11 @@ function Shelfmark:annasMirrorRefresh()
     return result, code, err
 end
 
-function Shelfmark:hardcoverFindBook(title)
+function Shelfmark:hardcoverFindBook(title, author)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, id, found_title, found_author, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverFindBook(token, title)
+        return doHardcoverFindBook(token, title, author)
     end, _("Searching Hardcover..."))
     if not completed then return nil, nil, nil, _("Cancelled.") end
     return id, found_title, found_author, err
@@ -4040,8 +4098,8 @@ end
 -- action below -- search, show exactly what matched, write only on explicit
 -- confirmation. Must already be running inside a Trapper-wrapped coroutine
 -- (both call sites ensure this).
-local function confirmAndLogBookOnHardcover(self, title, status_id, status_label)
-    local id, found_title, found_author, err = self:hardcoverFindBook(title)
+local function confirmAndLogBookOnHardcover(self, title, author, status_id, status_label)
+    local id, found_title, found_author, err = self:hardcoverFindBook(title, author)
     if not id then
         UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
         return
@@ -4086,12 +4144,12 @@ end
 -- Long-press-on-cover entry point (see registerFileDialogButtons below) --
 -- the title is already known from the file itself, so this skips straight
 -- to search+confirm with no typing at all.
-function Shelfmark:promptHardcoverLogBookForFile(title, status_id, status_label)
+function Shelfmark:promptHardcoverLogBookForFile(title, author, status_id, status_label)
     if not self.hardcover_token or self.hardcover_token == "" then
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
     end
-    confirmAndLogBookOnHardcover(self, title, status_id, status_label)
+    confirmAndLogBookOnHardcover(self, title, author, status_id, status_label)
 end
 
 function Shelfmark:promptHardcoverFollowAuthor()
