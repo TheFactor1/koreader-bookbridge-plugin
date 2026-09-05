@@ -1066,6 +1066,35 @@ end
 -- 401s without the same session cookie every other Shelfmark API call uses.
 local COVER_CACHE_DIR = DataStorage:getFullDataDir() .. "/shelfmark_covers"
 
+-- Nothing else ever removes a cached cover, so left unchecked this grows
+-- forever. 75MB cap by request, evicting oldest-accessed first once
+-- exceeded -- same LRU-by-size approach as zlibrary.koplugin's own cover
+-- cache (zlibrary/cache.lua's gc_clean), read directly as the reference
+-- for this.
+local COVER_CACHE_MAX_BYTES = 75 * 1024 * 1024
+
+local function evictOldCovers()
+    local files = {}
+    local total = 0
+    for name in lfs.dir(COVER_CACHE_DIR) do
+        if name ~= "." and name ~= ".." then
+            local path = COVER_CACHE_DIR .. "/" .. name
+            local attr = lfs.attributes(path)
+            if attr and attr.mode == "file" then
+                total = total + (attr.size or 0)
+                table.insert(files, { path = path, size = attr.size or 0, time = attr.access or attr.modification or 0 })
+            end
+        end
+    end
+    if total <= COVER_CACHE_MAX_BYTES then return end
+    table.sort(files, function(a, b) return a.time < b.time end)
+    for _, f in ipairs(files) do
+        if total <= COVER_CACHE_MAX_BYTES then break end
+        os.remove(f.path)
+        total = total - f.size
+    end
+end
+
 -- Cover URLs carry no reliably-unique short id across every provider
 -- Shelfmark's search can return, so the sanitized URL itself is the cache
 -- key -- collisions are harmless (worst case a stale image for one exact
@@ -1158,6 +1187,15 @@ function Shelfmark:prefetchCovers(books)
         for i = 1, n do
             books[i].cover_path = paths[i]
         end
+    end
+
+    -- Plain disk I/O on the main process, not inside the download
+    -- subprocess above -- eviction doesn't need to compete with actual
+    -- downloads for the fork's runtime, and a directory this size (a few
+    -- hundred files at most under the 75MB cap) scans fast enough not to
+    -- need its own progress dialog.
+    if lfs.attributes(COVER_CACHE_DIR, "mode") == "directory" then
+        evictOldCovers()
     end
 end
 
@@ -3275,6 +3313,40 @@ local function describeYear(book)
     return ""
 end
 
+-- KOReader's TextBoxWidget "Pango Text Format" bold-span markup: a leading
+-- PTF_HEADER unlocks PTF_BOLD_START..PTF_BOLD_END spans later in the same
+-- string (confirmed in frontend/ui/widget/textboxwidget.lua -- a real,
+-- general widget feature, not something zlibrary.koplugin invented, though
+-- reading its own row-building code is what surfaced it here). Raw UTF-8
+-- bytes for U+FFF1/FFF2/FFF3, not \u{} escapes -- LuaJIT/Lua 5.1 doesn't
+-- support that escape form (see the note on describeMetrics' bullet char).
+local PTF_HEADER = "\xEF\xBF\xB1"
+local PTF_BOLD_START = "\xEF\xBF\xB2"
+local PTF_BOLD_END = "\xEF\xBF\xB3"
+
+-- One flowing line -- bold title, "by Author (Year)", then metrics joined
+-- with " | " -- that wraps naturally across as many lines as it actually
+-- needs, rather than forcing title/byline/metrics onto three fixed lines
+-- regardless of how short any one of them is. Matches zlibrary.koplugin's
+-- own row format (read directly from its ui.lua: `"%s by %s%s"` plus
+-- " | "-joined extras) -- the previous three-line layout looked visibly
+-- choppier and wasted a full line on short titles/authors by comparison.
+local function formatBookRowText(book, maxlen)
+    local title = truncate(book.title, maxlen or 300) or _("Untitled")
+    local text = PTF_HEADER .. PTF_BOLD_START .. title .. PTF_BOLD_END
+    local author = describeAuthor(book)
+    if author ~= "" then
+        text = text .. " " .. T(_("by %1"), author) .. describeYear(book)
+    else
+        text = text .. describeYear(book)
+    end
+    local metrics = describeMetrics(book)
+    if metrics ~= "" then
+        text = text .. " | " .. metrics
+    end
+    return text
+end
+
 local function describeBook(book)
     local text = truncate(book.title, 90) or _("Untitled")
     local author = describeAuthor(book)
@@ -3342,30 +3414,8 @@ function Shelfmark:doSearch(params, existing_books)
 
     local item_table = {}
     for i, book in ipairs(books) do
-        -- Confirmed on-device: cramming metrics+byline into "mandatory"
-        -- made that column wide enough to squeeze the title itself down
-        -- to a handful of visible characters -- the exact opposite of
-        -- legible. Title gets its own full line, author/year a second
-        -- (multilines_forced is already set) -- and by explicit request,
-        -- metrics now gets a full third line of its own instead of being
-        -- squeezed into "mandatory" and truncated to 20 chars: the rating
-        -- AND reader count both show in full now, not just whichever fit.
-        -- 300, not 140, for the title itself for the same reason (and to
-        -- match browseAuthorBibliography's own already-generous length) --
-        -- the vast majority of real titles fit outright, and the ones that
-        -- don't still get meaningfully more of themselves shown before
-        -- the truncate() ellipsis kicks in.
-        local byline = describeAuthor(book) .. describeYear(book)
-        local metrics = describeMetrics(book)
-        local title_text = truncate(book.title, 300) or _("Untitled")
-        if byline ~= "" then
-            title_text = title_text .. "\n" .. byline
-        end
-        if metrics ~= "" then
-            title_text = title_text .. "\n" .. metrics
-        end
         item_table[i] = {
-            text = title_text,
+            text = formatBookRowText(book),
             book_data = book,
             cover_path = book.cover_path,
         }
@@ -3706,14 +3756,15 @@ function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
     -- mandatory (a right-aligned secondary column) forces the row into a
     -- single fixed-height line regardless of multilines_forced -- confirmed
     -- live, long titles were truncating to "..." even with that flag set.
-    -- Folding the format/source/size line into text itself via "\n"
-    -- matches doSearch/browseAuthorBibliography's own already-working
-    -- pattern: multilines_forced applies cleanly there because nothing else
-    -- shares the row.
+    -- Folding the format/source/size line into text itself, bold title
+    -- plus " | "-joined metrics flowing naturally, matches
+    -- formatBookRowText's own style (see the note there) -- multilines
+    -- applies cleanly once nothing else shares the row.
     for _idx, release in ipairs(releases) do
-        local title_text = truncate(release.title, 300) or _("Untitled release")
+        local title_text = PTF_HEADER .. PTF_BOLD_START
+            .. (truncate(release.title, 300) or _("Untitled release")) .. PTF_BOLD_END
         local meta = describeRelease(release)
-        if meta ~= "" then title_text = title_text .. "\n" .. meta end
+        if meta ~= "" then title_text = title_text .. " | " .. meta end
         table.insert(item_table, {
             text = title_text,
             release_data = release,
@@ -4037,16 +4088,7 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
 
     local item_table = {}
     for i, book in ipairs(books) do
-        local byline = describeAuthor(book) .. describeYear(book)
-        local metrics = describeMetrics(book)
-        -- 300, not doSearch's 140 -- there's no author/relevance-driven
-        -- title-length pressure here the way a broad keyword search has, so
-        -- there's less reason to truncate a real title at all; this is
-        -- generous enough that the ellipsis should essentially never fire.
-        local title_text = truncate(book.title, 300) or _("Untitled")
-        if byline ~= "" then title_text = title_text .. "\n" .. byline end
-        if metrics ~= "" then title_text = title_text .. "\n" .. metrics end
-        item_table[i] = { text = title_text, book_data = book, cover_path = book.cover_path }
+        item_table[i] = { text = formatBookRowText(book), book_data = book, cover_path = book.cover_path }
     end
     if total and #books < total then
         item_table[#item_table + 1] = { text = _("-- Load more results --"), is_load_more = true }
