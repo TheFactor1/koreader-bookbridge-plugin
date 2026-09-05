@@ -1005,7 +1005,7 @@ end
 -- content host need the SOCKS5 proxy (both are reached over plain public
 -- HTTPS, unlike the Tailscale-only Shelfmark/CWA/annas-archive-api calls
 -- elsewhere in this file).
-local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, total_timeout)
+local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, total_timeout, headers)
     local file, ferr = io.open(save_path, "wb")
     if not file then
         return nil, nil, _("Couldn't open file for writing: ") .. tostring(ferr)
@@ -1016,7 +1016,7 @@ local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, t
     local sink = socketutil.file_sink(file)
     local requester = url:match("^https:") and https or http
     local ok, code = pcall(function()
-        return socket.skip(1, requester.request{ method = "GET", url = url, sink = sink })
+        return socket.skip(1, requester.request{ method = "GET", url = url, sink = sink, headers = headers })
     end)
     socketutil:reset_timeout()
 
@@ -1051,6 +1051,157 @@ local function doAnnasFileDownload(download_url, save_path)
         end
     end
     return ok, code, err
+end
+
+-- ===== cover image caching =====
+--
+-- Disk-caches book cover images so results_menu/bibliography_menu can embed
+-- them inline (see attachCoverSupport below). cover_url arrives in one of
+-- two shapes, confirmed live against both real sources this feature covers:
+-- an absolute upstream URL straight from Hardcover's own CDN (e.g.
+-- "https://assets.hardcover.app/..." -- the author-bibliography path, which
+-- queries Hardcover's GraphQL API directly) needing no auth at all, or a
+-- path relative to the Shelfmark server itself (e.g. "/api/covers/..." --
+-- the general-search path, via Shelfmark's own /api/metadata/search) which
+-- 401s without the same session cookie every other Shelfmark API call uses.
+local COVER_CACHE_DIR = DataStorage:getFullDataDir() .. "/shelfmark_covers"
+
+-- Cover URLs carry no reliably-unique short id across every provider
+-- Shelfmark's search can return, so the sanitized URL itself is the cache
+-- key -- collisions are harmless (worst case a stale image for one exact
+-- URL gets reused until it's next re-downloaded), and this avoids pulling
+-- in a hashing library for what's purely a best-effort cache.
+local function coverCacheKey(cover_url)
+    local key = cover_url:gsub("[^%w]", "_")
+    if #key > 100 then key = key:sub(-100) end
+    return key
+end
+
+-- Standalone (no `self`) so it can run inside prefetchCovers' forked
+-- Trapper subprocess below. Best-effort only -- any failure just means no
+-- cover for that row, never worth surfacing as an error.
+local function downloadCoverToPath(server_url, session_cookie, cover_url)
+    if not cover_url or cover_url == "" then return nil end
+    if lfs.attributes(COVER_CACHE_DIR, "mode") ~= "directory" then
+        lfs.mkdir(COVER_CACHE_DIR)
+    end
+    local path = COVER_CACHE_DIR .. "/" .. coverCacheKey(cover_url)
+    if lfs.attributes(path, "mode") == "file" then
+        return path
+    end
+
+    local full_url, headers
+    if cover_url:match("^https?://") then
+        full_url = cover_url
+    else
+        if not session_cookie then return nil end
+        full_url = server_url .. cover_url
+        headers = { Cookie = session_cookie }
+    end
+
+    local ok = doHttpDownloadToFile(full_url, path, "[cover]", 10, 30, headers)
+    if not ok then
+        os.remove(path)
+        return nil
+    end
+    return path
+end
+
+-- Downloads/caches cover images for one freshly-fetched page of books,
+-- setting book.cover_path in place. Wrapped in its own dismissable Trapper
+-- subprocess -- this runs after the metadata search/bibliography fetch has
+-- already returned (back on the main process), and a page's worth of
+-- sequential cover GETs is exactly the kind of multi-second blocking work
+-- that needs a cancelable progress dialog rather than freezing the UI.
+-- Deliberately indexed with a plain numeric for loop rather than ipairs:
+-- some books have no cover_url, and a hole in that table would make ipairs
+-- stop early.
+function Shelfmark:prefetchCovers(books)
+    local server_url, session_cookie = self.server_url, self.session_cookie
+    local n = #books
+    local urls = {}
+    for i = 1, n do urls[i] = books[i].cover_url end
+
+    local Trapper = require("ui/trapper")
+    local completed, paths = Trapper:dismissableRunInSubprocess(function()
+        local results = {}
+        for i = 1, n do
+            results[i] = downloadCoverToPath(server_url, session_cookie, urls[i])
+        end
+        return results
+    end, _("Fetching covers..."))
+
+    if completed and paths then
+        for i = 1, n do
+            books[i].cover_path = paths[i]
+        end
+    end
+end
+
+-- Embeds a small cover-image widget into a Menu's rows via item.state -- a
+-- stock, generic MenuItem field (confirmed by reading
+-- frontend/ui/widget/menu.lua directly: `local state_button = self.entry.state
+-- or HorizontalSpan:new{}`, originally meant for TOC tree-expand icons, but
+-- generic enough for any widget), not something requiring a custom
+-- Menu:extend{} subclass the way zlibrary.koplugin's own cover list needs.
+-- The simplification that makes a plain Menu enough here: every cover this
+-- feature shows is already synchronously downloaded to disk (via
+-- prefetchCovers above) before the menu is ever constructed, so there's no
+-- async/debounced loading to orchestrate -- just one thing to get right,
+-- which zlibrary's own comments document as a real, previously-encountered
+-- crash: KOReader's Menu:updateItems frees every row's embedded widget
+-- (VerticalGroup:clear -> free), and since item.state lives on item_table
+-- (which outlives any one row), a widget left there after that point is a
+-- *freed* widget -- painting it again crashes with "attempt to index field
+-- '_bb' (a nil value)". That's reachable here too: with ~25-30 items and no
+-- explicit items_per_page, Menu paginates internally, and its own
+-- next/prev-page controls call updateItems repeatedly on the same
+-- item_table. So: null every item's state first, then rebuild only the
+-- page actually being shown, on every single updateItems call -- never let
+-- a widget survive past the call that painted it.
+local function attachCoverSupport(menu)
+    local ImageWidget = require("ui/widget/imagewidget")
+    local CenterContainer = require("ui/widget/container/centercontainer")
+    local Geom = require("ui/geometry")
+    local Size = require("ui/size")
+
+    local cover_h = math.max(60, (menu.item_dimen and menu.item_dimen.h or 120) - 2 * Size.line.medium)
+    local cover_w = math.floor(cover_h * 2 / 3)
+    menu.state_w = cover_w + 8 * Size.padding.small
+
+    local orig_updateItems = menu.updateItems
+    menu.updateItems = function(self, select_number, no_recalculate_dimen)
+        for _, item in ipairs(self.item_table) do
+            item.state = nil
+        end
+        local perpage = self.perpage or #self.item_table
+        local page = self.page or 1
+        local idx_offset = (page - 1) * perpage
+        for idx = 1, perpage do
+            local item = self.item_table[idx_offset + idx]
+            if item and item.cover_path then
+                item.state = CenterContainer:new{
+                    dimen = Geom:new{ w = cover_w, h = cover_h },
+                    ImageWidget:new{
+                        file = item.cover_path,
+                        width = cover_w,
+                        height = cover_h,
+                        scale_factor = 0,
+                        file_do_cache = true,
+                        alpha = false,
+                        use_legacy_image_scaling = true,
+                    },
+                }
+            end
+        end
+        return orig_updateItems(self, select_number, no_recalculate_dimen)
+    end
+
+    -- Forces one rebuild now, before the menu is ever shown -- the first
+    -- construction pass already ran (with state_w still 0) to compute
+    -- item_dimen, so this is what actually reserves the cover column and
+    -- paints the images for the very first page.
+    menu:updateItems()
 end
 
 -- ===== Hardcover (hardcover.app) =====
@@ -3161,6 +3312,11 @@ function Shelfmark:doSearch(params, existing_books)
         return
     end
 
+    -- Only the newly-fetched page needs a cover fetch -- books carried over
+    -- via existing_books already have cover_path set on the same table
+    -- (mutated in place, not copied) from their own original prefetch.
+    self:prefetchCovers(resp.books)
+
     local item_table = {}
     for i, book in ipairs(books) do
         -- Confirmed on-device: cramming metrics+byline into "mandatory"
@@ -3171,13 +3327,14 @@ function Shelfmark:doSearch(params, existing_books)
         -- metrics now gets a full third line of its own instead of being
         -- squeezed into "mandatory" and truncated to 20 chars: the rating
         -- AND reader count both show in full now, not just whichever fit.
-        -- 140, not 80, for the title itself for the same reason -- the
-        -- vast majority of real titles fit outright, and the ones that
+        -- 300, not 140, for the title itself for the same reason (and to
+        -- match browseAuthorBibliography's own already-generous length) --
+        -- the vast majority of real titles fit outright, and the ones that
         -- don't still get meaningfully more of themselves shown before
         -- the truncate() ellipsis kicks in.
         local byline = describeAuthor(book) .. describeYear(book)
         local metrics = describeMetrics(book)
-        local title_text = truncate(book.title, 140) or _("Untitled")
+        local title_text = truncate(book.title, 300) or _("Untitled")
         if byline ~= "" then
             title_text = title_text .. "\n" .. byline
         end
@@ -3187,6 +3344,7 @@ function Shelfmark:doSearch(params, existing_books)
         item_table[i] = {
             text = title_text,
             book_data = book,
+            cover_path = book.cover_path,
         }
     end
     if resp.has_more then
@@ -3227,6 +3385,7 @@ function Shelfmark:doSearch(params, existing_books)
             end
         end,
     }
+    attachCoverSupport(results_menu)
     UIManager:show(results_menu)
 end
 
@@ -3828,6 +3987,10 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
         return
     end
 
+    -- Only the newly-fetched page needs a cover fetch -- see the identical
+    -- note in doSearch above.
+    self:prefetchCovers(new_books)
+
     local item_table = {}
     for i, book in ipairs(books) do
         local byline = describeAuthor(book) .. describeYear(book)
@@ -3839,7 +4002,7 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
         local title_text = truncate(book.title, 300) or _("Untitled")
         if byline ~= "" then title_text = title_text .. "\n" .. byline end
         if metrics ~= "" then title_text = title_text .. "\n" .. metrics end
-        item_table[i] = { text = title_text, book_data = book }
+        item_table[i] = { text = title_text, book_data = book, cover_path = book.cover_path }
     end
     if total and #books < total then
         item_table[#item_table + 1] = { text = _("-- Load more results --"), is_load_more = true }
@@ -3870,6 +4033,7 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
             end
         end,
     }
+    attachCoverSupport(bibliography_menu)
     UIManager:show(bibliography_menu)
 end
 
