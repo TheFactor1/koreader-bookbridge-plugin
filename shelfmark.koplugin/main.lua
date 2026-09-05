@@ -3703,12 +3703,32 @@ function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
     -- truthy, so the or _("Untitled release") fallback never fired
     -- during testing -- but a release genuinely missing a title would
     -- have crashed with "attempt to call a number value").
+    -- mandatory (a right-aligned secondary column) forces the row into a
+    -- single fixed-height line regardless of multilines_forced -- confirmed
+    -- live, long titles were truncating to "..." even with that flag set.
+    -- Folding the format/source/size line into text itself via "\n"
+    -- matches doSearch/browseAuthorBibliography's own already-working
+    -- pattern: multilines_forced applies cleanly there because nothing else
+    -- shares the row.
     for _idx, release in ipairs(releases) do
+        local title_text = truncate(release.title, 300) or _("Untitled release")
+        local meta = describeRelease(release)
+        if meta ~= "" then title_text = title_text .. "\n" .. meta end
         table.insert(item_table, {
-            text = truncate(release.title, 90) or _("Untitled release"),
-            mandatory = truncate(describeRelease(release), 40),
+            text = title_text,
             release_data = release,
+            cover_path = book.cover_path,
         })
+    end
+
+    -- book.cover_path may already be set (e.g. arriving here from a search
+    -- result whose page was already prefetched) -- only fetch if it isn't,
+    -- so re-opening this same book's releases doesn't redownload its cover.
+    if not book.cover_path then
+        self:prefetchCovers({ book })
+        for _, item in ipairs(item_table) do
+            item.cover_path = book.cover_path
+        end
     end
 
     -- The default query (title + author, sent automatically -- see
@@ -3755,6 +3775,7 @@ function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
             end
         end,
     }
+    attachCoverSupport(releases_menu)
     UIManager:show(releases_menu)
 end
 
