@@ -2577,6 +2577,17 @@ end
 -- own title or author rejects that case ("well"/"ascension" are neither)
 -- without reintroducing the fuzzy scoring this function's history already
 -- shows doesn't work here.
+-- normalizeTitleWords returns a SET, whose iteration order is undefined --
+-- so two identical titles could stringify differently. Sorting makes the
+-- result a stable key, which the subtitle-uniqueness grouping below relies
+-- on to decide whether two CWA rows really share a main title.
+local function sortedWordList(word_set)
+    local list = {}
+    for w in pairs(word_set) do list[#list + 1] = w end
+    table.sort(list)
+    return list
+end
+
 local function titleWordsSubsetOf(title_words, author_words, filename_words)
     local any = false
     for w in pairs(title_words) do
@@ -2817,33 +2828,86 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             local raw_entry_count = 0
             local any_response = false
             local fname_words = normalizeTitleWords(fname)
+            local candidates = {}
 
+            -- seen_uuids tracks every row already examined, NOT just the
+            -- ones that matched. The same book legitimately comes back from
+            -- several of the candidate queries above, and counting it once
+            -- per appearance would both inflate raw_entry_count and, worse,
+            -- make the subtitle-uniqueness test below think one book was
+            -- several -- silently disabling the relaxation it guards.
             for _, q in ipairs(queries) do
                 local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
                     "/opds/search/" .. socketurl.escape(q), socks5_proxy)
                 if resp_body and code == 200 then
                     any_response = true
                     for _, e in ipairs(parseOpdsEntries(resp_body)) do
-                        local entry_words = normalizeTitleWords(e.title)
-                        local shares_a_word = false
-                        for w in pairs(entry_words) do
-                            if fname_words[w] then
-                                shares_a_word = true
-                                break
-                            end
-                        end
-                        if shares_a_word and e.uuid and not seen_uuids[e.uuid] then
-                            raw_entry_count = raw_entry_count + 1
-                        end
                         if e.uuid and not seen_uuids[e.uuid] then
+                            seen_uuids[e.uuid] = true
+                            local entry_words = normalizeTitleWords(e.title)
+                            local shares_a_word = false
+                            for w in pairs(entry_words) do
+                                if fname_words[w] then
+                                    shares_a_word = true
+                                    break
+                                end
+                            end
+                            if shares_a_word then
+                                raw_entry_count = raw_entry_count + 1
+                            end
+                            candidates[#candidates + 1] = e
                             if titleWordsSubsetOf(entry_words, normalizeTitleWords(e.author), fname_words) then
                                 table.insert(matches, e)
-                                seen_uuids[e.uuid] = true
                             end
                         end
                     end
                 end
                 if #matches > 0 then break end
+            end
+
+            -- Second pass, only when nothing matched outright: allow a CWA
+            -- title's subtitle (everything after a colon) to be absent from
+            -- the local filename. That is the remaining common shape --
+            -- CWA holds "Dungeon Crawler Carl: A LitRPG/Gamelit Adventure"
+            -- while the file is just "Dungeon Crawler Carl - Matt
+            -- Dinniman.epub", so the strict check fails on "litrpg" alone.
+            --
+            -- Blanket subtitle-stripping would be unsafe: for a series
+            -- sharing one main title ("Mistborn: The Final Empire" vs
+            -- "Mistborn: The Well of Ascension") the subtitle is the ONLY
+            -- thing telling the volumes apart, and dropping it would
+            -- recreate exactly the false-positive this matcher was
+            -- tightened to prevent. So relax it only for a candidate whose
+            -- pre-colon title is UNIQUE among everything this search
+            -- returned -- if two candidates share a main title, the
+            -- subtitle is carrying the distinction and stays required.
+            --
+            -- The reverse half of titleWordsSubsetOf is untouched: every
+            -- filename word must still be explained by the candidate's own
+            -- title+author, which is what keeps "Wayward Pines - 02
+            -- Wayward" from matching a bare "Wayward" (the filename's
+            -- extra series words are unexplained). That case is genuinely
+            -- ambiguous -- structurally identical to the Mistborn
+            -- false-positive -- and deliberately still skips.
+            if #matches == 0 and #candidates > 0 then
+                local function preColon(title)
+                    if type(title) ~= "string" then return "" end
+                    return (title:match("^([^:]+)") or title)
+                end
+                local stem_counts = {}
+                for _, e in ipairs(candidates) do
+                    local stem = table.concat(sortedWordList(normalizeTitleWords(preColon(e.title))), " ")
+                    stem_counts[stem] = (stem_counts[stem] or 0) + 1
+                end
+                for _, e in ipairs(candidates) do
+                    local stem_words = normalizeTitleWords(preColon(e.title))
+                    local stem = table.concat(sortedWordList(stem_words), " ")
+                    if stem ~= "" and stem_counts[stem] == 1 then
+                        if titleWordsSubsetOf(stem_words, normalizeTitleWords(e.author), fname_words) then
+                            table.insert(matches, e)
+                        end
+                    end
+                end
             end
             -- raw_entry_count is deliberately separate from #matches. CWA
             -- genuinely returning nothing is the only case safe to treat
