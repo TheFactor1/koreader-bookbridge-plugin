@@ -12,6 +12,16 @@ Designed for home WiFi / Tailscale use, not for reaching the server through
 an interactive-login gateway (e.g. Cloudflare Access) -- there is nothing
 here that could complete that kind of login flow.
 
+Several patterns here were learned from reading zlibrary.koplugin's own
+source (https://github.com/ZlibraryKO/zlibrary.koplugin), a KOReader plugin
+already installed on this device: embedding cover images in a Menu row via
+the stock item.state field, the freed-row-widget crash a Menu repaint can
+hit if that widget isn't rebuilt fresh on every update, KOReader's
+TextBoxWidget bold-span markup for row titles, and downloading-into-a-temp-
+file-then-polling-its-size for a live progress bar without needing the
+download itself to report progress. Credit where it's due -- none of this
+would have been found by guessing.
+
 @module koplugin.shelfmark
 ]]
 
@@ -1045,6 +1055,27 @@ local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, t
     end
     debugLog(log_prefix .. " <- HTTP " .. tostring(code) .. " saved to " .. save_path)
     return true, code
+end
+
+-- A real percentage progress bar needs the total size ahead of the actual
+-- GET -- Anna's Archive's own search results don't carry one (confirmed
+-- by reading annas-archive-api's scraper directly: it parses format out of
+-- the metadata line but discards the size text next to it), so this asks
+-- the mirror host itself via a plain HEAD. Best-effort only: some mirror
+-- hosts may not support HEAD or omit Content-Length, in which case this
+-- returns nil and the caller just shows a progress dialog with no bar.
+local function doHttpHeadContentLength(url)
+    socketutil:set_timeout(10, 15)
+    local requester = url:match("^https:") and https or http
+    local ok, code, headers = pcall(function()
+        return socket.skip(1, requester.request{ method = "HEAD", url = url, sink = ltn12.sink.table({}) })
+    end)
+    socketutil:reset_timeout()
+    if not ok or type(code) ~= "number" or code >= 400 or type(headers) ~= "table" then
+        return nil
+    end
+    local len = tonumber(headers["content-length"])
+    return (len and len > 0) and len or nil
 end
 
 local function doAnnasFileDownload(download_url, save_path)
@@ -2698,16 +2729,6 @@ function Shelfmark:annasFetchDownloadUrl(md5, progress_text)
 
     if not completed then return nil, nil, _("Cancelled.") end
     return dl_url, code, err
-end
-
-function Shelfmark:annasFileDownload(download_url, save_path, progress_text)
-    local Trapper = require("ui/trapper")
-    local completed, ok, code, err = Trapper:dismissableRunInSubprocess(function()
-        return doAnnasFileDownload(download_url, save_path)
-    end, progress_text or _("Downloading from Anna's Archive..."))
-
-    if not completed then return nil, nil, _("Cancelled.") end
-    return ok, code, err
 end
 
 -- Manual trigger for doSyncLibrary above -- runs in a Trapper subprocess
@@ -4392,9 +4413,77 @@ function Shelfmark:downloadFromAnnasArchive(release)
     local safe_title = truncate((release.title or "book"):gsub('[/\\:%*%?"<>|]', "_"), 120)
     local save_path = dir .. "/" .. safe_title .. "." .. ext
 
-    local ok, _dl_code, dl_err = self:annasFileDownload(dl_url, save_path)
+    -- Downloads into a sibling temp file, renamed onto save_path only on
+    -- full success -- same reasoning as zlibrary.koplugin's own
+    -- Api.downloadBook (see the credit at the top of this file): opening
+    -- save_path directly would truncate any earlier copy before the first
+    -- byte of a retry ever arrives. This temp file is also what the
+    -- progress poll below watches grow -- a prior killed download never
+    -- got to clean up after itself, hence the pcall(os.remove...) first.
+    local temp_path = save_path .. ".downloading"
+    pcall(os.remove, temp_path)
+
+    -- Best-effort real progress bar -- see doHttpHeadContentLength's own
+    -- note on why this needs a separate HEAD request at all. content_length
+    -- staying nil (HEAD unsupported/no Content-Length from this mirror)
+    -- just means ProgressbarDialog hides the bar itself and shows the
+    -- title/subtitle alone -- no separate fallback path needed.
+    local content_length = doHttpHeadContentLength(dl_url)
+
+    local ProgressbarDialog = require("ui/widget/progressbardialog")
+    local progress_dialog = ProgressbarDialog:new{
+        title = _("Downloading… (tap to cancel)"),
+        subtitle = safe_title,
+        progress_max = content_length,
+        refresh_time_seconds = 1,
+    }
+    progress_dialog:show()
+
+    -- Polls the temp file's size from this (parent) process rather than
+    -- getting a byte count out of the download itself: the download runs
+    -- in a forked child below so the UI stays responsive and cancelable,
+    -- and a fork can't reach back into this process's own widgets --
+    -- confirmed by reading ui/trapper.lua's own docs on
+    -- dismissableRunInSubprocess. Watching the file grow from out here
+    -- sidesteps that entirely (same trick zlibrary.koplugin's own
+    -- downloader uses).
+    local stopped = false
+    local function poll()
+        if stopped then return end
+        local size = lfs.attributes(temp_path, "size")
+        if size and content_length then
+            progress_dialog:reportProgress(math.min(size, content_length))
+        end
+        UIManager:scheduleIn(1, poll)
+    end
+    UIManager:scheduleIn(1, poll)
+
+    -- false, not a text string: an invisible, screen-covering trap widget
+    -- that swallows the cancelling tap, same as zlibrary.koplugin's own
+    -- downloader -- progress_dialog above is purely the visual, this is
+    -- what actually makes tap-to-cancel work.
+    local Trapper = require("ui/trapper")
+    local completed, ok, _dl_code, dl_err = Trapper:dismissableRunInSubprocess(function()
+        return doAnnasFileDownload(dl_url, temp_path)
+    end, false)
+
+    stopped = true
+    UIManager:unschedule(poll)
+    progress_dialog:close()
+
+    if not completed then
+        pcall(os.remove, temp_path)
+        return
+    end
     if not ok then
+        pcall(os.remove, temp_path)
         UIManager:show(InfoMessage:new{ text = dl_err or _("Download failed.") })
+        return
+    end
+
+    if not os.rename(temp_path, save_path) then
+        pcall(os.remove, temp_path)
+        UIManager:show(InfoMessage:new{ text = _("Download succeeded but couldn't be saved.") })
         return
     end
     UIManager:show(InfoMessage:new{ text = T(_("Saved to %1"), save_path), timeout = 4 })
