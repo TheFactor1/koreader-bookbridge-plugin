@@ -2780,14 +2780,47 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- actual cause of a genuine "Dune Messiah" duplicate: CWA's
             -- search returned a real, non-empty response, the matcher just
             -- didn't recognize it, and the old logic uploaded anyway.
+            -- Only entries plausibly ABOUT this book count toward that
+            -- "skipped, check manually" decision -- an entry sharing not a
+            -- single title word with the local filename cannot be the same
+            -- book, so it is no evidence either way.
+            --
+            -- This matters because the query is frequently the author's
+            -- name rather than the title: a "Author - Title" filename with
+            -- no comma (e.g. "Stephen King - The Dark Tower 1_ The
+            -- Gunslinger.epub") is indistinguishable from "Title - Author"
+            -- by structure alone -- "Dune Messiah" and "Stephen King" are
+            -- both two capitalised words -- so the pre-separator half gets
+            -- taken as the title. CWA then searches the author field,
+            -- happily returns that author's OTHER books, and the old
+            -- unfiltered count treated those as "results we didn't
+            -- understand", skipping a genuinely new book. Confirmed live:
+            -- The Gunslinger sat through five consecutive syncs without
+            -- ever uploading, while being genuinely absent from CWA.
+            --
+            -- The protection this branch exists for is unchanged: for the
+            -- "Dune Messiah" case it guards against, CWA's response DOES
+            -- contain the real same-titled book, which shares title words
+            -- and is still counted -- so that still skips rather than
+            -- uploading a duplicate.
             local raw_entry_count = 0
             if resp_body and code == 200 then
                 local fname_words = normalizeTitleWords(fname)
                 local seen_uuids = {}
                 for _, e in ipairs(parseOpdsEntries(resp_body)) do
-                    raw_entry_count = raw_entry_count + 1
+                    local entry_words = normalizeTitleWords(e.title)
+                    local shares_a_word = false
+                    for w in pairs(entry_words) do
+                        if fname_words[w] then
+                            shares_a_word = true
+                            break
+                        end
+                    end
+                    if shares_a_word then
+                        raw_entry_count = raw_entry_count + 1
+                    end
                     if e.uuid and not seen_uuids[e.uuid] then
-                        if titleWordsSubsetOf(normalizeTitleWords(e.title), normalizeTitleWords(e.author), fname_words) then
+                        if titleWordsSubsetOf(entry_words, normalizeTitleWords(e.author), fname_words) then
                             table.insert(matches, e)
                             seen_uuids[e.uuid] = true
                         end
