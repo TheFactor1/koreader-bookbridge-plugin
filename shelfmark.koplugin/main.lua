@@ -2043,8 +2043,29 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- Only splits on a *spaced* " - " (an author separator in
             -- this convention); a hyphen with no surrounding spaces, as in
             -- an actual hyphenated title word, is left alone.
-            local title_part = cleaned_fname:match("^(.-)%s+%-%s+")
-            local search_title = (title_part and title_part ~= "") and title_part or cleaned_fname
+            -- Confirmed live: Anna's Archive's OWN download filenames (see
+            -- doAnnasFileDownload/the annasarchive.koplugin download path)
+            -- use "Lastname, Firstname - Title", the opposite order from
+            -- this file's other "Title - Author" convention -- e.g. "Liu,
+            -- Cixin - The Dark Forest (The Three-Body Problem)". Blindly
+            -- taking the pre-separator segment as the title searched CWA
+            -- for the AUTHOR NAME ("Liu, Cixin"), which real-world found a
+            -- different Liu Cixin book already in CWA by author-match, that
+            -- correctly failed the word-subset check (its title shares no
+            -- words with the actual local file) -- so the genuinely new
+            -- book got "none matched confidently, skipped" for a query that
+            -- was never actually looking for it in the first place. A comma
+            -- in the pre-separator segment is a reliable signal it's a
+            -- "Last, First" author, not a title -- use the other side then.
+            local before_sep, after_sep = cleaned_fname:match("^(.-)%s+%-%s+(.+)$")
+            local search_title
+            if before_sep and before_sep:find(",") and after_sep and after_sep ~= "" then
+                search_title = after_sep
+            elseif before_sep and before_sep ~= "" then
+                search_title = before_sep
+            else
+                search_title = cleaned_fname
+            end
             local query = search_title:gsub("[_%-%[%]%(%)]", " ")
             local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
                 "/opds/search/" .. socketurl.escape(query), socks5_proxy)
