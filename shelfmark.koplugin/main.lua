@@ -14,9 +14,13 @@ here that could complete that kind of login flow.
 
 Several patterns here were learned from reading zlibrary.koplugin's own
 source (https://github.com/ZlibraryKO/zlibrary.koplugin), a KOReader plugin
-already installed on this device: embedding cover images in a Menu row via
-the stock item.state field, the freed-row-widget crash a Menu repaint can
-hit if that widget isn't rebuilt fresh on every update, KOReader's
+already installed on this device -- primarily written by ZlibraryKO
+(https://github.com/ZlibraryKO), the account behind the large majority of
+its commits, per the repo's own contributor history; the LICENSE and
+README name no individual, so this is the closest attribution actually
+available. Patterns borrowed: embedding cover images in a Menu row via the
+stock item.state field, the freed-row-widget crash a Menu repaint can hit
+if that widget isn't rebuilt fresh on every update, KOReader's
 TextBoxWidget bold-span markup for row titles, and downloading-into-a-temp-
 file-then-polling-its-size for a live progress bar without needing the
 download itself to report progress. Credit where it's due -- none of this
@@ -1174,11 +1178,43 @@ end
 -- Standalone (no `self`) so it can run inside prefetchCovers' forked
 -- Trapper subprocess below. Best-effort only -- any failure just means no
 -- cover for that row, never worth surfacing as an error.
+-- Hardcover's own cover images are frequently just hotlinked from Amazon's
+-- CDN (confirmed live: assets.hardcover.app/.../*._SL1500_*.jpg-style
+-- filenames), which serves multiple pre-rendered sizes of the same image
+-- via this exact filename suffix -- rewriting the number fetches a
+-- genuinely smaller file directly from the CDN, no local decode/re-encode
+-- needed at all (confirmed live: a real 1500px cover dropped from 235KB to
+-- 27KB requesting 200px instead). This KOReader build has no image-encode
+-- capability of its own to build a "resize and re-save" step with anyway
+-- (frontend/ui/renderimage.lua only ever decodes; tj3Compress8 exists in
+-- the raw turbojpeg FFI header but nothing wraps it) -- this sidesteps
+-- needing one. Hardcover's own natively-hosted images (no such suffix,
+-- already smaller on average) are left untouched; there's no equivalent
+-- trick for those.
+--
+-- Only applied to the direct-fetch (bibliography) path below, not the
+-- general-search path's /api/covers proxy -- tried the equivalent rewrite
+-- there too (decoding the proxy's own base64-encoded "url" query param,
+-- shrinking it, re-encoding), but confirmed live against the real server
+-- that it has no effect: requesting the exact same cover through the proxy
+-- with the original 1500px URL and a rewritten 300px one returned
+-- byte-for-byte identical, still-1500px images both times. That proxy
+-- evidently caches by the hardcover_<id> alone, ignoring whatever URL is
+-- actually passed -- so there was nothing to gain there, only complexity.
+local COVER_TARGET_PX = 300
+local function shrinkAmazonImageUrl(url)
+    local rewritten, n = url:gsub("(%._S[LX])%d+(_%.[%a]+)$", "%1" .. COVER_TARGET_PX .. "%2")
+    return n > 0 and rewritten or url
+end
+
 local function downloadCoverToPath(server_url, session_cookie, cover_url)
     if not cover_url or cover_url == "" then return nil end
     if lfs.attributes(COVER_CACHE_DIR, "mode") ~= "directory" then
         lfs.mkdir(COVER_CACHE_DIR)
     end
+    -- Keyed on the original cover_url, not the shrunk one -- it's still a
+    -- unique, stable identifier for this exact cover regardless of which
+    -- variant's bytes actually end up on disk.
     local path = COVER_CACHE_DIR .. "/" .. coverCacheKey(cover_url)
     if lfs.attributes(path, "mode") == "file" then
         return path
@@ -1186,7 +1222,7 @@ local function downloadCoverToPath(server_url, session_cookie, cover_url)
 
     local full_url, headers
     if cover_url:match("^https?://") then
-        full_url = cover_url
+        full_url = shrinkAmazonImageUrl(cover_url)
     else
         if not session_cookie then return nil end
         full_url = server_url .. cover_url
