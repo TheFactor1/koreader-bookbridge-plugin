@@ -3666,24 +3666,28 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     --
     -- Strictly response-preserving: the same query returns the same body, so
     -- every match decision is made on identical evidence, just without
-    -- re-asking. Same run-snapshot assumption as fetchCwaCatalog and
-    -- getBookAjax. Keyed by the raw query, and the failure case is cached as
-    -- false too -- a query that CWA couldn't answer is not worth retrying
-    -- once per file that happens to derive it.
+    -- re-asking. Same run-snapshot assumption as fetchCwaCatalog.
+    --
+    -- SUCCESSES ONLY. Caching failures here would be a real change to what
+    -- this matcher decides, not just to how it fetches: the uncached code
+    -- re-issued a failed query for every file that derived it, so a
+    -- transient CWA failure on one file's query cost that file its
+    -- candidates and nothing more. Remembering the failure would spread one
+    -- flaky response across every later file whose ladder reaches the same
+    -- query, and a file that then matched nothing while OTHER queries did
+    -- answer (so the never-upload-on-an-unreachable-CWA rule stays
+    -- satisfied) would upload a duplicate of a book CWA actually holds --
+    -- exactly the failure this matcher exists to prevent. A retried failure
+    -- is cheap; a duplicate upload is not.
     local search_cache = {}
     local function searchCwa(q)
         local hit = search_cache[q]
-        if hit ~= nil then
-            if hit == false then return nil, 0 end
-            return hit, 200
-        end
+        if hit then return hit, 200 end
         local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
             "/opds/search/" .. socketurl.escape(q), socks5_proxy)
         if resp_body and code == 200 then
             search_cache[q] = resp_body
-            return resp_body, code
         end
-        search_cache[q] = false
         return resp_body, code
     end
 
