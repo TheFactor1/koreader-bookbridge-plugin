@@ -5115,28 +5115,38 @@ function Shelfmark:checkForUpdate()
     -- version comparison would say "up to date" for a file that changed
     -- minutes ago -- which is exactly the case this whole path exists for.
     if info.manifest then
-        local installed = T(_("v%1"), PLUGIN_VERSION)
-        local offered = T(_("v%1"), info.version)
-        if info.build then offered = offered .. T(_(" build %1"), info.build) end
+        -- Phrased per case rather than by pasting a version and a build id
+        -- together: "A different build of v0.3.0 build 8b58ef5 is
+        -- available (you have v0.3.0)" says the version twice and reads
+        -- like two different things are on offer.
+        local build = info.build and tostring(info.build) or nil
 
         -- Nothing differs by checksum. That's a real "up to date" only when
         -- the checksums could actually be computed; if they couldn't, fall
         -- back to the version number, which is the only signal left.
         if #info.changed == 0
                 and not (info.unverifiable and isNewerVersion(info.version, PLUGIN_VERSION)) then
-            UIManager:show(InfoMessage:new{
-                text = info.unverifiable
-                    and T(_("No newer version offered (%1). This device couldn't checksum its own files, so a same-version rebuild can't be detected."), offered)
-                    or T(_("You're up to date (%1)."), offered),
-            })
+            local text
+            if info.unverifiable then
+                text = T(_("No newer version offered (v%1). This device couldn't checksum its own files, so a same-version rebuild can't be detected."), info.version)
+            elseif build then
+                text = T(_("You're up to date (v%1, build %2)."), info.version, build)
+            else
+                text = T(_("You're up to date (v%1)."), info.version)
+            end
+            UIManager:show(InfoMessage:new{ text = text })
             return
         end
 
         local msg
         if isNewerVersion(info.version, PLUGIN_VERSION) then
-            msg = T(_("%1 is available (you have %2)."), offered, installed)
+            msg = build
+                and T(_("v%1 (build %2) is available -- you have v%3."), info.version, build, PLUGIN_VERSION)
+                or T(_("v%1 is available -- you have v%2."), info.version, PLUGIN_VERSION)
         else
-            msg = T(_("A different build of %1 is available (you have %2)."), offered, installed)
+            msg = build
+                and T(_("A different build of v%1 is available (build %2)."), info.version, build)
+                or T(_("A different build of v%1 is available."), info.version)
         end
         if #info.changed > 0 then
             msg = msg .. "\n\n" .. T(_("Changed: %1"), table.concat(info.changed, ", "))

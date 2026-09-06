@@ -21,7 +21,7 @@ if os.getenv("CHECK_ONLY") then
   if #info.changed == 0 then
     print(("       menu     \"You're up to date (v%s build %s).\""):format(tostring(info.version), tostring(info.build)))
   else
-    print(("       menu     \"A different build of v%s build %s is available.  Changed: %s\"")
+    print(("       menu     \"A different build of v%s is available (build %s).  Changed: %s\"")
       :format(tostring(info.version), tostring(info.build), table.concat(info.changed, ", ")))
   end
   os.exit(0)
