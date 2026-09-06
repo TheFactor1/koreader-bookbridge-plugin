@@ -105,6 +105,11 @@ function Shelfmark:loadSettings()
     self.annas_url = self.sm_settings.data.shelfmark.annas_url
     self.annas_download_key = self.sm_settings.data.shelfmark.annas_download_key
     self.annas_tld = self.sm_settings.data.shelfmark.annas_tld or "gd"
+    -- shelfmark-ai-relay: suggests a match for files doSyncLibrary could not
+    -- resolve on its own. Optional -- everything works exactly as before when
+    -- unset, the leftovers just stay reported as "check manually".
+    self.ai_relay_url = self.sm_settings.data.shelfmark.ai_relay_url
+    self.ai_relay_token = self.sm_settings.data.shelfmark.ai_relay_token
     -- Hardcover (hardcover.app) -- a public HTTPS GraphQL API, unlike Anna's
     -- Archive/CWA/the Shelfmark server, so no self-hosted companion or
     -- SOCKS5 proxy is needed for this one; it's reachable directly.
@@ -142,6 +147,8 @@ function Shelfmark:saveAllSettings(msg)
         annas_download_key = self.annas_download_key,
         annas_tld = self.annas_tld,
         hardcover_token = self.hardcover_token,
+        ai_relay_url = self.ai_relay_url,
+        ai_relay_token = self.ai_relay_token,
     })
     self.sm_settings:flush()
     self.session_cookie = nil -- force re-login with new creds
@@ -221,6 +228,45 @@ function Shelfmark:editCwaSettings()
     }
     UIManager:show(self.cwa_settings_dialog)
     self.cwa_settings_dialog:onShowKeyboard()
+end
+
+-- The relay only ever answers "which of these candidates is the same book",
+-- and only for files the deterministic matcher already gave up on. The token
+-- here grants nothing except the right to ask it that question -- the actual
+-- model credentials (if a remote provider is configured) live on the server,
+-- never on the device, which is the whole reason the relay exists rather
+-- than the plugin calling a model API directly.
+function Shelfmark:editAiSettings()
+    self.ai_settings_dialog = MultiInputDialog:new{
+        title = _("Match suggestions (AI)"),
+        fields = {
+            { text = self.ai_relay_url, hint = _("Relay URL, e.g. http://host:8089 (blank = disabled)") },
+            { text = self.ai_relay_token, text_type = "password", hint = _("Relay token") },
+        },
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.ai_settings_dialog)
+                    end,
+                },
+                {
+                    text = _("Apply"),
+                    callback = function()
+                        local fields = self.ai_settings_dialog:getFields()
+                        self.ai_relay_url = fields[1] ~= "" and fields[1]:gsub("/*$", "") or nil
+                        self.ai_relay_token = fields[2] ~= "" and fields[2] or nil
+                        UIManager:close(self.ai_settings_dialog)
+                        self:saveAllSettings(_("Saved."))
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.ai_settings_dialog)
+    self.ai_settings_dialog:onShowKeyboard()
 end
 
 function Shelfmark:editAnnasSettings()
@@ -2101,6 +2147,48 @@ function Shelfmark:registerFileDialogButtons()
             })
         end
 
+        -- Only when a CWA server is actually configured -- matches the same
+        -- guard doSyncLibrary itself uses, and there's nothing to check
+        -- against otherwise.
+        if self_ref.cwa_url and self_ref.cwa_url ~= "" then
+            table.insert(row, {
+                text = _("Refresh from CWA"),
+                callback = function()
+                    self_ref:refreshBookMetadata(file)
+                end,
+            })
+        end
+
+        -- Push counterpart to "Refresh from CWA" above: get THIS book into
+        -- the library without running a whole-library sync.
+        if self_ref.cwa_url and self_ref.cwa_url ~= "" then
+            table.insert(row, {
+                text = _("Send to CWA"),
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        self_ref:sendBookToCwa(file)
+                    end)
+                end,
+            })
+        end
+
+        -- One-off counterpart to the batch review offered after a sync: same
+        -- suggest-then-confirm path, for when a single book is bothering you
+        -- rather than waiting for the next sync to surface it.
+        if self_ref.cwa_url and self_ref.cwa_url ~= ""
+                and self_ref.ai_relay_url and self_ref.ai_relay_url ~= "" then
+            table.insert(row, {
+                text = _("Suggest match"),
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        self_ref:suggestMatchForFile(file)
+                    end)
+                end,
+            })
+        end
+
         return row
     end
 
@@ -2513,6 +2601,19 @@ end
 
 local SYNC_STOPWORDS = { the = true, a = true, an = true, of = true, ["and"] = true, novel = true }
 
+-- Structural scaffolding that shows up around a series volume number in a
+-- filename ("Red Rising Book 2", "Vol. 2", "Part 3"). Deliberately NOT added
+-- to SYNC_STOPWORDS: several of these are legitimate title words on their own
+-- ("The Book Thief", "The Final Empire"), and dropping them globally would
+-- weaken every strict comparison. They're only ever forgiven inside the
+-- series-relaxation block, where title, author and series name have already
+-- established the match.
+local SERIES_STRUCTURE_WORDS = {
+    book = true, books = true,
+    vol = true, vols = true, volume = true,
+    part = true, no = true, num = true,
+}
+
 -- Repeatedly strips a *trailing* "(...)" group -- never content in the
 -- middle of a title, which is far more likely to be meaningfully
 -- title-distinguishing rather than noise. Two independent, confirmed-live
@@ -2537,8 +2638,63 @@ local function stripTrailingParenGroups(text)
     return text
 end
 
+-- Folds accented Latin characters to their ASCII base so a title written
+-- both ways compares equal.
+--
+-- Without this, "Les Miserables" in CWA and "Les Misérables" on disk produce
+-- entirely different words, the matcher finds nothing, and the book is
+-- UPLOADED AGAIN -- a silent duplicate, which is the costliest failure this
+-- matcher has. Real risk here, not theoretical: this library already holds
+-- titles with curly apostrophes and names like "Joandomènec Ros i Aragonès",
+-- and sources disagree constantly about whether to keep the accents.
+--
+-- Keyed by UTF-8 byte sequence because LuaJIT has no unicode support; covers
+-- Latin-1 Supplement and the common Latin Extended-A letters, which is what
+-- Western-language book metadata actually uses.
+local DIACRITIC_FOLD = {
+    ["\xC3\xA0"]="a",["\xC3\xA1"]="a",["\xC3\xA2"]="a",["\xC3\xA3"]="a",["\xC3\xA4"]="a",["\xC3\xA5"]="a",
+    ["\xC3\xA8"]="e",["\xC3\xA9"]="e",["\xC3\xAA"]="e",["\xC3\xAB"]="e",
+    ["\xC3\xAC"]="i",["\xC3\xAD"]="i",["\xC3\xAE"]="i",["\xC3\xAF"]="i",
+    ["\xC3\xB2"]="o",["\xC3\xB3"]="o",["\xC3\xB4"]="o",["\xC3\xB5"]="o",["\xC3\xB6"]="o",["\xC3\xB8"]="o",
+    ["\xC3\xB9"]="u",["\xC3\xBA"]="u",["\xC3\xBB"]="u",["\xC3\xBC"]="u",
+    ["\xC3\xA7"]="c",["\xC3\xB1"]="n",["\xC3\xBD"]="y",["\xC3\xBF"]="y",
+    ["\xC3\x9F"]="ss",["\xC3\xA6"]="ae",["\xC5\x93"]="oe",
+    ["\xC4\x81"]="a",["\xC4\x93"]="e",["\xC4\xAB"]="i",["\xC5\x8D"]="o",["\xC5\xAB"]="u",
+    ["\xC5\x82"]="l",["\xC5\xA1"]="s",["\xC5\xBE"]="z",["\xC4\x8D"]="c",["\xC5\x99"]="r",
+}
+local function foldDiacritics(text)
+    -- Lowercased first by the caller, so only the lowercase forms are needed.
+    return (text:gsub("[\xC3\xC4\xC5][\x80-\xBF]", function(seq)
+        return DIACRITIC_FOLD[seq] or seq
+    end))
+end
+
 local function normalizeTitleWords(text)
     if not text then return {} end
+    -- A "(...)" group directly before the " - author" separator is trailing
+    -- on the TITLE, even though it isn't at the end of the whole filename.
+    -- stripTrailingParenGroups only looks at the very end, so
+    -- "The Dark Forest (The Three-Body Problem Series Book 2) - Cixin Liu"
+    -- kept "problem/series/three/book/body" while CWA's own title -- where
+    -- the same group IS at the end -- had them stripped. The words could
+    -- never be explained, so the book never matched itself and was uploaded
+    -- again on every sync. Found by generating filename shapes for every
+    -- book in the library and checking each still matches itself.
+    text = text:gsub("%s*%b()%s*(%s%-%s)", "%1")
+    -- A parenthetical that names a series, volume or edition is annotation
+    -- wherever it sits, not title content -- "(The Three-Body Problem Series
+    -- Book 2)", "(Harry Potter, Book 6)", "(Royal Elite Special Edition)".
+    -- Only stripped when it actually contains one of those markers, so a
+    -- meaningful mid-title parenthetical (a year, a disambiguator) is left
+    -- alone -- which is why stripTrailingParenGroups stays end-anchored.
+    text = text:gsub("%s*(%b())", function(group)
+        local inner = group:lower()
+        if inner:find("book") or inner:find("series") or inner:find("edition")
+                or inner:find("volume") or inner:find("trilogy") or inner:find("saga") then
+            return " "
+        end
+        return group
+    end)
     -- Parens optional: the tag shows up both as "(Z-Library)" and bare,
     -- as in "Recursion Blake Crouch Z-Library.epub". Only the
     -- parenthesized form used to be stripped, which left a stray
@@ -2547,13 +2703,76 @@ local function normalizeTitleWords(text)
     -- candidate's own title+author, that one leftover word made a book
     -- fail to match *itself* (confirmed by a regression test: CWA title
     -- "Recursion" + author "Blake Crouch" vs. this exact filename).
-    text = text:lower():gsub("%(?z%-library%)?", "")
+    text = text:lower()
+    -- Strip domain-like tokens ("z-library.sk", "1lib.sk", "z-lib.sk")
+    -- before the bare-tag strip below, so a tag written as a domain is
+    -- consumed whole rather than leaving its TLD behind. Confirmed live,
+    -- and the cause of five books sitting in "returned results but none
+    -- matched confidently -- skipped" on every single sync forever: these
+    -- filenames end in a LIST of mirror domains, and stripping only the
+    -- literal word "z-library" left "sk", "1lib" and "lib" as filename
+    -- words. The matcher requires every filename word to be explained by
+    -- the candidate's title+author, so those leftovers made each book fail
+    -- to match ITSELF -- never a duplicate upload (the skip rule caught
+    -- that), just permanently stuck.
+    --
+    -- Matched generically rather than by listing known mirrors: the domain
+    -- list changes over time, and any "word.tld" token is junk for title
+    -- matching regardless of which source added it. Safe against real
+    -- titles -- a book title containing a bare domain is vanishingly rare,
+    -- and the file extension is already stripped off before this is called.
+    text = text:gsub("[%w%-]+%.%a%a+", " ")
+    text = text:gsub("%(?z%-library%)?", "")
     text = stripTrailingParenGroups(text)
-    text = text:gsub("[^%w]+", " ")
+    text = foldDiacritics(text)
+    -- Underscore first: Lua's %w counts "_" as a word character, so
+    -- "Red Rising 4_ Iron Gold" tokenized to "4_" -- a word that appears in
+    -- no CWA title, leaving it permanently unexplained and the book
+    -- permanently unmatched (i.e. re-uploaded every sync). The underscore is
+    -- only ever a stand-in for a colon in these filenames, never content.
+    -- Typographic punctuation -> plain space, BEFORE the high-byte-preserving
+    -- pass below. Keeping high bytes is what lets Cyrillic/CJK titles work at
+    -- all, but it also means a curly apostrophe or en dash would count as a
+    -- word character and fuse words together: "Handmaid\xE2\x80\x99s" became one
+    -- token that no straight-quoted copy could ever equal. This library holds
+    -- titles punctuated exactly that way ("The Handmaid's Tale", "Ender's
+    -- Game"), so this is a live case, not a hypothetical.
+    text = text:gsub("\xE2\x80[\x80-\xBF]", " ")   -- quotes, en/em dash, ellipsis
+    text = text:gsub("\xC2[\xA0\xAD]", " ")        -- non-breaking space, soft hyphen
+    text = text:gsub("\xEF\xAC\x81", "fi")          -- fi ligature
+    text = text:gsub("\xEF\xAC\x82", "fl")          -- fl ligature
+    -- Combining marks (NFD): "e" + U+0301 must equal the precomposed "e".
+    -- foldDiacritics above only handles the precomposed forms.
+    text = text:gsub("\xCC[\x80-\xBF]", "")
+    text = text:gsub("\xCD[\x80-\xAF]", "")
+    text = text:gsub("_", " ")
+    -- \128-\255 alongside %w: Lua patterns are byte-oriented and %w matches
+    -- ASCII alphanumerics ONLY, so every non-Latin script -- Cyrillic, Greek,
+    -- CJK, Arabic -- was treated as punctuation and erased. A Russian or
+    -- Japanese title normalized to an EMPTY word set, which can never satisfy
+    -- titleWordsSubsetOf, so such a book could never match itself and would
+    -- be re-uploaded on every single sync. Keeping the high bytes lets those
+    -- titles compare byte-for-byte, which is all that's needed here (both
+    -- sides come from the same UTF-8 sources).
+    text = text:gsub("[^%w\128-\255]+", " ")
     local words = {}
+    local any_token = false
     for w in text:gmatch("%S+") do
+        any_token = true
         if not SYNC_STOPWORDS[w] and #w > 1 then
             words[w] = true
+        end
+    end
+    -- Degenerate titles: "S." (J.J. Abrams), "A", "It" written as "I.T."
+    -- normalize to nothing, because every token is a single character. An
+    -- empty word set can never satisfy titleWordsSubsetOf, so such a book
+    -- could never match itself -- and a book that never matches is uploaded
+    -- again on every single sync. Falling back to the short tokens keeps
+    -- them comparable. Only ever runs when the normal pass found nothing,
+    -- so it cannot loosen matching for any ordinary title.
+    if next(words) == nil and any_token then
+        for w in text:gmatch("%S+") do
+            if not SYNC_STOPWORDS[w] then words[w] = true end
         end
     end
     return words
@@ -2601,6 +2820,223 @@ local function titleWordsSubsetOf(title_words, author_words, filename_words)
     return true
 end
 
+-- Asks shelfmark-ai-relay which of CWA's own candidates is the same book as
+-- a local file the deterministic matcher could not resolve.
+--
+-- Suggestion only: this returns a uuid for the UI to offer, and NOTHING here
+-- registers, downloads or uploads anything. The relay is likewise incapable
+-- of returning a book that wasn't in the candidate list this function sent
+-- (it validates the model's answer against that list server-side), so the
+-- worst case for a bad answer is a wrong suggestion the user declines --
+-- never a duplicate upload or an overwritten file.
+--
+-- Generous timeouts: a locally-hosted model on CPU takes a few seconds per
+-- book, which is fine for an explicitly-invoked review step but would be far
+-- too slow to sit inside the sync loop itself -- which is exactly why this is
+-- never called from there.
+local function doAiSuggest(relay_url, relay_token, filename, candidates, socks5_proxy)
+    if not relay_url or relay_url == "" or not relay_token or relay_token == "" then
+        return nil, _("Match suggestions aren't set up -- add a relay URL under Settings.")
+    end
+    if type(candidates) ~= "table" or #candidates == 0 then
+        return nil, _("No CWA candidates to compare against.")
+    end
+
+    -- The relay caps this at 10; trim here too so an oversized request is
+    -- never sent in the first place.
+    local trimmed = {}
+    for i = 1, math.min(#candidates, 10) do
+        local c = candidates[i]
+        if c and c.uuid and c.title then
+            trimmed[#trimmed + 1] = {
+                uuid = tostring(c.uuid),
+                title = tostring(c.title),
+                author = c.author and tostring(c.author) or nil,
+            }
+        end
+    end
+    if #trimmed == 0 then
+        return nil, _("No usable CWA candidates to compare against.")
+    end
+
+    local body_json = JSON.encode({ filename = filename, candidates = trimmed })
+    local headers = {
+        ["Content-Type"] = "application/json",
+        ["Content-Length"] = tostring(#body_json),
+        ["X-Relay-Token"] = relay_token,
+    }
+    local url = relay_url .. "/suggest"
+    debugLog("[ai] -> POST " .. url .. " (" .. #trimmed .. " candidate(s))")
+
+    socketutil:set_timeout(20, 120)
+    local sink, sink_table = socketutil.table_sink()
+    local request = {
+        method = "POST", url = url, headers = headers,
+        source = ltn12.source.string(body_json), sink = sink,
+    }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        debugLog("[ai] <- connection error: " .. tostring(code))
+        return nil, _("Couldn't reach the suggestion relay.")
+    end
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        return nil, _("The suggestion relay timed out.")
+    end
+    local raw = table.concat(sink_table)
+    debugLog("[ai] <- HTTP " .. tostring(code) .. ", body length " .. #raw)
+    if code ~= 200 then
+        if code == 401 then return nil, _("Relay rejected the token -- check Settings.") end
+        if code == 429 then return nil, _("Relay is rate limited -- try again later.") end
+        if code == 503 then return nil, _("Relay isn't configured on the server yet.") end
+        return nil, T(_("Relay error (HTTP %1)."), tostring(code))
+    end
+
+    local decode_ok, decoded = pcall(JSON.decode, raw)
+    if not decode_ok or type(decoded) ~= "table" then
+        return nil, _("Couldn't understand the relay's reply.")
+    end
+    decoded = stripJsonNull(decoded)
+    local choice = decoded.choice
+    if type(choice) ~= "string" or choice == "" then
+        return nil, decoded.reason and tostring(decoded.reason) or _("No confident match.")
+    end
+
+    -- Re-check the returned uuid against what we actually sent. The relay
+    -- already does this, but it costs nothing to refuse to act on a uuid
+    -- this device never offered.
+    for _, c in ipairs(trimmed) do
+        if c.uuid == choice then
+            -- title/author come from OUR candidate list, not from the
+            -- relay's echo of them. The relay does echo the values it was
+            -- sent, so today they're identical -- but the title is what gets
+            -- written into the sync registry on confirmation, and there's no
+            -- reason for any of that to originate anywhere but here. Only
+            -- confidence/reason (display-only) come from upstream.
+            return {
+                uuid = c.uuid,
+                title = c.title,
+                author = c.author,
+                confidence = tonumber(decoded.confidence) or 0,
+                reason = decoded.reason and tostring(decoded.reason) or "",
+            }
+        end
+    end
+    return nil, _("Relay returned an unknown book -- ignored.")
+end
+
+-- Fetches CWA's whole catalog as a uuid -> {updated=...} map, paginated.
+--
+-- Exists purely as a fast pre-filter for the tracked-book check below: that
+-- check otherwise costs one /ajax/book request PER tracked book (measured on
+-- device: ~0.40s each, so ~6.5s for 16 books, and it grows linearly with the
+-- library). One catalog fetch covers all of them.
+--
+-- PAGINATION IS NOT OPTIONAL. CWA caps an OPDS feed at config_books_per_page
+-- (60 here) and this library currently holds exactly 60 books, so a single
+-- unpaginated request happens to look complete right now and would silently
+-- start missing books the moment a 61st is added. Confirmed live:
+-- ?offset=60 returns an empty feed, which is the loop's terminator.
+--
+-- Returns nil on any failure, and the caller then falls back to the
+-- per-book check -- this is an optimization, never a source of truth.
+local CATALOG_PAGE = 60
+local CATALOG_MAX_PAGES = 60 -- 3600 books; a runaway loop guard, not a real limit
+local function fetchCwaCatalog(cwa_url, cwa_username, cwa_password, socks5_proxy)
+    local catalog, offset = { __authors = {} }, 0
+    for _page = 1, CATALOG_MAX_PAGES do
+        local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+            "/opds/new?offset=" .. offset, socks5_proxy)
+        if not body or code ~= 200 then
+            return nil
+        end
+        local found = 0
+        for entry_xml in body:gmatch("<entry>(.-)</entry>") do
+            local uuid = entry_xml:match("<id>urn:uuid:(.-)</id>")
+            local updated = entry_xml:match("<updated>(.-)</updated>")
+            local author = decodeHtmlEntities(entry_xml:match("<author>%s*<name>(.-)</name>"))
+            if uuid then
+                found = found + 1
+                catalog[uuid] = { updated = updated }
+                -- Author names are collected into a normalized set on the
+                -- side, used by the query builder to tell "Author - Title"
+                -- from "Title - Author" -- see its note.
+                if type(author) == "string" and author ~= "" then
+                    local key = table.concat(sortedWordList(normalizeTitleWords(author)), " ")
+                    if key ~= "" then catalog.__authors[key] = true end
+                end
+            end
+        end
+        if found == 0 then break end
+        offset = offset + CATALOG_PAGE
+    end
+    return catalog
+end
+
+-- Checks one already-tracked registry entry against CWA's current
+-- last_modified for its uuid, re-downloading the file if it changed.
+-- Shared by doSyncLibrary's own "already tracked" loop below and
+-- Shelfmark:refreshBookMetadata's single-book action, so the (already
+-- fiddly -- see the 404 case) logic for what counts as "changed" vs "gone"
+-- only exists once. Mutates entry.last_modified in place on success but
+-- never touches the registry table itself -- the 404 case in particular
+-- means "drop this row", which only the caller can actually do since it's
+-- the one holding the uuid key.
+-- Returns one of: "synced" (re-downloaded), "unchanged", "gone" (the uuid
+-- no longer resolves in CWA at all -- caller should drop the row), "failed"
+-- (found a change but the re-download itself failed), or "unreachable"
+-- (couldn't get a usable response at all -- CWA down, network error, etc,
+-- deliberately NOT treated the same as "gone": a transient failure is not
+-- evidence the book was ever reassigned, and dropping tracking on one would
+-- risk re-uploading a book that's still there under the same id).
+local function checkTrackedBookAgainstCwa(cwa_url, cwa_username, cwa_password, socks5_proxy, uuid, entry)
+    local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password, "/ajax/book/" .. uuid, socks5_proxy)
+    if code == 200 and body and body ~= "" then
+        local decode_ok, decoded = pcall(JSON.decode, body)
+        local book = decode_ok and stripJsonNull(decoded)
+        local last_modified = book and book.last_modified
+        if type(last_modified) == "string" then
+            if not entry.last_modified then
+                entry.last_modified = last_modified
+                return "unchanged"
+            elseif entry.last_modified ~= last_modified then
+                local epub_path = book.main_format and book.main_format.epub
+                if type(epub_path) == "string" then
+                    local dl_ok = doCwaFileDownload(cwa_url, cwa_username, cwa_password, epub_path, socks5_proxy, entry.path)
+                    if dl_ok then
+                        entry.last_modified = last_modified
+                        return "synced"
+                    end
+                    return "failed"
+                end
+            end
+            return "unchanged"
+        end
+    end
+    -- A deleted book's uuid doesn't necessarily 404 here -- confirmed live,
+    -- the hard way: this CWA instance answers a deleted book's own
+    -- /ajax/book/<uuid> with a plain HTTP 200 and a completely empty body,
+    -- not a 404. That's indistinguishable from "reachable but nothing
+    -- useful in it" by code alone, so an empty 200 body counts as "gone"
+    -- here too -- silently falling through to "unreachable" (or worse,
+    -- "unchanged", which this same case used to hit before body was
+    -- checked at all) left "The Road" checked and reported as fine, sync
+    -- after sync, for a book CWA had already deleted outright.
+    if code == 404 or (code == 200 and (not body or body == "")) then
+        return "gone"
+    end
+    return "unreachable"
+end
+
 -- Runs entirely inside a Trapper subprocess (see Shelfmark:syncLibrary
 -- below) -- a real fork, so file writes it makes (downloaded books, the
 -- registry itself) land on the real filesystem same as if done in the
@@ -2608,7 +3044,15 @@ end
 -- plain report-line strings for the parent to display -- deliberately
 -- not the registry itself, avoiding the rapidjson-null string.buffer
 -- serialization trap documented on stripJsonNull above.
-local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir)
+-- only_path, when given, scopes the whole run to that single local file --
+-- used by the per-book "Send to CWA" action. Deliberately implemented as a
+-- filter on this function rather than as a separate single-book routine:
+-- everything that makes the match decision safe (the query-candidate ladder,
+-- the relevance filter, subtitle and series relaxation, the never-upload-on-
+-- an-unreachable-CWA rule, the post-upload registration wait) lives here and
+-- has the regression tests behind it. A parallel implementation would be a
+-- second place for all of that to drift.
+local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, only_path)
     local report = {}
     local function addLine(s) table.insert(report, s) end
     -- Paths this run actually overwrote, handed back to the caller so it
@@ -2616,6 +3060,11 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     -- invalidateBookInfoCache on why that can't happen here (this whole
     -- function runs inside a forked subprocess).
     local replaced_paths = {}
+    -- Files the strict matcher could not resolve, together with the CWA rows
+    -- it actually saw. Handed back so the caller can offer AI-assisted review
+    -- -- collected unconditionally (it costs nothing) and simply unused when
+    -- no relay is configured.
+    local unmatched = {}
 
     if not cwa_url or cwa_url == "" then
         return { _("CWA URL isn't set -- add it under Shelfmark Settings.") }
@@ -2636,11 +3085,126 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     end
     for name in iter, dir_obj do
         if name:lower():match("%.epub$") then
-            table.insert(local_files, download_dir .. "/" .. name)
+            local full = download_dir .. "/" .. name
+            if not only_path or full == only_path then
+                table.insert(local_files, full)
+            end
         end
+    end
+    if only_path and #local_files == 0 then
+        return { T(_("%1 isn't in the sync folder (%2)."),
+            only_path:match("([^/]+)$") or only_path, download_dir) }
     end
 
     local registry = loadSyncRegistry()
+
+    -- Order matters here: prune, then check tracked books against CWA, and
+    -- only THEN work out what's untracked. The tracked check is what
+    -- discovers a book whose CWA-side entry is gone (deleted, or replaced
+    -- under a new id by a metadata edit -- see checkTrackedBookAgainstCwa),
+    -- and dropping its row makes its local file untracked. Running that
+    -- first means the very same sync then picks the file up in the
+    -- untracked pass below and re-matches or re-uploads it immediately.
+    --
+    -- This used to run the other way around -- untracked pass first,
+    -- tracked check second -- which meant a book discovered "gone" couldn't
+    -- be re-evaluated until the NEXT sync, and (because a re-upload only
+    -- registers once CWA has imported it) a third after that. Three manual
+    -- syncs to recover from one CWA-side deletion, for no reason other than
+    -- phase ordering.
+
+    -- Drop rows whose local file is gone before checking anything against
+    -- CWA. Two reasons, one cosmetic and one not: stale rows otherwise
+    -- accumulate forever (confirmed live -- a book re-downloaded under a
+    -- cleaner filename left its old row pointing at a path that no longer
+    -- existed), and more importantly the CWA-side check below re-downloads
+    -- to entry.path without ever confirming the file is still there, so a
+    -- book deliberately deleted off the device would silently reappear the
+    -- next time its metadata changed in CWA.
+    --
+    -- Safe against a mass-prune: doSyncLibrary already returned early at
+    -- the top if download_dir itself doesn't exist, so an unmounted or
+    -- renamed books folder can't wipe the whole registry here. Setting an
+    -- existing key to nil mid-pairs() is explicitly allowed in Lua (adding
+    -- keys is not).
+    -- Skipped entirely for a single-book run: pruning walks the WHOLE
+    -- registry and drops rows whose file is missing, which is right for a
+    -- full sync but has no business firing as a side effect of "send this
+    -- one book" -- a books folder that happened to be unmounted would quietly
+    -- untrack the entire library.
+    local pruned = 0
+    for uuid, entry in pairs(registry) do
+        if not only_path and type(entry) == "table" and entry.path
+                and not lfs.attributes(entry.path, "mode") then
+            registry[uuid] = nil
+            pruned = pruned + 1
+            addLine(T(_("  [%1] no longer on this device -- stopped tracking."), entry.title or uuid))
+        end
+    end
+    if pruned > 0 then saveSyncRegistry(registry) end
+
+    local tracked_count = 0
+    for _uuid, _e in pairs(registry) do
+        if not only_path or (type(_e) == "table" and _e.path == only_path) then
+            tracked_count = tracked_count + 1
+        end
+    end
+    if tracked_count > 0 then
+        addLine(T(_("Checking %1 tracked book(s) for CWA-side changes..."), tracked_count))
+    end
+    -- Pre-filter: one paginated catalog fetch replaces a per-book request for
+    -- every book that hasn't changed. Deliberately SKIP-ONLY -- a uuid absent
+    -- from the catalog is NOT treated as deleted here, because a partial
+    -- fetch would then look identical to a real deletion. Those still go
+    -- through the per-book check, which distinguishes them properly.
+    -- nil (fetch failed) simply disables the optimization for this run.
+    local catalog = fetchCwaCatalog(cwa_url, cwa_username, cwa_password, socks5_proxy)
+    local skipped_unchanged = 0
+
+    for uuid, entry in pairs(registry) do
+        if type(entry) == "table" and entry.path
+                and (not only_path or entry.path == only_path) then
+            local cat = catalog and catalog[uuid]
+            if cat and cat.updated and entry.opds_updated == cat.updated then
+                -- Unchanged since the last sync saw it: no request needed.
+                skipped_unchanged = skipped_unchanged + 1
+                goto continue_tracked
+            end
+            local status = checkTrackedBookAgainstCwa(cwa_url, cwa_username, cwa_password, socks5_proxy, uuid, entry)
+            -- Record the catalog stamp only after a real check, so the next
+            -- run can skip it. Stored separately from last_modified rather
+            -- than replacing it: the two use different formats/precision
+            -- (OPDS "2026-09-05T23:50:17+00:00" vs ajax
+            -- "2026-09-05 23:50:17.226593+00:00"), and conflating them would
+            -- make every book look changed once and re-download the library.
+            if cat and cat.updated and status ~= "gone" and status ~= "unreachable" then
+                entry.opds_updated = cat.updated
+            end
+            if status == "synced" then
+                replaced_paths[#replaced_paths + 1] = entry.path
+                addLine(T(_("  [%1] changed in CWA -- re-downloaded."), entry.title or uuid))
+            elseif status == "failed" then
+                addLine(T(_("  [%1] changed in CWA but re-download failed."), entry.title or uuid))
+            elseif status == "gone" then
+                -- Dropping the row here deliberately hands this book's local
+                -- file to the untracked pass below, in this same run: it
+                -- gets searched for under whatever CWA calls it now and
+                -- either re-registered (a metadata edit that moved it to a
+                -- new id) or re-uploaded (genuinely deleted from CWA).
+                registry[uuid] = nil
+                addLine(T(_("  [%1] no longer in CWA under its tracked ID -- re-checking it below."), entry.title or uuid))
+            end
+            -- "unchanged" and "unreachable" both report nothing here -- the
+            -- per-tracked-book loop is meant to be quiet unless something
+            -- actually happened, and a transient CWA failure isn't worth a
+            -- line per book on every single sync.
+            ::continue_tracked::
+        end
+    end
+    if skipped_unchanged > 0 then
+        addLine(T(_("  (%1 unchanged in CWA -- checked in one request)"), skipped_unchanged))
+    end
+
     local known_paths = {}
     for _, entry in pairs(registry) do
         if type(entry) == "table" and entry.path then known_paths[entry.path] = true end
@@ -2653,13 +3217,80 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     addLine(T(_("Found %1 book(s) locally, %2 already tracked."), #local_files, #local_files - #unregistered))
 
     local to_upload = {}
-    if #unregistered > 0 then
-        addLine(T(_("Checking %1 untracked book(s) against CWA..."), #unregistered))
-        -- Not "for _, path" -- that shadows gettext's _() for the rest of
-        -- this loop body, which does call it (confirmed live: "attempt to
-        -- call local '_' (a number value)" the first time this ran for
-        -- real, thrown from the addLine(_(...)) calls below).
-        for _idx, path in ipairs(unregistered) do
+
+    -- Series metadata, fetched lazily and at most once per sync -- see the
+    -- series-relaxation block inside checkUntrackedPath for why it exists.
+    -- CWA exposes series in an awkward split: /ajax/book/<uuid> carries
+    -- series_index but reports the series NAME as null (confirmed live), and
+    -- OPDS entries carry neither. The name only comes from the OPDS series
+    -- feed -- one listing request for all series, then one request per
+    -- series to learn which books belong to it. That's why this is lazy: it
+    -- costs a handful of requests, and only a sync that actually hits an
+    -- otherwise-unmatchable book ever pays for it.
+    local series_map_cache = nil
+    local function getSeriesMap()
+        if series_map_cache then return series_map_cache end
+        series_map_cache = {}
+        -- "letter/00" is CWA's own all-series bucket, not a real letter --
+        -- avoids walking A-Z separately.
+        local list_body, list_code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+            "/opds/series/letter/00", socks5_proxy)
+        if not list_body or list_code ~= 200 then return series_map_cache end
+        for entry_xml in list_body:gmatch("<entry>(.-)</entry>") do
+            local name = decodeHtmlEntities(entry_xml:match("<title>(.-)</title>"))
+            local series_id = entry_xml:match('href="/opds/series/(%d+)"')
+            if name and series_id then
+                local books_body, books_code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+                    "/opds/series/" .. series_id, socks5_proxy)
+                if books_body and books_code == 200 then
+                    for book_xml in books_body:gmatch("<entry>(.-)</entry>") do
+                        local uuid = book_xml:match("<id>urn:uuid:(.-)</id>")
+                        if uuid then series_map_cache[uuid] = name end
+                    end
+                end
+            end
+        end
+        return series_map_cache
+    end
+
+    -- series_index comes from /ajax/book (the one place it IS populated).
+    -- Memoized per uuid so a candidate appearing under several queries only
+    -- costs one request.
+    local series_index_cache = {}
+    local function getSeriesIndex(uuid)
+        if not uuid then return nil end
+        if series_index_cache[uuid] ~= nil then
+            local v = series_index_cache[uuid]
+            if v == false then return nil end
+            return v
+        end
+        series_index_cache[uuid] = false
+        local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+            "/ajax/book/" .. uuid, socks5_proxy)
+        if body and body ~= "" and code == 200 then
+            local decode_ok, decoded = pcall(JSON.decode, body)
+            local book = decode_ok and stripJsonNull(decoded)
+            local idx = book and tonumber(book.series_index)
+            if idx then
+                series_index_cache[uuid] = idx
+                return idx
+            end
+        end
+        return nil
+    end
+
+    -- The whole "is this local file already in CWA?" check, as a function so
+    -- it can run a second time after an upload (see the post-upload pass
+    -- below) without duplicating any of this carefully-tuned matching. Closes
+    -- over registry/to_upload/addLine and the cwa_* connection details, so
+    -- nothing had to be threaded through as arguments.
+    --
+    -- allow_upload=false is the post-upload call: the file was JUST uploaded,
+    -- so if it still doesn't match, the right answer is "CWA hasn't imported
+    -- it yet", never "upload it again" -- that would be the duplicate-upload
+    -- bug this file has been fighting all along, just triggered by our own
+    -- retry instead of a bad query.
+    local function checkUntrackedPath(path, allow_upload)
             local fname = path:match("([^/]+)%.[Ee][Pp][Uu][Bb]$") or path
             -- Trailing paren groups stripped first, on the real fname
             -- (with real parens still intact) -- see stripTrailingParenGroups's
@@ -2715,7 +3346,67 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- right book by author instead of title.)
             local before_sep, after_sep = cleaned_fname:match("^(.-)%s+%-%s+(.+)$")
             local search_title
-            if before_sep and before_sep:find(",") and after_sep and after_sep ~= "" then
+            -- A comma ("Lastname, Firstname - Title") is a reliable marker
+            -- that the pre-separator segment is an author. A natural-order
+            -- "Author - Title" has no comma and used to be indistinguishable
+            -- from "Title - Author", so it fell through to the wrong branch
+            -- and searched CWA for the AUTHOR'S NAME.
+            --
+            -- That wasn't harmless. Confirmed live with "Pierce Brown - Iron
+            -- Gold_ Book IV of the Red Rising Saga": the query became "Pierce
+            -- Brown", CWA matched its author field and returned his OTHER
+            -- books, and one of them ("Red Rising") shares words with the
+            -- filename because the filename names the series -- so the
+            -- relevance filter counted a different book as evidence this one
+            -- already existed, and refused to upload a book CWA did not have.
+            --
+            -- The catalog fetched above knows every author in the library, so
+            -- the ambiguity is now resolved with data instead of a guess: if
+            -- the pre-separator segment IS a known CWA author, the title is
+            -- on the other side.
+            local function authorKeyOf(text)
+                if not text or text == "" or not catalog or not catalog.__authors then return nil end
+                local k = table.concat(sortedWordList(normalizeTitleWords(text)), " ")
+                if k ~= "" and catalog.__authors[k] then return k end
+                return nil
+            end
+            -- Does this segment CONTAIN a known author plus a little extra?
+            -- Covers multi-author filenames ("Brian Herbert & Kevin J.
+            -- Anderson - Dune"), where the combined string is no single
+            -- catalog author. Bounded to a few leftover words so a title
+            -- that merely mentions an author's name doesn't get mistaken
+            -- for the author side.
+            local function containsKnownAuthor(text)
+                if not text or text == "" or not catalog or not catalog.__authors then return false end
+                local words = normalizeTitleWords(text)
+                local n_words = 0
+                for _ in pairs(words) do n_words = n_words + 1 end
+                for author_key in pairs(catalog.__authors) do
+                    local all_in, n_author = true, 0
+                    for w in author_key:gmatch("%S+") do
+                        n_author = n_author + 1
+                        if not words[w] then all_in = false break end
+                    end
+                    if all_in and n_author > 0 and n_words - n_author <= 3 then return true end
+                end
+                return false
+            end
+
+            local before_is_author = before_sep and authorKeyOf(before_sep) ~= nil
+            local after_is_author = after_sep and authorKeyOf(after_sep) ~= nil
+
+            if before_sep and after_sep and after_sep ~= "" and after_is_author and not before_is_author then
+                -- "Title - Author". Checked FIRST, and it is what makes
+                -- calibre's own default export work: its title_sort moves
+                -- leading articles to the end, producing "Road, The - Cormac
+                -- McCarthy". That comma used to look like a "Lastname,
+                -- Firstname" author, so the title was taken from the other
+                -- side and CWA was searched for "Cormac McCarthy". Asking
+                -- whether the segment after the dash is a known author
+                -- settles it directly.
+                search_title = before_sep
+            elseif before_sep and after_sep and after_sep ~= ""
+                    and (before_is_author or containsKnownAuthor(before_sep) or before_sep:find(",")) then
                 search_title = after_sep
             elseif before_sep and before_sep ~= "" then
                 search_title = before_sep
@@ -2773,14 +3464,20 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- actually counts as the same book, and it requires the
             -- candidate's whole title to appear in the filename AND every
             -- filename word to be explained by that candidate's own
-            -- title+author. Bounded to a few attempts. Narrows all the way
-            -- to a single word when needed -- a one-word title is exactly
-            -- the case that motivated this (confirmed live: "Recursion
-            -- Blake Crouch" and "Recursion Blake" both return nothing,
-            -- while "Recursion" returns that one book and nothing else),
-            -- and each longer prefix is tried first, so a generic single
-            -- word is only ever reached once everything more specific has
-            -- already come back empty. Even then the worst case is
+            -- title+author. Unbounded -- narrows all the way to a single
+            -- word when needed, however many prefixes that takes. A
+            -- one-word title was the case that originally motivated this
+            -- (confirmed live: "Recursion Blake Crouch" and "Recursion
+            -- Blake" both return nothing, while "Recursion" returns that one
+            -- book and nothing else); a since-fixed 3-attempt cap on this
+            -- same loop later turned out to cut it off short for a filename
+            -- with enough extra words (a multi-mirror source tag -- see the
+            -- note at the loop itself), so titles that needed a 4th or 5th
+            -- reduction to reach their working single word silently
+            -- uploaded as duplicates instead. Each longer prefix is tried
+            -- first, so a generic single word is only ever reached once
+            -- everything more specific has already come back empty. Even
+            -- then the worst case is
             -- "returned results but none matched confidently -- skipped,
             -- check manually" below, which is reported, not silent, and
             -- never a duplicate upload.
@@ -2804,13 +3501,34 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 end
             end
 
+            -- No attempt cap here (there used to be one, capped at 3): a
+            -- source that appends a long multi-mirror tag -- confirmed live,
+            -- "z-library.sk, 1lib.sk, z-lib.sk" splits into 3 extra words on
+            -- its own -- pushed titles like "Pines"/"Upgrade"/"Come as You
+            -- Are" past a 3-attempt budget before ever reaching the single
+            -- short word that actually matches, so they silently re-uploaded
+            -- as duplicates every run instead of ever reaching the query
+            -- that would have found them. Uncapped is still safe: this loop
+            -- only ever narrows the *search*, and titleWordsSubsetOf below
+            -- is what actually decides a match either way, so trying every
+            -- remaining prefix length just gives a long filename more
+            -- chances to reach the one query that works, not more chances to
+            -- false-positive.
             local words = {}
             for w in query:gmatch("%S+") do words[#words + 1] = w end
-            local attempts = 0
             for count = #words - 1, 1, -1 do
-                if attempts >= 3 then break end
-                queries[#queries + 1] = table.concat(words, " ", 1, count)
-                attempts = attempts + 1
+                local prefix = table.concat(words, " ", 1, count)
+                -- Skip a prefix that is nothing but stopwords. "The Road"
+                -- shortens to "The", which CWA happily answers with 28
+                -- entries (65KB) -- and "A" returns 57, essentially the whole
+                -- library. Those rows can never match or even count as
+                -- relevant, because the matcher drops these words entirely,
+                -- so such a query is pure transfer cost and pure noise: it
+                -- can only ever drag unrelated books into the candidate set
+                -- that later stages have to reject.
+                if next(normalizeTitleWords(prefix)) ~= nil then
+                    queries[#queries + 1] = prefix
+                end
             end
 
             -- Try candidates until one actually yields a confident match,
@@ -2828,6 +3546,57 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             local raw_entry_count = 0
             local any_response = false
             local fname_words = normalizeTitleWords(fname)
+
+            -- Drop EXTRA CONTRIBUTOR names from the words the matcher demands
+            -- an explanation for.
+            --
+            -- A comma before the separator means one of two different things:
+            -- "Orwell, George - 1984" is one person written surname-first,
+            -- while "Cormac McCarthy, Tom Stechschulte - The Road" is the
+            -- author plus a narrator. The catalog tells them apart -- the
+            -- first resolves to a known CWA author, the second doesn't.
+            --
+            -- In the second shape the title is extracted correctly, the right
+            -- book is found, and the strict matcher then refuses it anyway
+            -- because "tom" and "stechschulte" aren't in CWA's title or
+            -- author. Measured across every filename this plugin has handled,
+            -- that shape is the ONLY one that fails: every other shape (and
+            -- every modifier -- source tags, colon-underscores, brackets,
+            -- series parentheticals) resolves cleanly.
+            --
+            -- So: when the author side contains a known CWA author plus extra
+            -- words, those extras are contributor names and stop being
+            -- required. Deliberately limited to the AUTHOR side -- extra
+            -- words on the TITLE side still have to be explained, which is
+            -- what keeps "Mistborn_ The Well of Ascension" from matching a
+            -- bare "Mistborn".
+            if catalog and catalog.__authors and before_sep and before_sep:find(",") then
+                local before_words = normalizeTitleWords(before_sep)
+                local matched_author = nil
+                for author_key in pairs(catalog.__authors) do
+                    local all_in, any = true, false
+                    for w in author_key:gmatch("%S+") do
+                        any = true
+                        if not before_words[w] then all_in = false break end
+                    end
+                    -- A known author fully contained in, but shorter than,
+                    -- the author-side text: the remainder is the extra
+                    -- contributor.
+                    if any and all_in then
+                        local n_author, n_before = 0, 0
+                        for _ in author_key:gmatch("%S+") do n_author = n_author + 1 end
+                        for _ in pairs(before_words) do n_before = n_before + 1 end
+                        if n_before > n_author then matched_author = author_key break end
+                    end
+                end
+                if matched_author then
+                    local keep = {}
+                    for w in matched_author:gmatch("%S+") do keep[w] = true end
+                    for w in pairs(before_words) do
+                        if not keep[w] then fname_words[w] = nil end
+                    end
+                end
+            end
             local candidates = {}
 
             -- seen_uuids tracks every row already examined, NOT just the
@@ -2845,14 +3614,40 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                         if e.uuid and not seen_uuids[e.uuid] then
                             seen_uuids[e.uuid] = true
                             local entry_words = normalizeTitleWords(e.title)
-                            local shares_a_word = false
+                            -- Relevance: a CWA row only counts as evidence
+                            -- that this book might already exist if ALL of
+                            -- its title words appear in the filename -- not
+                            -- merely one of them.
+                            --
+                            -- "Shares at least one word" was far too weak.
+                            -- Confirmed live with "Pierce Brown - Dark Age
+                            -- (Red Rising Series Book 5)": that title isn't
+                            -- in CWA, the query correctly became "Dark Age"
+                            -- and returned nothing, then the prefix ladder
+                            -- shortened it to "Dark" -- which returned The
+                            -- Dark Forest, Dark Matter, The Dark Tower and A
+                            -- Dark College Hockey Romance. Every one shares
+                            -- the word "dark", so all four were counted as
+                            -- evidence and a book CWA did not have was
+                            -- refused upload.
+                            --
+                            -- Requiring full containment keeps the
+                            -- protection this exists for: in the "Dune
+                            -- Messiah" case that motivated it, CWA's row IS
+                            -- "Dune Messiah", whose words are all present in
+                            -- the filename, so it still counts and still
+                            -- blocks a duplicate. It only stops a
+                            -- coincidental single-word overlap from doing so.
+                            local all_words_present = true
+                            local any_entry_word = false
                             for w in pairs(entry_words) do
-                                if fname_words[w] then
-                                    shares_a_word = true
+                                any_entry_word = true
+                                if not fname_words[w] then
+                                    all_words_present = false
                                     break
                                 end
                             end
-                            if shares_a_word then
+                            if any_entry_word and all_words_present then
                                 raw_entry_count = raw_entry_count + 1
                             end
                             candidates[#candidates + 1] = e
@@ -2909,6 +3704,120 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                     end
                 end
             end
+
+            -- Last resort: explain the filename's leftover words using the
+            -- candidate's SERIES name and volume number. A series-organized
+            -- filename ("Wayward Pines - 02 Wayward - Blake Crouch") carries
+            -- the series name and index that CWA keeps as separate metadata
+            -- fields rather than in the title, so the strict check sees
+            -- "pines" and "02" as unexplained words and refuses -- correctly,
+            -- given what it knew, but the information to resolve it exists,
+            -- just not in the title.
+            --
+            -- This is genuinely stricter than the subtitle relaxation above,
+            -- not looser: it never drops a requirement, it only lets series
+            -- metadata SATISFY one. Every filename word must still be
+            -- accounted for -- now by title, author, series name, or the
+            -- series index as a number. The Mistborn false-positive stays
+            -- blocked for exactly that reason: matching "Mistborn_ The Well
+            -- of Ascension" against CWA's "Mistborn" (series Mistborn #1)
+            -- leaves "well" and "ascension" unexplained by ANY of those
+            -- fields, so it still refuses. What it does resolve is the case
+            -- where the leftovers ARE the series name and volume number.
+            --
+            -- Costs nothing on the common path: the series map is fetched
+            -- lazily (and once per sync) only if execution ever reaches
+            -- here, which needs both a failed strict match and a failed
+            -- subtitle relaxation.
+            if #matches == 0 and #candidates > 0 then
+                local series_by_uuid = getSeriesMap()
+                for _, e in ipairs(candidates) do
+                    local series_name = e.uuid and series_by_uuid[e.uuid]
+                    if series_name then
+                        local entry_words = normalizeTitleWords(e.title)
+                        local author_words = normalizeTitleWords(e.author)
+                        local series_words = normalizeTitleWords(series_name)
+                        -- Forward half unchanged: the candidate's own title
+                        -- must still appear in the filename.
+                        local title_present = true
+                        local any_title_word = false
+                        for w in pairs(entry_words) do
+                            any_title_word = true
+                            if not fname_words[w] then title_present = false break end
+                        end
+                        if any_title_word and title_present then
+                            local series_index = getSeriesIndex(e.uuid)
+
+                            -- When the candidate's whole title is contained
+                            -- in its own series name -- "Wayward" inside "The
+                            -- Wayward Pines Trilogy" -- the forward check
+                            -- above proves nothing: the series name appearing
+                            -- in the filename satisfies it on its own, so
+                            -- EVERY volume of that series looks equally
+                            -- plausible. In that case the volume number is
+                            -- the only real discriminator, so demand it: the
+                            -- filename must carry a number and it must equal
+                            -- this book's series_index. Without that,
+                            -- "Wayward Pines - 01 Pines" would match the #2
+                            -- volume just as happily as the #1 it names.
+                            --
+                            -- A title that contributes a word of its own
+                            -- ("Golden Son" in "Red Rising Trilogy") is
+                            -- already distinguishing, so it doesn't need one.
+                            local title_is_subset_of_series = true
+                            for w in pairs(entry_words) do
+                                if not series_words[w] then
+                                    title_is_subset_of_series = false
+                                    break
+                                end
+                            end
+
+                            -- Volume number is read off the RAW filename, not
+                            -- the normalized word set: normalizeTitleWords
+                            -- drops any token shorter than two characters, so
+                            -- a single-digit volume ("Wayward Pines 2
+                            -- Wayward", "#2") disappeared entirely before it
+                            -- could be compared -- only zero-padded "02"
+                            -- happened to survive. Scanning the filename
+                            -- directly handles every numbering style.
+                            local index_confirmed = false
+                            if series_index then
+                                for digits in fname:gmatch("%d+") do
+                                    if tonumber(digits) == series_index then
+                                        index_confirmed = true
+                                        break
+                                    end
+                                end
+                            end
+
+                            local all_explained = true
+                            for w in pairs(fname_words) do
+                                local as_number = tonumber(w)
+                                if as_number and series_index and as_number == series_index then
+                                    -- The volume number itself, already
+                                    -- confirmed above.
+                                elseif SERIES_STRUCTURE_WORDS[w] then
+                                    -- Structural scaffolding around a volume
+                                    -- number -- "Book 2", "Vol. 2", "Part 2".
+                                    -- Forgiven only here, inside a match
+                                    -- that's already established by title,
+                                    -- author and series name; strict matching
+                                    -- elsewhere still treats these as real
+                                    -- words, so this can't loosen anything
+                                    -- outside the series path.
+                                elseif not entry_words[w] and not author_words[w] and not series_words[w] then
+                                    all_explained = false
+                                    break
+                                end
+                            end
+
+                            if all_explained and (index_confirmed or not title_is_subset_of_series) then
+                                table.insert(matches, e)
+                            end
+                        end
+                    end
+                end
+            end
             -- raw_entry_count is deliberately separate from #matches. CWA
             -- genuinely returning nothing is the only case safe to treat
             -- as "not in CWA yet"; a search that DID return a plausible
@@ -2936,8 +3845,43 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 if registry[m.uuid] then
                     addLine(T(_("  [%1] matches already-tracked \"%2\" -- possible duplicate file, skipped."), fname, m.title))
                 else
-                    registry[m.uuid] = { path = path, title = m.title }
-                    addLine(T(_("  [%1] matched existing CWA book \"%2\" -- registered."), fname, m.title))
+                    -- Force a real download here rather than just recording
+                    -- CWA's current last_modified as an assumed-fresh
+                    -- baseline -- confirmed live: matching an untracked
+                    -- local file to an EXISTING CWA book says nothing about
+                    -- whether that local copy is actually current. "The
+                    -- Road" matched cleanly against CWA's entry here while
+                    -- the local file still carried an old cover from before
+                    -- a CWA-side edit; registering it as-is (the old
+                    -- behavior) meant the outdated copy showed as
+                    -- "unchanged" on every check from then on, since
+                    -- last_modified was being baselined off whatever CWA
+                    -- said *right now*, not off anything the local file had
+                    -- ever actually reflected.
+                    local book_body, book_code = doCwaRequest(cwa_url, cwa_username, cwa_password, "/ajax/book/" .. m.uuid, socks5_proxy)
+                    local last_modified, epub_path
+                    if book_body and book_code == 200 then
+                        local decode_ok, decoded = pcall(JSON.decode, book_body)
+                        local book = decode_ok and stripJsonNull(decoded)
+                        last_modified = book and book.last_modified
+                        epub_path = book and book.main_format and book.main_format.epub
+                    end
+                    if type(last_modified) == "string" and type(epub_path) == "string"
+                            and doCwaFileDownload(cwa_url, cwa_username, cwa_password, epub_path, socks5_proxy, path) then
+                        registry[m.uuid] = { path = path, title = m.title, last_modified = last_modified }
+                        replaced_paths[#replaced_paths + 1] = path
+                        addLine(T(_("  [%1] matched existing CWA book \"%2\" -- downloaded current copy, registered."), fname, m.title))
+                    else
+                        -- Couldn't confirm/pull a fresh copy (CWA unreachable
+                        -- just for this one extra request, etc) -- still
+                        -- register the match itself, since title/author
+                        -- already established it's the same book, just
+                        -- without a last_modified baseline. Matches the old
+                        -- behavior exactly, as a fallback rather than
+                        -- leaving a confirmed match unregistered.
+                        registry[m.uuid] = { path = path, title = m.title }
+                        addLine(T(_("  [%1] matched existing CWA book \"%2\" -- registered (couldn't confirm it's the current copy)."), fname, m.title))
+                    end
                 end
             elseif #matches > 1 then
                 local titles = {}
@@ -2951,7 +3895,42 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- can self-resolve once a future fix improves the matcher)
                 -- on every subsequent sync rather than being silently
                 -- dropped forever.
-                addLine(T(_("  [%1] CWA search returned %2 result(s) for this query but none matched confidently -- skipped, check manually."), fname, tostring(raw_entry_count)))
+                -- Both the report line and the review entry are gated on
+                -- allow_upload, i.e. on this being the FIRST pass over this
+                -- file. The post-upload pass re-runs this same function up
+                -- to three times per uploaded book while waiting for CWA to
+                -- import it; without this gate a book that didn't match
+                -- immediately got its "check manually" line printed three
+                -- times AND was queued for review three times, so the AI
+                -- review then asked about the identical title three times in
+                -- a row. Confirmed live.
+                if allow_upload then
+                    addLine(T(_("  [%1] CWA search returned %2 result(s) for this query but none matched confidently -- skipped, check manually."), fname, tostring(raw_entry_count)))
+                    -- Keep only plain strings: this table crosses the fork
+                    -- boundary back to the parent, and anything else (notably
+                    -- a rapidjson null sentinel) does not survive
+                    -- serialization -- see stripJsonNull's note.
+                    local slim = {}
+                    for _ci = 1, math.min(#candidates, 10) do
+                        local c = candidates[_ci]
+                        if c and c.uuid and c.title then
+                            slim[#slim + 1] = {
+                                uuid = tostring(c.uuid),
+                                title = tostring(c.title),
+                                author = c.author and tostring(c.author) or "",
+                            }
+                        end
+                    end
+                    -- Defence in depth: never queue the same path twice even
+                    -- if some future caller re-enters this branch.
+                    local already = false
+                    for _ui = 1, #unmatched do
+                        if unmatched[_ui].path == path then already = true break end
+                    end
+                    if #slim > 0 and not already then
+                        unmatched[#unmatched + 1] = { path = path, fname = fname, candidates = slim }
+                    end
+                end
             elseif not any_response then
                 -- Every search failed outright (CWA unreachable, auth
                 -- rejected, 5xx...). "No results" and "couldn't ask" look
@@ -2961,9 +3940,24 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- whole path exists to avoid. Left untracked so the next
                 -- sync retries it normally.
                 addLine(T(_("  [%1] couldn't reach CWA to check -- skipped, will retry next sync."), fname))
-            else
+            elseif allow_upload then
                 table.insert(to_upload, path)
             end
+            -- allow_upload=false and no match: stay silent. This is the
+            -- post-upload retry pass, which runs up to three times -- a line
+            -- per attempt per book would bury the report in noise. The
+            -- caller reports once, at the end, for whatever is still
+            -- unregistered.
+    end
+
+    if #unregistered > 0 then
+        addLine(T(_("Checking %1 untracked book(s) against CWA..."), #unregistered))
+        -- Not "for _, path" -- that shadows gettext's _() for the rest of
+        -- this loop body, which does call it (confirmed live: "attempt to
+        -- call local '_' (a number value)" the first time this ran for
+        -- real, thrown from the addLine(_(...)) calls below).
+        for _idx, path in ipairs(unregistered) do
+            checkUntrackedPath(path, true)
         end
         -- Cancelling this (a "dismissable" subprocess -- the user can
         -- back out mid-run) kills the child immediately
@@ -2975,6 +3969,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         saveSyncRegistry(registry)
     end
 
+    local uploaded = {}
     if #to_upload > 0 then
         addLine(T(_("Uploading %1 new book(s) to CWA..."), #to_upload))
         local cookie, login_err = doCwaLogin(cwa_url, cwa_username, cwa_password, socks5_proxy)
@@ -2996,7 +3991,8 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                     f:close()
                     local up_ok, up_code, up_err = doCwaMultipartUpload(cwa_url, cookie, upload_name, file_bytes, socks5_proxy)
                     if up_ok and up_code == 200 then
-                        addLine(T(_("  [%1] uploaded -- will finish registering once CWA imports it (next sync)."), fname))
+                        uploaded[#uploaded + 1] = path
+                        addLine(T(_("  [%1] uploaded."), fname))
                     elseif up_err then
                         addLine(T(_("  [%1] upload failed: %2"), fname, up_err))
                     else
@@ -3007,66 +4003,87 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         end
     end
 
-    -- Drop rows whose local file is gone before checking anything against
-    -- CWA. Two reasons, one cosmetic and one not: stale rows otherwise
-    -- accumulate forever (confirmed live -- a book re-downloaded under a
-    -- cleaner filename left its old row pointing at a path that no longer
-    -- existed), and more importantly the CWA-side check below re-downloads
-    -- to entry.path without ever confirming the file is still there, so a
-    -- book deliberately deleted off the device would silently reappear the
-    -- next time its metadata changed in CWA.
+    -- Register what we just uploaded, in this same run. CWA's ingest is
+    -- asynchronous -- the upload returns as soon as the file lands in the
+    -- watched folder, and a separate watcher imports it a moment later --
+    -- so a search fired immediately after the POST finds nothing. That
+    -- timing is the only reason an upload used to need a whole second sync
+    -- to register; waiting a few seconds and re-checking collapses it into
+    -- one. Confirmed live from CWA's own ingest logs: an import completes
+    -- roughly 2-4s after upload for a normal-sized epub (longer for a big
+    -- one, hence more than one attempt).
     --
-    -- Safe against a mass-prune: doSyncLibrary already returned early at
-    -- the top if download_dir itself doesn't exist, so an unmounted or
-    -- renamed books folder can't wipe the whole registry here. Setting an
-    -- existing key to nil mid-pairs() is explicitly allowed in Lua (adding
-    -- keys is not).
-    local pruned = 0
-    for uuid, entry in pairs(registry) do
-        if type(entry) == "table" and entry.path
-                and not lfs.attributes(entry.path, "mode") then
-            registry[uuid] = nil
-            pruned = pruned + 1
-            addLine(T(_("  [%1] no longer on this device -- stopped tracking."), entry.title or uuid))
-        end
-    end
-    if pruned > 0 then saveSyncRegistry(registry) end
-
-    local tracked_count = 0
-    for _ in pairs(registry) do tracked_count = tracked_count + 1 end
-    addLine(T(_("Checking %1 tracked book(s) for CWA-side changes..."), tracked_count))
-    for uuid, entry in pairs(registry) do
-        if type(entry) == "table" and entry.path then
-            local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password, "/ajax/book/" .. uuid, socks5_proxy)
-            if body and code == 200 then
-                local decode_ok, decoded = pcall(JSON.decode, body)
-                local book = decode_ok and stripJsonNull(decoded)
-                local last_modified = book and book.last_modified
-                if type(last_modified) == "string" then
-                    if not entry.last_modified then
-                        entry.last_modified = last_modified
-                    elseif entry.last_modified ~= last_modified then
-                        local epub_path = book.main_format and book.main_format.epub
-                        if type(epub_path) == "string" then
-                            addLine(T(_("  [%1] changed in CWA, re-downloading..."), entry.title or uuid))
-                            local dl_ok = doCwaFileDownload(cwa_url, cwa_username, cwa_password, epub_path, socks5_proxy, entry.path)
-                            if dl_ok then
-                                entry.last_modified = last_modified
-                                replaced_paths[#replaced_paths + 1] = entry.path
-                                addLine(T(_("  [%1] synced."), entry.title or uuid))
-                            else
-                                addLine(T(_("  [%1] re-download failed."), entry.title or uuid))
-                            end
-                        end
+    -- Deliberately bounded and quiet: if CWA is slower than this, the book
+    -- simply registers on the next sync exactly as it always did -- this is
+    -- an optimization on top of the old behavior, never a new requirement.
+    if #uploaded > 0 then
+        addLine(T(_("Waiting for CWA to import %1 upload(s)..."), #uploaded))
+        local still_pending = uploaded
+        for attempt = 1, 3 do
+            ffiUtil.sleep(attempt == 1 and 4 or 5)
+            local pending_after = {}
+            for _idx, path in ipairs(still_pending) do
+                checkUntrackedPath(path, false)
+                -- checkUntrackedPath registers into `registry` on a match;
+                -- anything still absent from it needs another attempt.
+                local registered = false
+                for _uuid, entry in pairs(registry) do
+                    if type(entry) == "table" and entry.path == path then
+                        registered = true
+                        break
                     end
                 end
+                if not registered then pending_after[#pending_after + 1] = path end
             end
+            still_pending = pending_after
+            if #still_pending == 0 then break end
         end
+        for _idx, path in ipairs(still_pending) do
+            local fname = path:match("([^/]+)$") or path
+            addLine(T(_("  [%1] uploaded, but CWA hadn't imported it yet -- it'll register on the next sync."), fname))
+        end
+        saveSyncRegistry(registry)
     end
 
     saveSyncRegistry(registry)
     addLine(_("Done."))
-    return report, replaced_paths
+    return report, replaced_paths, unmatched
+end
+
+-- Single-book counterpart to doSyncLibrary's "already tracked" loop above,
+-- for Shelfmark:refreshBookMetadata -- added because a full syncLibrary()
+-- run checks every tracked book's last_modified one at a time (one request
+-- per book, plus a full local-folder scan for anything new), which is real
+-- wall-clock cost on a library of any size just to see whether the ONE book
+-- you just edited in CWA changed. Runs inside the same kind of Trapper
+-- subprocess as syncLibrary -- see Shelfmark:refreshBookMetadata below --
+-- so file/registry writes land the same way.
+--
+-- Only ever acts on a book this device has already synced at least once:
+-- with no tracked uuid there's nothing to check yet, and replicating
+-- doSyncLibrary's untracked search-and-match-or-upload logic here for a
+-- single file would duplicate a large, carefully-hardened block of matching
+-- logic for a case a single ordinary sync already covers -- run one full
+-- sync to register a new book, then this works for it from then on.
+local function doRefreshOneBook(cwa_url, cwa_username, cwa_password, socks5_proxy, file)
+    local registry = loadSyncRegistry()
+    local uuid, entry
+    for u, e in pairs(registry) do
+        if type(e) == "table" and e.path == file then
+            uuid, entry = u, e
+            break
+        end
+    end
+    if not uuid then
+        return "untracked", nil
+    end
+
+    local status = checkTrackedBookAgainstCwa(cwa_url, cwa_username, cwa_password, socks5_proxy, uuid, entry)
+    if status == "gone" then
+        registry[uuid] = nil
+    end
+    saveSyncRegistry(registry)
+    return status, entry.title
 end
 
 -- KOReader's own equivalent list (readersearch.lua's find-results Menu)
@@ -3288,7 +4305,7 @@ function Shelfmark:syncLibrary()
     local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
         or self:defaultDownloadDir()
 
-    local completed, report, replaced_paths = Trapper:dismissableRunInSubprocess(function()
+    local completed, report, replaced_paths, unmatched = Trapper:dismissableRunInSubprocess(function()
         return doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir)
     end, _("Syncing library with CWA..."))
 
@@ -3342,6 +4359,306 @@ function Shelfmark:syncLibrary()
         text = table.concat(report, "\n"),
         justified = false,
     })
+
+    -- Offer AI-assisted review of whatever the strict matcher gave up on.
+    -- Deliberately a ConfirmBox layered over the report rather than a button
+    -- inside it: it keeps the report itself readable while the prompt sits
+    -- on top. (An earlier version of this comment claimed TextViewer's
+    -- buttons_table was unused in this plugin -- that was wrong;
+    -- showDebugLog and showResilientTextViewer both use it.)
+    --
+    -- The list is also stashed on self so declining here doesn't throw it
+    -- away -- the same review is reachable afterwards from the Shelfmark
+    -- menu until the next sync replaces it.
+    if type(unmatched) == "table" and #unmatched > 0
+            and self.ai_relay_url and self.ai_relay_url ~= "" then
+        self.pending_unmatched = unmatched
+        local self_ref = self
+        local ConfirmBox = require("ui/widget/confirmbox")
+        UIManager:show(ConfirmBox:new{
+            text = T(_("%1 book(s) couldn't be matched automatically.\n\nReview suggestions now?"), #unmatched),
+            ok_text = _("Review"),
+            ok_callback = function()
+                local Trapper2 = require("ui/trapper")
+                Trapper2:wrap(function()
+                    self_ref:reviewUnmatched(self_ref.pending_unmatched, 1)
+                end)
+            end,
+            cancel_text = _("Later"),
+        })
+    end
+end
+
+-- Per-book "Send to CWA": the push counterpart to "Refresh from CWA".
+--
+-- Runs the ordinary sync, scoped to this one file (see doSyncLibrary's
+-- only_path note on why it reuses that function rather than reimplementing
+-- the matching). So it behaves exactly as a full sync would for this book --
+-- matches it against CWA and registers it if it's already there, uploads it
+-- if it genuinely isn't, waits for CWA's import and registers it, and
+-- refuses to upload at all if CWA can't be reached -- just without walking
+-- the rest of the library.
+function Shelfmark:sendBookToCwa(file)
+    local Trapper = require("ui/trapper")
+    local cwa_url, cwa_username, cwa_password, socks5_proxy =
+        self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
+    local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
+        or self:defaultDownloadDir()
+
+    local completed, report, replaced_paths = Trapper:dismissableRunInSubprocess(function()
+        return doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, file)
+    end, _("Sending to CWA..."))
+
+    if not completed then return end
+
+    if type(replaced_paths) == "table" and #replaced_paths > 0 then
+        for i = 1, #replaced_paths do
+            invalidateBookInfoCache(replaced_paths[i])
+        end
+        local FileManager = require("apps/filemanager/filemanager")
+        if FileManager.instance then
+            pcall(function() FileManager.instance:onRefresh() end)
+        end
+        UIManager:setDirty("all", "full")
+    end
+
+    local TextViewer = require("ui/widget/textviewer")
+    UIManager:show(TextViewer:new{
+        title = _("Send to CWA"),
+        text = (type(report) == "table" and #report > 0)
+            and table.concat(report, "\n") or _("Nothing to report."),
+        justified = false,
+    })
+end
+
+-- Per-file entry point for the long-press "Suggest match" button. Runs the
+-- same CWA search doSyncLibrary would have run for this filename, then hands
+-- whatever it finds to the same suggest-and-confirm flow used by the batch
+-- review -- so a one-off gets identical treatment, including the requirement
+-- that you confirm before anything is written.
+function Shelfmark:suggestMatchForFile(file)
+    local Trapper = require("ui/trapper")
+    local cwa_url, cwa_username, cwa_password, socks5_proxy =
+        self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
+    local fname = file:match("([^/]+)%.[Ee][Pp][Uu][Bb]$") or file:match("([^/]+)$") or file
+
+    local completed, candidates = Trapper:dismissableRunInSubprocess(function()
+        local seen, out = {}, {}
+        local cleaned = stripTrailingParenGroups(fname)
+        local before_sep, after_sep = cleaned:match("^(.-)%s+%-%s+(.+)$")
+        local search_title
+        if before_sep and before_sep:find(",") and after_sep and after_sep ~= "" then
+            search_title = after_sep
+        elseif before_sep and before_sep ~= "" then
+            search_title = before_sep
+        else
+            search_title = cleaned
+        end
+        local query = search_title:match("^([^_%[%(]+)") or search_title
+        local words = {}
+        for w in query:gmatch("%S+") do words[#words + 1] = w end
+        local queries = { query }
+        for count = #words - 1, 1, -1 do
+            queries[#queries + 1] = table.concat(words, " ", 1, count)
+        end
+        for _, q in ipairs(queries) do
+            local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+                "/opds/search/" .. socketurl.escape(q), socks5_proxy)
+            if body and code == 200 then
+                for _, e in ipairs(parseOpdsEntries(body)) do
+                    if e.uuid and not seen[e.uuid] and #out < 10 then
+                        seen[e.uuid] = true
+                        out[#out + 1] = {
+                            uuid = tostring(e.uuid),
+                            title = tostring(e.title or ""),
+                            author = e.author and tostring(e.author) or "",
+                        }
+                    end
+                end
+            end
+            if #out > 0 then break end
+        end
+        return out
+    end, _("Searching CWA for candidates..."))
+
+    if not completed then return end
+    if type(candidates) ~= "table" or #candidates == 0 then
+        UIManager:show(InfoMessage:new{ text = _("CWA returned no candidates for this book.") })
+        return
+    end
+
+    self:reviewUnmatched({ { path = file, fname = fname, candidates = candidates } }, 1)
+end
+
+-- Registers a book the user has explicitly confirmed, and pulls CWA's
+-- current copy so the local file actually reflects what CWA holds -- the
+-- same thing a normal first-time match does (see the note there on why a
+-- match alone is not evidence the local copy is current).
+--
+-- Deliberately separate from the suggestion step: nothing in the AI path
+-- writes anything until this is called, and this is only ever called from a
+-- confirmation callback.
+function Shelfmark:applyConfirmedMatch(path, uuid, title)
+    local Trapper = require("ui/trapper")
+    local cwa_url, cwa_username, cwa_password, socks5_proxy =
+        self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
+
+    local completed, ok_result, refused_path = Trapper:dismissableRunInSubprocess(function()
+        local registry = loadSyncRegistry()
+        -- One CWA book maps to exactly one local file. If this uuid already
+        -- tracks a DIFFERENT path, confirming here would silently reassign
+        -- it and orphan that other file -- it would stop being checked for
+        -- CWA-side changes, with nothing reported. The full-sync path
+        -- already refuses this case ("matches already-tracked ... possible
+        -- duplicate file, skipped"); this one used to overwrite it.
+        local existing = registry[uuid]
+        if type(existing) == "table" and existing.path and existing.path ~= path then
+            return false, existing.path
+        end
+        local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+            "/ajax/book/" .. uuid, socks5_proxy)
+        local last_modified, epub_path
+        if body and body ~= "" and code == 200 then
+            local decode_ok, decoded = pcall(JSON.decode, body)
+            local book = decode_ok and stripJsonNull(decoded)
+            last_modified = book and book.last_modified
+            epub_path = book and book.main_format and book.main_format.epub
+        end
+        if type(epub_path) == "string" and type(last_modified) == "string"
+                and doCwaFileDownload(cwa_url, cwa_username, cwa_password, epub_path, socks5_proxy, path) then
+            registry[uuid] = { path = path, title = title, last_modified = last_modified }
+            saveSyncRegistry(registry)
+            return true
+        end
+        return false
+    end, _("Registering and downloading..."))
+
+    if not completed then return false end
+    if refused_path then
+        UIManager:show(InfoMessage:new{
+            text = T(_("That CWA book is already tracked for a different local file:\n%1\n\nNot changing it."),
+                refused_path:match("([^/]+)$") or refused_path),
+        })
+        return false
+    end
+    if ok_result then
+        invalidateBookInfoCache(path)
+        local FileManager = require("apps/filemanager/filemanager")
+        if FileManager.instance then
+            pcall(function() FileManager.instance:onRefresh() end)
+        end
+        UIManager:setDirty("all", "full")
+        return true
+    end
+    return false
+end
+
+-- Walks the unmatched list one book at a time, asking the relay for a
+-- suggestion and presenting it for confirmation.
+--
+-- Nothing is written without an explicit "Yes" per book. The suggestion is
+-- shown with the model's own reason and confidence so the decision is yours
+-- on visible evidence, not on trust -- and "No" simply moves on, leaving the
+-- book exactly as the sync left it.
+function Shelfmark:reviewUnmatched(list, index)
+    if type(list) ~= "table" or index > #list then
+        UIManager:show(InfoMessage:new{ text = _("Review finished."), timeout = 2 })
+        return
+    end
+
+    local item = list[index]
+    local Trapper = require("ui/trapper")
+    local relay_url, relay_token, socks5_proxy =
+        self.ai_relay_url, self.ai_relay_token, self.socks5_proxy
+    local fname, candidates = item.fname, item.candidates
+
+    local completed, suggestion, err = Trapper:dismissableRunInSubprocess(function()
+        return doAiSuggest(relay_url, relay_token, fname, candidates, socks5_proxy)
+    end, T(_("Asking for a suggestion (%1 of %2)..."), index, #list))
+
+    if not completed then return end
+
+    local self_ref = self
+
+    local function nextBook()
+        Trapper:wrap(function() self_ref:reviewUnmatched(list, index + 1) end)
+    end
+
+    if not suggestion then
+        -- No suggestion is a normal outcome, not an error: the model is told
+        -- to prefer "none" when unsure, and that is the safe answer.
+        local ConfirmBox = require("ui/widget/confirmbox")
+        UIManager:show(ConfirmBox:new{
+            text = T(_("%1\n\nNo confident match: %2"), fname, tostring(err or _("none"))),
+            ok_text = index < #list and _("Next") or _("Done"),
+            ok_callback = nextBook,
+            cancel_text = _("Stop"),
+        })
+        return
+    end
+
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = T(_("%1\n\nSuggested match:\n%2%3\n\nConfidence: %4\n%5\n\nRegister this as the same book and download CWA's copy?"),
+            fname,
+            suggestion.title or "?",
+            (suggestion.author and suggestion.author ~= "") and ("\n" .. suggestion.author) or "",
+            string.format("%.0f%%", (suggestion.confidence or 0) * 100),
+            suggestion.reason or ""),
+        ok_text = _("Yes"),
+        ok_callback = function()
+            local applied = self_ref:applyConfirmedMatch(item.path, suggestion.uuid, suggestion.title)
+            UIManager:show(InfoMessage:new{
+                text = applied and T(_("Registered \"%1\"."), suggestion.title or fname)
+                    or _("Couldn't download CWA's copy -- left unregistered."),
+                timeout = 2,
+            })
+            nextBook()
+        end,
+        cancel_text = _("No"),
+        cancel_callback = nextBook,
+    })
+end
+
+-- Single-book counterpart to syncLibrary above -- see doRefreshOneBook's own
+-- note on why this exists: checking one book against CWA shouldn't cost a
+-- request per *other* tracked book too. Hooked up as a per-file long-press
+-- button in registerFileDialogButtons below, so "refresh this book" is
+-- reachable without opening the sync menu at all.
+function Shelfmark:refreshBookMetadata(file)
+    local Trapper = require("ui/trapper")
+    local cwa_url, cwa_username, cwa_password, socks5_proxy =
+        self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
+
+    local completed, status, title = Trapper:dismissableRunInSubprocess(function()
+        return doRefreshOneBook(cwa_url, cwa_username, cwa_password, socks5_proxy, file)
+    end, _("Checking CWA for changes..."))
+
+    if not completed then return end
+
+    local label = title or require("apps/filemanager/filemanagerutil").splitFileNameType(file)
+
+    if status == "synced" then
+        -- Same cache-invalidate-then-repaint pattern as syncLibrary above,
+        -- just for the one file instead of a replaced_paths list.
+        invalidateBookInfoCache(file)
+        local FileManager = require("apps/filemanager/filemanager")
+        if FileManager.instance then
+            pcall(function() FileManager.instance:onRefresh() end)
+        end
+        UIManager:setDirty("all", "full")
+        UIManager:show(InfoMessage:new{ text = T(_("Updated \"%1\" from CWA."), label) })
+    elseif status == "unchanged" then
+        UIManager:show(InfoMessage:new{ text = T(_("No changes in CWA for \"%1\"."), label) })
+    elseif status == "failed" then
+        UIManager:show(InfoMessage:new{ text = T(_("\"%1\" changed in CWA but the re-download failed."), label) })
+    elseif status == "gone" then
+        UIManager:show(InfoMessage:new{ text = T(_("\"%1\" is no longer found in CWA under its tracked ID -- run a full sync to re-link it."), label) })
+    elseif status == "untracked" then
+        UIManager:show(InfoMessage:new{ text = T(_("\"%1\" isn't tracked yet -- run a full library sync once to register it, then Refresh works for it here."), label) })
+    else
+        UIManager:show(InfoMessage:new{ text = _("Couldn't reach CWA to check.") })
+    end
 end
 
 -- Mirrors syncLibrary's Trapper-subprocess wrapping above.
@@ -3776,6 +5093,26 @@ function Shelfmark:addToMainMenu(menu_items)
                 keep_menu_open = true,
                 callback = function() self:syncLibrary() end,
             },
+            {
+                -- Only appears when a sync actually left something
+                -- unresolved and a relay is configured, so it stays out of
+                -- the way the rest of the time.
+                text_func = function()
+                    return T(_("Review %1 unmatched book(s)"),
+                        self.pending_unmatched and #self.pending_unmatched or 0)
+                end,
+                enabled_func = function()
+                    return self.pending_unmatched ~= nil and #self.pending_unmatched > 0
+                        and self.ai_relay_url ~= nil and self.ai_relay_url ~= ""
+                end,
+                keep_menu_open = true,
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        self:reviewUnmatched(self.pending_unmatched, 1)
+                    end)
+                end,
+            },
             -- Every action here is manual/explicit -- see the section note
             -- above doHardcoverGraphQL for why there's no automatic
             -- "detect when I've finished a book" step.
@@ -3832,6 +5169,11 @@ function Shelfmark:addToMainMenu(menu_items)
                         text = _("Hardcover settings"),
                         keep_menu_open = true,
                         callback = function() self:editHardcoverSettings() end,
+                    },
+                    {
+                        text = _("Match suggestions (AI)"),
+                        keep_menu_open = true,
+                        callback = function() self:editAiSettings() end,
                     },
                     {
                         text_func = function()
@@ -4254,6 +5596,134 @@ local function describeRelease(release)
     return table.concat(bits, " • ") -- bullet-separated (raw UTF-8, not \u{} -- LuaJIT/Lua 5.1 doesn't support that escape form)
 end
 
+-- Full, scrollable rendering of one release for the confirm dialog -- the
+-- list row above has to stay a single line, so it can only ever show a few
+-- bullet-joined bits. This exists so a release can actually be judged before
+-- committing to it (is this the copy with a real author and a sane format,
+-- or the mangled one?).
+--
+-- Two rules that are easy to get wrong here:
+--
+--  * stripJsonNull turns JSON null into `false`, NOT nil (see its own note).
+--    So a plain truthiness test would happily print the literal string
+--    "false" as a field value. Everything below is type-gated to string or
+--    number instead.
+--  * Values are interpolated into a PTF (bold-markup) string, so a value
+--    containing PTF bytes itself could corrupt the bold spans for the rest
+--    of the dialog. They're stripped per value.
+--
+-- Unknown fields are deliberately surfaced rather than hidden: Shelfmark's
+-- /api/releases schema isn't documented anywhere local, so anything scalar
+-- that isn't already rendered above gets listed at the end. That way a field
+-- this file has never heard of still shows up instead of being silently
+-- dropped.
+local RELEASE_DETAIL_KNOWN = {
+    title = true, format = true, size = true, indexer = true, peers = true,
+    seeders = true, source = true, md5 = true, extra = true,
+    annas_author = true, annas_url = true, cover_url = true,
+    year = true, language = true, content_type = true, meta_line = true,
+}
+
+-- Compact rendering of one release for the confirm dialog. Deliberately
+-- short: this is a decision aid, not a record dump. Everything that helps
+-- you choose between two copies of the same book is here; everything that
+-- doesn't (md5, the raw AA url, internal ids) is not.
+--
+-- Layout is one bold title, then the author, then a single bullet-joined
+-- specs line, then the source line, then the book's description -- rather
+-- than a label-per-line list, which ran to a dozen mostly-empty rows.
+--
+-- book is optional and carries the Hardcover-sourced metadata Shelfmark
+-- already fetched for the search results (description, publisher, series,
+-- genres). It costs nothing extra -- it's in memory by the time a release
+-- list exists -- and it's the only place a description is available at all:
+-- Anna's Archive's search results genuinely don't carry one.
+--
+-- Two rules that are easy to get wrong:
+--  * stripJsonNull turns JSON null into `false`, NOT nil, so a plain
+--    truthiness test would print the literal "false". Everything is
+--    type-gated to string/number instead.
+--  * Values are interpolated into a PTF (bold-markup) string, so PTF bytes
+--    inside a value would corrupt the bold spans for everything after it.
+--    They're stripped per value.
+local function describeReleaseDetail(release, book)
+    local function clean(v, limit)
+        if type(v) == "number" then v = tostring(v) end
+        if type(v) ~= "string" then return nil end
+        v = v:gsub("\xEF\xBF\xB1", ""):gsub("\xEF\xBF\xB2", ""):gsub("\xEF\xBF\xB3", "")
+        v = v:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        if v == "" then return nil end
+        -- truncate(), never sub() -- a mid-character cut on a multi-byte
+        -- title caused native, untraceable crashes before.
+        return truncate(v, limit or 300)
+    end
+
+    local lines = {}
+    local function addLineRaw(text) lines[#lines + 1] = text end
+
+    local title = clean(release.title, 200)
+    if title then
+        addLineRaw(PTF_BOLD_START .. title .. PTF_BOLD_END)
+    end
+
+    -- Author: the release's own (AA folds it into the title, so this is the
+    -- only separated copy) falling back to the book's.
+    local author = clean(release.annas_author, 120)
+        or (book and clean(describeAuthor(book), 120))
+    if author and author ~= "" then addLineRaw(author) end
+
+    -- One specs line: the things you actually compare copies on.
+    local specs = {}
+    local function spec(v, suffix)
+        local c = clean(v, 60)
+        if c then specs[#specs + 1] = c .. (suffix or "") end
+    end
+    spec(release.format and tostring(release.format):upper())
+    spec(release.size)
+    spec(release.year or (book and book.publish_year))
+    spec(release.language)
+    spec(release.seeders, "S")
+    spec(release.peers)
+    spec(release.extra and release.extra.grabs, "G")
+    if #specs > 0 then
+        addLineRaw("")
+        addLineRaw(table.concat(specs, " • "))
+    end
+
+    -- Provenance line.
+    local src = {}
+    local ind = clean(release.indexer, 60)
+    if ind then src[#src + 1] = ind end
+    local pub = book and clean(book.publisher, 60)
+    if pub then src[#src + 1] = pub end
+    if #src > 0 then addLineRaw(table.concat(src, " • ")) end
+
+    -- Series, when the book is part of one.
+    if book then
+        local sname = clean(book.series_name, 80)
+        if sname then
+            local pos = clean(book.series_position, 10)
+            addLineRaw(pos and (sname .. " #" .. pos) or sname)
+        end
+    end
+
+    -- The description, last and longest. Kept to a readable excerpt rather
+    -- than a full blurb -- the widget scrolls, but this dialog is meant to
+    -- be skimmed before committing, not read.
+    local desc = book and clean(book.description, 700)
+    if desc then
+        addLineRaw("")
+        addLineRaw(desc)
+    end
+
+    if #lines == 0 then
+        return PTF_HEADER .. _("No details available for this release.")
+    end
+    -- PTF_HEADER must be the literal first bytes of the string for
+    -- TextBoxWidget to parse the bold markup at all.
+    return PTF_HEADER .. table.concat(lines, "\n")
+end
+
 -- Searches release sources (Prowlarr, direct download, etc.) for this one
 -- specific book -- deliberately not run during the metadata search above,
 -- so indexers only get queried for a book you've actually committed to.
@@ -4295,6 +5765,28 @@ local function annasResultToRelease(result)
         source = "annasarchive",
         md5 = result.md5,
         extra = { grabs = result.downloads },
+        -- Carried through purely for the detail view (describeReleaseDetail).
+        -- The API returns exactly seven keys -- title, author, format,
+        -- downloads, cover_url, url, md5 (confirmed live) -- and three of
+        -- them used to be dropped here. author especially: it gets folded
+        -- into `title` above for the list row, so without this there was no
+        -- way to show it as its own field. Nothing else reads these, and AA
+        -- releases never reach submitRequest (confirmReleaseRequest branches
+        -- to downloadFromAnnasArchive first), so nothing new is sent
+        -- anywhere.
+        annas_author = (type(result.author) == "string" and result.author ~= "") and result.author or nil,
+        -- size/year/language/content_type were being scraped by
+        -- annas-archive-api and thrown away; it now keeps them (see
+        -- parseMetaLine in lib/annas.js). All optional -- AA records are
+        -- routinely missing a year or a language -- so each stays nil rather
+        -- than becoming a guess, and describeReleaseDetail simply omits an
+        -- absent field.
+        size = (type(result.size) == "string" and result.size ~= "") and result.size or nil,
+        year = (type(result.year) == "string" and result.year ~= "") and result.year or nil,
+        language = (type(result.language) == "string" and result.language ~= "") and result.language or nil,
+        content_type = (type(result.content_type) == "string" and result.content_type ~= "") and result.content_type or nil,
+        annas_url = (type(result.url) == "string" and result.url ~= "") and result.url or nil,
+        cover_url = (type(result.cover_url) == "string" and result.cover_url ~= "") and result.cover_url or nil,
     }
 end
 
@@ -4578,7 +6070,14 @@ function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
         is_popout = false,
         title_bar_fm_style = true,
         onMenuSelect = function(_menu_self, item)
-            UIManager:close(releases_menu)
+            -- releases_menu is deliberately NOT closed here any more. The
+            -- detail dialog opens on top of it, so "Back" is just closing
+            -- that dialog -- the list underneath keeps its scroll position,
+            -- page and already-downloaded covers, because nothing re-runs
+            -- updateItems (which is also what stops attachCoverSupport from
+            -- re-fetching every cover on the way back). The commit paths
+            -- close it themselves, via the caller_menu passed below.
+            --
             -- This callback runs synchronously on the main UI thread,
             -- outside any Trapper:wrap, so an error here isn't even
             -- reaching Trapper's own swallow-and-warn -- xpcall +
@@ -4591,9 +6090,9 @@ function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
             -- net for anything that does throw a real Lua error here.)
             local ok, err = xpcall(function()
                 if item.is_custom_query then
-                    self:promptCustomReleaseQuery(book, manual_query)
+                    self:promptCustomReleaseQuery(book, manual_query, releases_menu)
                 else
-                    self:confirmReleaseRequest(book, item.release_data)
+                    self:confirmReleaseRequest(book, item.release_data, releases_menu)
                 end
             end, debug.traceback)
             if not ok then
@@ -4916,7 +6415,11 @@ function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, exis
     UIManager:show(bibliography_menu)
 end
 
-function Shelfmark:promptCustomReleaseQuery(book, prefill)
+-- caller_menu is the releases_menu this was opened from, now left open
+-- underneath (see onMenuSelect). Cancelling therefore just reveals the list
+-- again, and a submitted query hands it to browseReleases, which closes it
+-- itself -- the same caller_menu contract used throughout this file.
+function Shelfmark:promptCustomReleaseQuery(book, prefill, caller_menu)
     local InputDialog = require("ui/widget/inputdialog")
     local default_query = prefill or defaultReleaseQuery(book)
 
@@ -4940,7 +6443,7 @@ function Shelfmark:promptCustomReleaseQuery(book, prefill)
                         UIManager:close(dialog)
                         if query and query:gsub("%s", "") ~= "" then
                             local Trapper = require("ui/trapper")
-                            Trapper:wrap(function() self:browseReleases(book, query) end)
+                            Trapper:wrap(function() self:browseReleases(book, query, caller_menu) end)
                         end
                     end,
                 },
@@ -5027,6 +6530,82 @@ function Shelfmark:showResilientConfirmBox(opts)
         UIManager:show(confirm_box)
     end
     show_box()
+end
+
+-- TextViewer counterpart to showResilientConfirmBox above, for dialogs that
+-- need a scrollable multi-field body and more than two buttons (the release
+-- detail view). Same external-close protection, same "always build a fresh
+-- instance on retry" rule -- see that function's note on why re-showing a
+-- torn-down widget crashes the app outright.
+--
+-- One difference that matters, and is easy to get wrong: TextViewer's own
+-- onClose does UIManager:close(self) FIRST and only then calls
+-- close_callback, so a close_callback-based dismissed flag would be set too
+-- late -- onCloseWidget has already run and would read it as an external
+-- close, re-showing a dialog the user deliberately dismissed. The flag is
+-- therefore set by overriding the instance's onClose, which every legitimate
+-- dismissal routes through (Close button, titlebar X, tap-outside,
+-- multiswipe, and the Kindle's physical Back key).
+--
+-- opts.buttons is a list of { text = ..., callback = ... }; each callback is
+-- wrapped to mark the dialog dismissed and close it before running, so a
+-- button never has to remember to do either.
+function Shelfmark:showResilientTextViewer(opts)
+    local TextViewer = require("ui/widget/textviewer")
+    local dismissed = false
+    local retries = 0
+    local MAX_RETRIES = 2
+
+    local show_viewer
+    show_viewer = function()
+        local viewer
+        -- Rebuilt per attempt: TextViewer mutates the buttons table it's
+        -- given (it appends its own default row when asked to), so a shared
+        -- table would accumulate rows across retries.
+        local rows = {}
+        for _, b in ipairs(opts.buttons or {}) do
+            rows[#rows + 1] = {
+                text = b.text,
+                callback = function()
+                    dismissed = true
+                    UIManager:close(viewer)
+                    if b.callback then b.callback() end
+                end,
+            }
+        end
+
+        viewer = TextViewer:new{
+            title = opts.title,
+            text = opts.text,
+            justified = false,
+            add_default_buttons = false,
+            buttons_table = { rows },
+        }
+
+        local base_on_close = viewer.onClose
+        viewer.onClose = function(self_v)
+            dismissed = true
+            return base_on_close(self_v)
+        end
+
+        local base_on_close_widget = viewer.onCloseWidget
+        viewer.onCloseWidget = function(self_v)
+            base_on_close_widget(self_v)
+            if dismissed then return end
+            debugLog("showResilientTextViewer: force-closed externally (retries=" .. retries .. "): "
+                .. tostring(opts.title):sub(1, 60))
+            if retries < MAX_RETRIES then
+                retries = retries + 1
+                UIManager:scheduleIn(0.2, show_viewer)
+            else
+                UIManager:show(InfoMessage:new{
+                    text = _("This dialog kept getting closed by something else on this device."),
+                })
+            end
+        end
+        UIManager:show(viewer)
+    end
+    show_viewer()
 end
 
 -- release.source == "annasarchive" releases skip Shelfmark's own
@@ -5156,36 +6735,40 @@ function Shelfmark:downloadFromAnnasArchive(release)
     UIManager:show(InfoMessage:new{ text = T(_("Saved to %1"), save_path), timeout = 4 })
 end
 
-function Shelfmark:confirmReleaseRequest(book, release)
-    if release.source == "annasarchive" then
-        -- Immediate download, not a queued request -- see
-        -- downloadFromAnnasArchive's note on why this branch exists at
-        -- all.
-        self:showResilientConfirmBox{
-            text = (truncate(release.title, 90) or _("This release")) .. "\n\n" .. _("Download from Anna's Archive now?"),
-            ok_text = _("Download"),
-            ok_callback = function()
-                local Trapper = require("ui/trapper")
-                Trapper:wrap(function() self:downloadFromAnnasArchive(release) end)
-            end,
+-- caller_menu, when given, is the releases_menu this was opened from. It is
+-- deliberately left OPEN underneath this dialog so "Back to list" can simply
+-- close the dialog and reveal it again -- with its scroll position, page and
+-- already-fetched covers intact, because nothing re-runs the menu's item
+-- builder. It is closed only on the paths that actually commit (download or
+-- request), which is what preserves the previous end state.
+function Shelfmark:confirmReleaseRequest(book, release, caller_menu)
+    local is_annas = release.source == "annasarchive"
+    local buttons = {}
+    if caller_menu then
+        buttons[#buttons + 1] = {
+            text = _("Back"),
+            callback = function() end, -- the wrapper already closed the dialog
         }
-        return
     end
-
-    -- truncate() here, not just in the release list -- raw Prowlarr/scene
-    -- release filenames run 100-150+ chars (quality/codec tags, group
-    -- names), and this ConfirmBox was the one place in the file still
-    -- passing that text through unclipped. Matches part of the symptom
-    -- reported live (the UI disappearing right after tapping a release) --
-    -- the other part turned out to be the external-close issue
-    -- showResilientConfirmBox now handles above.
-    self:showResilientConfirmBox{
-        text = (truncate(release.title, 90) or _("This release")) .. "\n\n" .. _("Request this release?"),
-        ok_text = _("Request"),
-        ok_callback = function()
+    buttons[#buttons + 1] = {
+        text = is_annas and _("Download") or _("Request"),
+        callback = function()
+            if caller_menu then UIManager:close(caller_menu) end
             local Trapper = require("ui/trapper")
-            Trapper:wrap(function() self:submitRequest(withAuthorField(book), release) end)
+            if is_annas then
+                -- Immediate download, not a queued request -- see
+                -- downloadFromAnnasArchive's note on why this branch exists.
+                Trapper:wrap(function() self:downloadFromAnnasArchive(release) end)
+            else
+                Trapper:wrap(function() self:submitRequest(withAuthorField(book), release) end)
+            end
         end,
+    }
+
+    self:showResilientTextViewer{
+        title = is_annas and _("Download this release?") or _("Request this release?"),
+        text = describeReleaseDetail(release, book),
+        buttons = buttons,
     }
 end
 
