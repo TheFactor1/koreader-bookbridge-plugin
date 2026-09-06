@@ -38,6 +38,32 @@ expectW("Red Rising 4_ Iron Gold", "Red Rising 4: Iron Gold", true)
 expectW("Iron Gold", "Pierce Brown", false)
 expectW("Dark Age", "Dark Matter", false)
 expectW("Spider-Man", "Spider Man", true)
+expectW("Carl's Doomsday Scenario: Dungeon Crawler Carl Book 2", "Carl's Doomsday Scenario_ Dungeon Crawler Carl (Book 2) - Matt Dinniman", false)  -- author words differ, but title side must be a subset (checked below)
+expectW("The Book Thief", "The Thief", false)
+expectW("Wool Book 12", "Wool Book 13", false)
+-- Volume numbers are deliberately NOT words (see volumeNumbersOf); the
+-- compatibility gate in doSyncLibrary handles them. These pin its parsing.
+local function expectVols(text, want)
+  local nums = volumeNumbersOf(text)
+  local got = {}
+  for n in pairs(nums) do got[#got + 1] = n end
+  table.sort(got)
+  local ok = (table.concat(got, ",") == want)
+  if not ok then fails = fails + 1 end
+  print((ok and "PASS" or "FAIL") .. "  vols   [" .. text .. "] -> {" .. table.concat(got, ",") .. "}" .. (ok and "" or ("  expected {" .. want .. "}")))
+end
+expectVols("Dungeon Crawler Carl Book 2", "2")
+expectVols("Dungeon Crawler Carl: A LitRPG/Gamelit Adventure", "")
+expectVols("Carl's Doomsday Scenario_ Dungeon Crawler Carl (Book 2) - Matt Dinniman", "2")
+expectVols("The Dark Tower I: The Gunslinger (1)", "1")
+expectVols("The Dark Tower - Stephen King", "")
+expectVols("I Am Legend - Richard Matheson", "")
+expectVols("Pierce Brown - Iron Gold_ Book IV of the Red Rising Saga", "4")
+expectVols("Wayward Pines - 02 Wayward - Blake Crouch [Crouch, Blake]", "2")
+expectVols("1984 - George Orwell", "")
+expectVols("Fahrenheit 451", "451")
+expectVols("Stephen King - 11_22_63_ A Novel", "11,22,63")
+expectVols("Civil War - Anonymous", "")
 local cyr = words("\208\146\208\190\208\185\208\189\208\176 \208\184 \208\188\208\184\209\128")
 print((cyr ~= "" and "PASS" or "FAIL") .. "  cyrillic title keeps words: {" .. cyr .. "}")
 if cyr == "" then fails = fails + 1 end
@@ -48,6 +74,9 @@ local cases = {
   {"Dark Age","Pierce Brown","Dark Age - Pierce Brown", true},
   {"Mistborn","Brandon Sanderson","Mistborn - The Well of Ascension - Brandon Sanderson", false},
   {"The Three-Body Problem","Cixin Liu","Cixin Liu - The Three-Body Problem", true},
+  {"Carl's Doomsday Scenario: Dungeon Crawler Carl Book 2","Matt Dinniman","Carl's Doomsday Scenario_ Dungeon Crawler Carl (Book 2) - Matt Dinniman", true},
+  {"The Book Thief","Markus Zusak","The Thief - Markus Zusak", false},
+  {"Dungeon Crawler Carl: A LitRPG/Gamelit Adventure","Matt Dinniman","Dungeon Crawler Carl Book 2 - Matt Dinniman", false},
 }
 for _, c in ipairs(cases) do
   local got = sub(c[1], c[2], c[3]); local ok = (got == c[4]); if not ok then fails = fails + 1 end

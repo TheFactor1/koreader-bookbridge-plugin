@@ -2614,6 +2614,74 @@ local SERIES_STRUCTURE_WORDS = {
     part = true, no = true, num = true,
 }
 
+-- The generic noun a filename attaches to a series name ("of the Red Rising
+-- Saga", "The Wayward Pines Trilogy"). Like SERIES_STRUCTURE_WORDS, forgiven
+-- only inside the series-relaxation block, never in strict matching.
+local SERIES_SUFFIX_WORDS = {
+    saga = true, series = true, trilogy = true, cycle = true,
+    chronicles = true, sequence = true, collection = true,
+}
+
+-- "IV" -> 4. Returns nil for anything that isn't a well-formed roman numeral,
+-- so ordinary words made of these letters ("civil", "lix") are never numbers.
+local ROMAN_VALUES = { i = 1, v = 5, x = 10, l = 50, c = 100 }
+local function romanToNumber(s)
+    if type(s) ~= "string" or s == "" or s:find("[^ivxlc]") then return nil end
+    local total, prev = 0, 0
+    for k = #s, 1, -1 do
+        local v = ROMAN_VALUES[s:sub(k, k)]
+        if v < prev then total = total - v else total = total + v end
+        prev = v
+    end
+    -- Reject malformed forms ("iiii", "vv", "ic") by round-tripping.
+    local check, n = "", total
+    for _, pair in ipairs({ {100, "c"}, {90, "xc"}, {50, "l"}, {40, "xl"}, {10, "x"}, {9, "ix"}, {5, "v"}, {4, "iv"}, {1, "i"} }) do
+        while n >= pair[1] do check = check .. pair[2]; n = n - pair[1] end
+    end
+    if check ~= s then return nil end
+    return total
+end
+
+-- The volume numbers a title or filename carries -- "Book 2", "(1)", "02",
+-- "Vol. IV", "The Dark Tower I" -- as a set of numbers plus a token->number
+-- map. Word matching can't see these: a single digit is shorter than the
+-- two-character minimum for a word, a roman "I" is a single letter, and
+-- "(Book 2)" is a parenthetical the normalizer strips, so "Dungeon Crawler
+-- Carl Book 2" and book 1 compared equal and a "Book 2" file registered as
+-- book 1 (caught by the negative-control sweep). Volume numbers are handled
+-- explicitly instead, by the compatibility gate in doSyncLibrary.
+--
+-- Digits count from 1 to 999: a 4-digit number is a year or a title ("1984",
+-- "2001"), never a volume. Roman numerals count when two or more letters
+-- long ("II", "IV"); a lone "I"/"V"/"X" is also an English word or an
+-- initial, so it counts only directly after a series label ("Book I") or at
+-- the end of a segment ("The Dark Tower I: ...", "... Tower I - King").
+local function volumeNumbersOf(text)
+    local nums, by_token = {}, {}
+    if type(text) ~= "string" then return nums, by_token end
+    local lower = text:lower()
+    local prev = nil
+    for token, after in lower:gmatch("%f[%w](%w+)%f[%W]()") do
+        local n = tonumber(token)
+        if n then
+            if n >= 1 and n <= 999 and token:find("^%d+$") then
+                nums[n] = true; by_token[token] = n
+            end
+        else
+            local r = romanToNumber(token)
+            if r then
+                local next_char = lower:sub(after):match("^%s*(.?)")
+                local segment_end = (next_char == "" or next_char:find("[:_%(%)%[%]%-,]") ~= nil)
+                if #token >= 2 or SERIES_STRUCTURE_WORDS[prev] or segment_end then
+                    nums[r] = true; by_token[token] = r
+                end
+            end
+        end
+        prev = token
+    end
+    return nums, by_token
+end
+
 -- Repeatedly strips a *trailing* "(...)" group -- never content in the
 -- middle of a title, which is far more likely to be meaningfully
 -- title-distinguishing rather than noise. Two independent, confirmed-live
@@ -2746,6 +2814,23 @@ local function normalizeTitleWords(text)
     text = text:gsub("\xCC[\x80-\xBF]", "")
     text = text:gsub("\xCD[\x80-\xAF]", "")
     text = text:gsub("_", " ")
+    -- A series label directly followed by a number -- "Book 2", "Vol. 3",
+    -- "Part 1" -- is scaffolding around that number, not title content, and
+    -- sources disagree about whether to parenthesize it. Confirmed live on
+    -- this device, and it was a duplicate upload waiting to happen: the
+    -- file "Carl's Doomsday Scenario_ Dungeon Crawler Carl (Book 2) - Matt
+    -- Dinniman" lost its whole "(Book 2)" group to the paren strip above,
+    -- while CWA's own title "Carl's Doomsday Scenario: Dungeon Crawler
+    -- Carl Book 2" kept the bare word "book". One side had a word the
+    -- other could never explain, so every matching tier rejected the
+    -- book's own entry and the file fell through to upload. Dropping the
+    -- label on BOTH sides (the number stays, so "Book 12" and "Book 13"
+    -- remain distinct) makes the comparison symmetric again. Only the
+    -- label-plus-number pair is touched: "The Book Thief" keeps its
+    -- "book", exactly as the SERIES_STRUCTURE_WORDS note above requires.
+    for label in pairs(SERIES_STRUCTURE_WORDS) do
+        text = text:gsub("%f[%a]" .. label .. "%.?%s+(%d+)", "%1")
+    end
     -- \128-\255 alongside %w: Lua patterns are byte-oriented and %w matches
     -- ASCII alphanumerics ONLY, so every non-Latin script -- Cyrillic, Greek,
     -- CJK, Arabic -- was treated as punctuation and erased. A Russian or
@@ -3546,6 +3631,24 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             local raw_entry_count = 0
             local any_response = false
             local fname_words = normalizeTitleWords(fname)
+            -- Volume gate: a filename that names a volume ("Book 2", "02",
+            -- "IV", "(1)") can only ever match a candidate that carries the
+            -- same number, in its title or as its CWA series index. Applied
+            -- to every matching tier below. It never adds a match, only
+            -- refuses one, so a volume-numbered file that finds only the
+            -- wrong volume lands in "check manually" instead of registering
+            -- as its sibling (the "Dungeon Crawler Carl Book 2" -> book 1
+            -- case). A filename with no volume number is unaffected.
+            local fname_vols, fname_vol_tokens = volumeNumbersOf(fname)
+            local function volumeCompatible(e)
+                if next(fname_vols) == nil then return true end
+                local cand_vols = volumeNumbersOf(e.title)
+                for n in pairs(cand_vols) do
+                    if fname_vols[n] then return true end
+                end
+                local idx = getSeriesIndex(e.uuid)
+                return idx ~= nil and fname_vols[idx] == true
+            end
 
             -- Drop EXTRA CONTRIBUTOR names from the words the matcher demands
             -- an explanation for.
@@ -3649,9 +3752,37 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                             end
                             if any_entry_word and all_words_present then
                                 raw_entry_count = raw_entry_count + 1
+                            else
+                                -- The other direction: a filename that is a
+                                -- truncated form of this candidate's title
+                                -- ("Hail Mary - Andy Weir" vs "Project Hail
+                                -- Mary: A Novel", "The Dark Tower" vs "The
+                                -- Dark Tower I: The Gunslinger") is at least
+                                -- as likely to BE this book as to be a new
+                                -- one, so it must not fall through to
+                                -- upload. Counting it as relevant routes it
+                                -- to "check manually", which is reported and
+                                -- reversible; an upload is neither. Author
+                                -- words are set aside first so a bare
+                                -- "Title - Author" file compares title to
+                                -- title. Found by the negative-control
+                                -- sweep; only ever turns an upload into a
+                                -- report, never into a match.
+                                local author_words = normalizeTitleWords(e.author)
+                                local any_fname_word, all_in_title = false, true
+                                for w in pairs(fname_words) do
+                                    if not author_words[w] then
+                                        any_fname_word = true
+                                        if not entry_words[w] then all_in_title = false break end
+                                    end
+                                end
+                                if any_fname_word and all_in_title then
+                                    raw_entry_count = raw_entry_count + 1
+                                end
                             end
                             candidates[#candidates + 1] = e
-                            if titleWordsSubsetOf(entry_words, normalizeTitleWords(e.author), fname_words) then
+                            if titleWordsSubsetOf(entry_words, normalizeTitleWords(e.author), fname_words)
+                                    and volumeCompatible(e) then
                                 table.insert(matches, e)
                             end
                         end
@@ -3694,12 +3825,43 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                     local stem = table.concat(sortedWordList(normalizeTitleWords(preColon(e.title))), " ")
                     stem_counts[stem] = (stem_counts[stem] or 0) + 1
                 end
+                -- A volume marker inside the pre-colon stem itself ("The Dark
+                -- Tower I: The Gunslinger") is the one part of the stem that
+                -- says WHICH book, and a roman "I" is a single letter that
+                -- normalizeTitleWords drops. Caught by the negative-control
+                -- sweep: a file named just "The Dark Tower - Stephen King"
+                -- registered as volume I. So: lift any volume token out of
+                -- the stem, and if there is one, insist the filename carries
+                -- the same number (as digits or roman) before the stem may
+                -- match at all. The two sides are then compared with their
+                -- volume tokens set aside, since "ii" and "2" have already
+                -- been checked as numbers and could never match as words.
                 for _, e in ipairs(candidates) do
-                    local stem_words = normalizeTitleWords(preColon(e.title))
+                    local stem_text = preColon(e.title)
+                    local stem_words = normalizeTitleWords(stem_text)
                     local stem = table.concat(sortedWordList(stem_words), " ")
-                    if stem ~= "" and stem_counts[stem] == 1 then
-                        if titleWordsSubsetOf(stem_words, normalizeTitleWords(e.author), fname_words) then
-                            table.insert(matches, e)
+                    if stem ~= "" and stem_counts[stem] == 1 and volumeCompatible(e) then
+                        local stem_vols, stem_vol_tokens = volumeNumbersOf(stem_text)
+                        local vol_ok = true
+                        if next(stem_vols) ~= nil then
+                            vol_ok = false
+                            for n in pairs(stem_vols) do
+                                if fname_vols[n] then vol_ok = true break end
+                            end
+                        end
+                        if vol_ok then
+                            local stem_cmp, fname_cmp = {}, {}
+                            for w in pairs(stem_words) do
+                                if not stem_vol_tokens[w] then stem_cmp[w] = true end
+                            end
+                            for w in pairs(fname_words) do
+                                local n = fname_vol_tokens[w]
+                                if not (n and stem_vols[n]) then fname_cmp[w] = true end
+                            end
+                            if next(stem_cmp) ~= nil
+                                    and titleWordsSubsetOf(stem_cmp, normalizeTitleWords(e.author), fname_cmp) then
+                                table.insert(matches, e)
+                            end
                         end
                     end
                 end
@@ -3733,7 +3895,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 local series_by_uuid = getSeriesMap()
                 for _, e in ipairs(candidates) do
                     local series_name = e.uuid and series_by_uuid[e.uuid]
-                    if series_name then
+                    if series_name and volumeCompatible(e) then
                         local entry_words = normalizeTitleWords(e.title)
                         local author_words = normalizeTitleWords(e.author)
                         local series_words = normalizeTitleWords(series_name)
@@ -3788,6 +3950,18 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                                         break
                                     end
                                 end
+                                -- "Book IV of the Red Rising Saga": the
+                                -- volume number written as a roman numeral.
+                                -- Only a standalone token counts, so a
+                                -- title word like "vivid" can't be misread.
+                                if not index_confirmed then
+                                    for token in fname:lower():gmatch("%f[%a][ivxlc]+%f[%A]") do
+                                        if romanToNumber(token) == series_index then
+                                            index_confirmed = true
+                                            break
+                                        end
+                                    end
+                                end
                             end
 
                             local all_explained = true
@@ -3805,6 +3979,15 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                                     -- elsewhere still treats these as real
                                     -- words, so this can't loosen anything
                                     -- outside the series path.
+                                elseif series_index and romanToNumber(w) == series_index then
+                                    -- The volume number as a roman numeral
+                                    -- ("IV"), already confirmed above.
+                                elseif SERIES_SUFFIX_WORDS[w] then
+                                    -- "...of the Red Rising SAGA": the generic
+                                    -- word a filename hangs on a series name.
+                                    -- CWA's own series field says "Red Rising
+                                    -- Series", so the noun never lines up.
+                                    -- Same guard as above: series path only.
                                 elseif not entry_words[w] and not author_words[w] and not series_words[w] then
                                     all_explained = false
                                     break
