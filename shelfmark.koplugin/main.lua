@@ -110,6 +110,20 @@ function Shelfmark:loadSettings()
     -- unset, the leftovers just stay reported as "check manually".
     self.ai_relay_url = self.sm_settings.data.shelfmark.ai_relay_url
     self.ai_relay_token = self.sm_settings.data.shelfmark.ai_relay_token
+    -- Where "Check for updates" looks. Blank = GitHub releases for
+    -- UPDATE_REPO, which is what a public install gets and what this shipped
+    -- with -- but that path 404s while the repo is private, which is the
+    -- whole reason this setting exists. Set it to a base URL serving
+    -- manifest.json alongside the plugin files (the homeserver's
+    -- shelfmark-update service) and updates work off the working tree, with
+    -- no release to tag and no version to bump between test builds.
+    --
+    -- Deliberately just a base URL, and the manifest format is
+    -- host-agnostic: pointing this at
+    -- raw.githubusercontent.com/<repo>/main/shelfmark.koplugin once the repo
+    -- is public is a settings change, not a code change. Clearing it falls
+    -- back to the GitHub *releases* path below, unchanged.
+    self.update_url = self.sm_settings.data.shelfmark.update_url
     -- Hardcover (hardcover.app) -- a public HTTPS GraphQL API, unlike Anna's
     -- Archive/CWA/the Shelfmark server, so no self-hosted companion or
     -- SOCKS5 proxy is needed for this one; it's reachable directly.
@@ -149,6 +163,7 @@ function Shelfmark:saveAllSettings(msg)
         hardcover_token = self.hardcover_token,
         ai_relay_url = self.ai_relay_url,
         ai_relay_token = self.ai_relay_token,
+        update_url = self.update_url,
     })
     self.sm_settings:flush()
     self.session_cookie = nil -- force re-login with new creds
@@ -267,6 +282,40 @@ function Shelfmark:editAiSettings()
     }
     UIManager:show(self.ai_settings_dialog)
     self.ai_settings_dialog:onShowKeyboard()
+end
+
+function Shelfmark:editUpdateSettings()
+    self.update_settings_dialog = MultiInputDialog:new{
+        title = _("Update source"),
+        fields = {
+            {
+                text = self.update_url,
+                hint = _("Base URL serving manifest.json (blank = GitHub releases)"),
+            },
+        },
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.update_settings_dialog)
+                    end,
+                },
+                {
+                    text = _("Apply"),
+                    callback = function()
+                        local fields = self.update_settings_dialog:getFields()
+                        self.update_url = fields[1] ~= "" and fields[1]:gsub("/*$", "") or nil
+                        UIManager:close(self.update_settings_dialog)
+                        self:saveAllSettings(_("Saved."))
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.update_settings_dialog)
+    self.update_settings_dialog:onShowKeyboard()
 end
 
 function Shelfmark:editAnnasSettings()
@@ -1153,7 +1202,7 @@ end
 -- content host need the SOCKS5 proxy (both are reached over plain public
 -- HTTPS, unlike the Tailscale-only Shelfmark/CWA/annas-archive-api calls
 -- elsewhere in this file).
-local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, total_timeout, headers)
+local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, total_timeout, headers, socks5_proxy)
     local file, ferr = io.open(save_path, "wb")
     if not file then
         return nil, nil, _("Couldn't open file for writing: ") .. tostring(ferr)
@@ -1163,8 +1212,21 @@ local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, t
     socketutil:set_timeout(block_timeout or 15, total_timeout or 60)
     local sink = socketutil.file_sink(file)
     local requester = url:match("^https:") and https or http
+    local request = { method = "GET", url = url, sink = sink, headers = headers }
+    -- Same one-call interception the CWA/Shelfmark requests use: only set
+    -- when a caller actually passes a proxy, so every existing caller
+    -- (Anna's Archive, covers, the GitHub updater) is byte-for-byte
+    -- unchanged.
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        else
+            debugLog(log_prefix .. " invalid socks5_proxy setting, ignoring: " .. socks5_proxy)
+        end
+    end
     local ok, code = pcall(function()
-        return socket.skip(1, requester.request{ method = "GET", url = url, sink = sink, headers = headers })
+        return socket.skip(1, requester.request(request))
     end)
     socketutil:reset_timeout()
 
@@ -2216,7 +2278,146 @@ local function isNewerVersion(remote_version, local_version)
     return false
 end
 
-local function doCheckForUpdate()
+-- The files the updater ever touches. Everything else in the plugin
+-- directory (settings, caches) is left alone.
+local UPDATE_FILES = { "main.lua", "_meta.lua" }
+
+-- KOReader ships a pure-Lua SHA-256; measured on the Kindle at 0.03s for
+-- this file's ~350KB, so hashing on every check is free. Returns nil if the
+-- library or file is missing, and every caller treats nil as "can't tell"
+-- rather than "differs", so a missing library degrades to a version-number
+-- comparison instead of offering a pointless update.
+local function sha256OfFile(path)
+    local lib_ok, sha = pcall(require, "ffi/sha2")
+    if not lib_ok or type(sha) ~= "table" or type(sha.sha256) ~= "function" then return nil end
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local data = f:read("*a")
+    f:close()
+    if not data then return nil end
+    local ok, digest = pcall(sha.sha256, data)
+    if not ok or type(digest) ~= "string" then return nil end
+    return digest:lower()
+end
+
+-- A SOCKS5 proxy set for Tailscale userspace mode can only reach tailnet
+-- peers, never the public internet -- so routing a github.com fetch through
+-- it would break the very path it's meant to help. Only private/tailnet
+-- destinations get proxied; anything public goes direct. Both Kindles
+-- currently have a real tailscale0 and reach the homeserver without the
+-- proxy at all, so this is a fallback for if userspace mode ever returns.
+local function proxyForUrl(url, socks5_proxy)
+    if not socks5_proxy or socks5_proxy == "" then return nil end
+    local host = tostring(url):match("^%a+://([^/:]+)")
+    if not host then return nil end
+    if host == "localhost" or host:match("^127%.") or host:match("^10%.")
+            or host:match("^192%.168%.") then
+        return socks5_proxy
+    end
+    local a, b = host:match("^(%d+)%.(%d+)%.")
+    a, b = tonumber(a), tonumber(b)
+    if a and b then
+        if a == 100 and b >= 64 and b <= 127 then return socks5_proxy end   -- tailnet CGNAT
+        if a == 172 and b >= 16 and b <= 31 then return socks5_proxy end
+    end
+    return nil
+end
+
+local function doHttpGetString(url, socks5_proxy, log_prefix, block_timeout, total_timeout)
+    debugLog(log_prefix .. " -> GET " .. url)
+    socketutil:set_timeout(block_timeout or 10, total_timeout or 25)
+    local sink, sink_table = socketutil.table_sink()
+    local requester = url:match("^https:") and https or http
+    local request = {
+        method = "GET",
+        url = url,
+        sink = sink,
+        headers = { ["User-Agent"] = "shelfmark.koplugin" },
+    }
+    local proxy = proxyForUrl(url, socks5_proxy)
+    if proxy then
+        local proxy_host, proxy_port = proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+    local ok, code = pcall(function() return socket.skip(1, requester.request(request)) end)
+    socketutil:reset_timeout()
+    if not ok then
+        debugLog(log_prefix .. " <- connection error: " .. tostring(code))
+        return nil, nil, tostring(code)
+    end
+    -- luasocket reports a connection-level failure as a non-numeric second
+    -- return ("connection refused", "host unreachable"), not as a status.
+    -- Folding that into the HTTP branch produced "Update server returned
+    -- HTTP connection refused" -- which is the message a Kindle away from
+    -- home would show every time, since the update server is LAN/Tailscale
+    -- only. Keep the two apart so the error names the real problem.
+    if type(code) ~= "number" then
+        debugLog(log_prefix .. " <- request failed: " .. tostring(code))
+        return nil, nil, tostring(code)
+    end
+    if code >= 400 then
+        debugLog(log_prefix .. " <- HTTP " .. tostring(code))
+        return nil, code
+    end
+    return table.concat(sink_table), code
+end
+
+-- Self-hosted path: fetch <base>/manifest.json and compare its per-file
+-- checksums against what's actually installed on disk.
+--
+-- Comparing CONTENT, not version numbers, is the point: while the repo is
+-- private and every build is a test build, PLUGIN_VERSION doesn't move, so a
+-- version comparison would report "up to date" for a file that changed
+-- minutes ago. Hashing the installed file is also honest about a copy
+-- scp'd on by hand, which no stored "last installed" marker would be.
+local function doCheckManifest(update_url, socks5_proxy)
+    local base = update_url:gsub("/*$", "")
+    local body, code, err = doHttpGetString(base .. "/manifest.json", socks5_proxy, "[update]")
+    if not body then
+        return nil, code, err
+            and T(_("Couldn't reach the update server at %1. It's only reachable on your home network or over Tailscale."), base)
+            or T(_("Update server returned HTTP %1."), tostring(code))
+    end
+    local decode_ok, manifest = pcall(JSON.decode, body)
+    manifest = decode_ok and stripJsonNull(manifest)
+    if type(manifest) ~= "table" or type(manifest.files) ~= "table" then
+        return nil, code, _("Update server's manifest.json couldn't be parsed.")
+    end
+
+    local plugin_dir = getPluginDir()
+    local changed, unverifiable = {}, false
+    for idx = 1, #UPDATE_FILES do
+        local fname = UPDATE_FILES[idx]
+        local entry = manifest.files[fname]
+        if type(entry) == "table" and type(entry.sha256) == "string" then
+            local local_digest = sha256OfFile(plugin_dir .. "/" .. fname)
+            if not local_digest then
+                unverifiable = true
+            elseif local_digest ~= entry.sha256:lower() then
+                changed[#changed + 1] = fname
+            end
+        end
+    end
+
+    return {
+        manifest = true,
+        base = base,
+        version = tostring(manifest.version or "?"),
+        build = manifest.build and tostring(manifest.build) or nil,
+        files = manifest.files,
+        changed = changed,
+        -- Couldn't hash locally (no sha2 library): fall back to the version
+        -- number, the only other signal available.
+        unverifiable = unverifiable,
+    }, code
+end
+
+local function doCheckForUpdate(update_url, socks5_proxy)
+    if update_url and update_url ~= "" then
+        return doCheckManifest(update_url, socks5_proxy)
+    end
     local url = "https://api.github.com/repos/" .. UPDATE_REPO .. "/releases/latest"
     debugLog("[update] -> GET " .. url)
 
@@ -2258,34 +2459,69 @@ end
 -- download or a truncated file this way can never leave the plugin
 -- unable to load on next start, worst case the update is just silently
 -- not applied.
-local function doApplyUpdate(tag)
+-- `target` is either a release tag string (GitHub path) or the manifest
+-- table from doCheckManifest (self-hosted path). Both download to temp
+-- files, verify, and only then swap -- the manifest path additionally
+-- checks each file's SHA-256, so a truncated or stale-manifest download is
+-- refused outright rather than parse-checked and hoped for.
+local function doApplyUpdate(target, socks5_proxy)
     local plugin_dir = getPluginDir()
-    local base = "https://raw.githubusercontent.com/" .. UPDATE_REPO .. "/" .. tag .. "/shelfmark.koplugin/"
-    local files = { "main.lua", "_meta.lua" }
+    local is_manifest = type(target) == "table" and target.manifest
+    local base, label
+    if is_manifest then
+        base = target.base .. "/"
+        label = "v" .. tostring(target.version) .. (target.build and (" build " .. target.build) or "")
+    else
+        base = "https://raw.githubusercontent.com/" .. UPDATE_REPO .. "/" .. tostring(target) .. "/shelfmark.koplugin/"
+        label = tostring(target)
+    end
     local tmp_paths = {}
+    local function cleanup()
+        for j = 1, #tmp_paths do os.remove(tmp_paths[j]) end
+    end
 
-    for idx = 1, #files do
-        local fname = files[idx]
+    for idx = 1, #UPDATE_FILES do
+        local fname = UPDATE_FILES[idx]
         local tmp_path = plugin_dir .. "/" .. fname .. ".update-tmp"
-        local ok, _dl_code, dl_err = doHttpDownloadToFile(base .. fname, tmp_path, "[update]", 15, 45)
+        local ok, _dl_code, dl_err = doHttpDownloadToFile(base .. fname, tmp_path, "[update]", 15, 45,
+            nil, is_manifest and proxyForUrl(base, socks5_proxy) or nil)
         if not ok then
-            for j = 1, #tmp_paths do os.remove(tmp_paths[j]) end
+            cleanup()
             return nil, dl_err or T(_("Couldn't download %1."), fname)
         end
         tmp_paths[#tmp_paths + 1] = tmp_path
+
+        if is_manifest then
+            local entry = target.files and target.files[fname]
+            local want = type(entry) == "table" and type(entry.sha256) == "string" and entry.sha256:lower() or nil
+            if want then
+                local got = sha256OfFile(tmp_path)
+                -- No local hashing available: the parse check below is the
+                -- remaining guard, same as the GitHub path has always had.
+                if got and got ~= want then
+                    debugLog("[update] <- checksum mismatch for " .. fname .. ": got " .. got .. ", want " .. want)
+                    cleanup()
+                    return nil, T(_("%1 didn't match the manifest's checksum -- not installed. The update server's manifest is probably stale; regenerate it with tools/make-manifest.sh."), fname)
+                end
+            end
+        end
     end
 
-    local chunk, load_err = loadfile(plugin_dir .. "/main.lua.update-tmp")
-    if not chunk then
-        for j = 1, #tmp_paths do os.remove(tmp_paths[j]) end
-        return nil, _("Downloaded update failed to parse, not installed: ") .. tostring(load_err)
+    -- loadfile compiles without executing, so a truncated or corrupt file
+    -- can never leave the plugin unable to load on next start.
+    for idx = 1, #UPDATE_FILES do
+        local chunk, load_err = loadfile(plugin_dir .. "/" .. UPDATE_FILES[idx] .. ".update-tmp")
+        if not chunk then
+            cleanup()
+            return nil, _("Downloaded update failed to parse, not installed: ") .. tostring(load_err)
+        end
     end
 
-    for idx = 1, #files do
-        local fname = files[idx]
+    for idx = 1, #UPDATE_FILES do
+        local fname = UPDATE_FILES[idx]
         os.rename(plugin_dir .. "/" .. fname .. ".update-tmp", plugin_dir .. "/" .. fname)
     end
-    debugLog("[update] <- installed " .. tag .. " to " .. plugin_dir)
+    debugLog("[update] <- installed " .. label .. " to " .. plugin_dir)
     return true
 end
 
@@ -4847,13 +5083,59 @@ end
 -- Mirrors syncLibrary's Trapper-subprocess wrapping above.
 function Shelfmark:checkForUpdate()
     local Trapper = require("ui/trapper")
+    local update_url, socks5_proxy = self.update_url, self.socks5_proxy
     local completed, info, code, err = Trapper:dismissableRunInSubprocess(function()
-        return doCheckForUpdate()
+        return doCheckForUpdate(update_url, socks5_proxy)
     end, _("Checking for updates..."))
 
     if not completed then return end
     if not info then
         UIManager:show(InfoMessage:new{ text = err or T(_("Couldn't check for updates (HTTP %1)."), tostring(code)) })
+        return
+    end
+
+    local ConfirmBox = require("ui/widget/confirmbox")
+
+    -- Self-hosted manifest: content decides, not the version number. While
+    -- the repo is private every build carries the same PLUGIN_VERSION, so a
+    -- version comparison would say "up to date" for a file that changed
+    -- minutes ago -- which is exactly the case this whole path exists for.
+    if info.manifest then
+        local installed = T(_("v%1"), PLUGIN_VERSION)
+        local offered = T(_("v%1"), info.version)
+        if info.build then offered = offered .. T(_(" build %1"), info.build) end
+
+        -- Nothing differs by checksum. That's a real "up to date" only when
+        -- the checksums could actually be computed; if they couldn't, fall
+        -- back to the version number, which is the only signal left.
+        if #info.changed == 0
+                and not (info.unverifiable and isNewerVersion(info.version, PLUGIN_VERSION)) then
+            UIManager:show(InfoMessage:new{
+                text = info.unverifiable
+                    and T(_("No newer version offered (%1). This device couldn't checksum its own files, so a same-version rebuild can't be detected."), offered)
+                    or T(_("You're up to date (%1)."), offered),
+            })
+            return
+        end
+
+        local msg
+        if isNewerVersion(info.version, PLUGIN_VERSION) then
+            msg = T(_("%1 is available (you have %2)."), offered, installed)
+        else
+            msg = T(_("A different build of %1 is available (you have %2)."), offered, installed)
+        end
+        if #info.changed > 0 then
+            msg = msg .. "\n\n" .. T(_("Changed: %1"), table.concat(info.changed, ", "))
+        end
+        msg = msg .. "\n\n" .. T(_("From %1"), info.base)
+        UIManager:show(ConfirmBox:new{
+            text = msg,
+            ok_text = _("Install"),
+            ok_callback = function()
+                local Trapper2 = require("ui/trapper")
+                Trapper2:wrap(function() self:applyUpdate(info) end)
+            end,
+        })
         return
     end
 
@@ -4863,7 +5145,6 @@ function Shelfmark:checkForUpdate()
         return
     end
 
-    local ConfirmBox = require("ui/widget/confirmbox")
     local notes = truncate((info.body or ""):gsub("\r\n", "\n"), 500)
     local msg = T(_("%1 is available (you have v%2).\n\n%3"), tostring(info.name or remote_version), PLUGIN_VERSION, notes)
     UIManager:show(ConfirmBox:new{
@@ -4876,10 +5157,11 @@ function Shelfmark:checkForUpdate()
     })
 end
 
-function Shelfmark:applyUpdate(tag)
+function Shelfmark:applyUpdate(target)
     local Trapper = require("ui/trapper")
+    local socks5_proxy = self.socks5_proxy
     local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
-        return doApplyUpdate(tag)
+        return doApplyUpdate(target, socks5_proxy)
     end, _("Downloading update..."))
 
     if not completed then return end
@@ -5357,6 +5639,14 @@ function Shelfmark:addToMainMenu(menu_items)
                         text = _("Match suggestions (AI)"),
                         keep_menu_open = true,
                         callback = function() self:editAiSettings() end,
+                    },
+                    {
+                        text_func = function()
+                            return T(_("Update source: %1"),
+                                (self.update_url and self.update_url ~= "") and _("self-hosted") or _("GitHub"))
+                        end,
+                        keep_menu_open = true,
+                        callback = function() self:editUpdateSettings() end,
                     },
                     {
                         text_func = function()
