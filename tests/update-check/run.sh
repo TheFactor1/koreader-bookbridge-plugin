@@ -4,10 +4,23 @@
 # install is never touched -- everything happens in /tmp on the device.
 #
 #   bash tests/update-check/run.sh [ssh-alias] [base-url]
-# defaults: kindle  http://100.90.18.11:8092
+#
+# With no base-url, it asks the device which update source it is configured
+# with. That is deliberate: no server address is hardcoded here, because this
+# repo is meant to go public eventually and a hardcoded Tailscale address had
+# to be scrubbed out of this history once already. A tailnet address is
+# useless to anyone else, but it does not belong in a public repo.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
-DEV=${1:-kindle}; BASE=${2:-http://100.90.18.11:8092}
+DEV=${1:-kindle}; BASE=${2:-}
+if [ -z "$BASE" ]; then
+  BASE=$(ssh "$DEV" "grep -o '\[\"update_url\"\] = \"[^\"]*\"' /mnt/us/koreader/settings/shelfmark.lua" 2>/dev/null \
+    | sed 's/.*= "//; s/"$//') || true
+fi
+if [ -z "$BASE" ]; then
+  echo "No update source. Pass one as the 2nd argument, or set \"Update source\" on $DEV." >&2
+  exit 2
+fi
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 bash "$HERE/build-harness.sh" "$REPO/shelfmark.koplugin/main.lua" "$TMP/harness.lua"
 scp -q "$TMP/harness.lua" "$DEV:/tmp/shelfmark-update-test.lua"
