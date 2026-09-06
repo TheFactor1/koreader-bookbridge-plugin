@@ -2402,10 +2402,19 @@ local function doCheckManifest(update_url, socks5_proxy)
 
     local plugin_dir = getPluginDir()
     local changed, unverifiable = {}, false
+    -- Rebuilt as plain strings/numbers rather than handing back the decoded
+    -- JSON object as-is. This table is returned across a Trapper subprocess
+    -- boundary, and that pipe serializes with LuaJIT's string.buffer, which
+    -- refuses functions, coroutines and userdata -- so anything a JSON
+    -- decoder might hang off a table (sentinels, metatables) would turn a
+    -- routine update check into a failure at the worst moment. Copying the
+    -- two fields actually used removes that whole class of risk.
+    local files = {}
     for idx = 1, #UPDATE_FILES do
         local fname = UPDATE_FILES[idx]
         local entry = manifest.files[fname]
         if type(entry) == "table" and type(entry.sha256) == "string" then
+            files[fname] = { sha256 = entry.sha256:lower(), size = tonumber(entry.size) }
             local local_digest = sha256OfFile(plugin_dir .. "/" .. fname)
             if not local_digest then
                 unverifiable = true
@@ -2420,7 +2429,7 @@ local function doCheckManifest(update_url, socks5_proxy)
         base = base,
         version = tostring(manifest.version or "?"),
         build = manifest.build and tostring(manifest.build) or nil,
-        files = manifest.files,
+        files = files,
         changed = changed,
         -- Couldn't hash locally (no sha2 library): fall back to the version
         -- number, the only other signal available.

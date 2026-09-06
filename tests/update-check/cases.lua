@@ -32,6 +32,22 @@ check(not info.unverifiable, "local files hashable (ffi/sha2 present)")
 check(#info.changed == 1 and info.changed[1] == "main.lua",
   "detects the stale file", "changed={" .. table.concat(info.changed, ",") .. "}")
 
+-- The check runs in a Trapper subprocess and its result comes back through a
+-- pipe serialized with LuaJIT's string.buffer, which refuses functions and
+-- userdata. If this ever fails, the menu breaks at the moment of use.
+local buf_ok, buf = pcall(require, "string.buffer")
+if buf_ok then
+  local enc_ok, encoded = pcall(buf.encode, info)
+  check(enc_ok, "result survives subprocess serialization", tostring(encoded):sub(1, 60))
+  if enc_ok then
+    local dec_ok, decoded = pcall(buf.decode, encoded)
+    check(dec_ok and decoded.files["main.lua"].sha256 == info.files["main.lua"].sha256
+      and #decoded.changed == #info.changed, "round-trips with checksums intact")
+  end
+else
+  check(false, "string.buffer available for the serialization check", tostring(buf))
+end
+
 -- 2. A stale/incorrect manifest must be refused, not installed. This is the
 --    guard that makes "forgot to run make-manifest.sh" a safe failure.
 local bad = { manifest = true, base = info.base, version = info.version, files = {
