@@ -6,7 +6,7 @@
 #
 #   bash tests/run-all.sh                    # exit 0 = everything green
 #   bash tests/run-all.sh --update-baseline  # also rewrite baseline.txt
-#   bash tests/run-all.sh --no-device        # skip the on-Kindle suite, loudly
+#   bash tests/run-all.sh --no-device        # skip the on-Kindle and live-sync suites, loudly
 #
 # The update-check suite needs KOReader's own luajit. With a local KOReader
 # Linux install present it runs there; otherwise ON THE KINDLE over ssh. If
@@ -95,6 +95,21 @@ if [ -n "$counts" ]; then
       echo "$counts"; } > "$BASE.tmp" && mv "$BASE.tmp" "$BASE"
     echo "  baseline.txt rewritten"
   fi
+fi
+
+# Live sync: the real plugin inside a real KOReader (Linux build) against a
+# throwaway CWA -- the only suite that reaches the upload and post-upload
+# registration path. Slow (~1 min), needs docker + a local KOReader + the
+# stack's compose file, and it restarts the local KOReader. exit 3 = its
+# prerequisites are missing, which is SKIPPED here, not FAIL.
+section "live sync (real KOReader + sandbox CWA; reaches the upload path)"
+if [ $NODEV -eq 1 ]; then
+  echo "SKIPPED  --no-device"; skipped="${skipped:+$skipped, }live-sync (by request)"
+else
+  out=$(bash tests/live-sync/run.sh 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') assertions"
+  elif [ $rc -eq 3 ]; then echo "$out" | grep '^SKIP' | sed 's/^SKIP /SKIPPED  /'; skipped="${skipped:+$skipped, }live-sync (prerequisites missing)"
+  else echo "$out" | grep -E '^FAIL|^=== LIVE'; echo "FAIL"; fail=1; fi
 fi
 
 printf '\n'
