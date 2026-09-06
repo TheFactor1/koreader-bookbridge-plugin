@@ -4576,6 +4576,20 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         local still_pending = uploaded
         for attempt = 1, 3 do
             ffiUtil.sleep(attempt == 1 and 4 or 5)
+            -- Forget everything the per-run caches learned about CWA before
+            -- re-checking. Those caches (searchCwa, getBookAjax) exist on the
+            -- assumption that CWA doesn't change during a run -- and the
+            -- upload loop above just changed it. Without this, every query
+            -- the re-check derives is one the first pass already asked, so
+            -- it answers from cache, makes no request at all, never sees the
+            -- book CWA has since imported, and every upload is reported as
+            -- "CWA hadn't imported it yet" no matter how long the wait.
+            -- Found live on KOReader Linux against a sandbox CWA: both
+            -- uploads accepted, both present in CWA, registry still empty,
+            -- not one HTTP request after the second upload. Invisible to the
+            -- dry-run suite, where uploads can never happen. Reset per
+            -- attempt, not once: attempt 2 has to see what attempt 1 didn't.
+            search_cache, book_ajax_cache = {}, {}
             local pending_after = {}
             for _idx, path in ipairs(still_pending) do
                 checkUntrackedPath(path, false)
