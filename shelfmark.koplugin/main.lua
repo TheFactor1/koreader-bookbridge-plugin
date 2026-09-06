@@ -5235,14 +5235,28 @@ function Shelfmark:reviewUnmatched(list, index)
             string.format("%.0f%%", (suggestion.confidence or 0) * 100),
             suggestion.reason or ""),
         ok_text = _("Yes"),
+        -- Wrapped, like every other entry into a forking call. A ConfirmBox
+        -- callback fires from the UI loop, NOT from the coroutine that showed
+        -- the box -- that one has long since returned -- so
+        -- applyConfirmedMatch's Trapper:dismissableRunInSubprocess had nothing
+        -- to yield to and blocked the UI outright until it finished. Same
+        -- defect the sync menu entry had, just with a freeze instead of a
+        -- missing progress bar as the symptom.
+        --
+        -- reviewUnmatched is called directly rather than through nextBook()
+        -- because we are already inside a wrap by then: nextBook exists for
+        -- the callbacks below, which are still reached unwrapped from the UI
+        -- loop and so have to open a coroutine of their own.
         ok_callback = function()
-            local applied = self_ref:applyConfirmedMatch(item.path, suggestion.uuid, suggestion.title)
-            UIManager:show(InfoMessage:new{
-                text = applied and T(_("Registered \"%1\"."), suggestion.title or fname)
-                    or _("Couldn't download CWA's copy -- left unregistered."),
-                timeout = 2,
-            })
-            nextBook()
+            Trapper:wrap(function()
+                local applied = self_ref:applyConfirmedMatch(item.path, suggestion.uuid, suggestion.title)
+                UIManager:show(InfoMessage:new{
+                    text = applied and T(_("Registered \"%1\"."), suggestion.title or fname)
+                        or _("Couldn't download CWA's copy -- left unregistered."),
+                    timeout = 2,
+                })
+                self_ref:reviewUnmatched(list, index + 1)
+            end)
         end,
         cancel_text = _("No"),
         cancel_callback = nextBook,
@@ -6537,11 +6551,23 @@ function Shelfmark:browseReleases(book, manual_query, caller_menu)
 
     if aa_err_code == "MIRROR_DOWN" then
         local ConfirmBox = require("ui/widget/confirmbox")
+        -- Hoisted here rather than required inside each callback below:
+        -- both need it, and browseReleases has no Trapper of its own (it
+        -- relies on already running inside its caller's wrap).
+        local Trapper = require("ui/trapper")
         UIManager:show(ConfirmBox:new{
             text = _("Anna's Archive's usual address seems to be down. Look for a working mirror, or skip it and search other sources?"),
             ok_text = _("Find a working mirror"),
             cancel_text = _("Skip, search other sources"),
+            -- Both callbacks wrapped for the reason given on the AI-review
+            -- ConfirmBox above: they fire from the UI loop, not from the
+            -- coroutine that showed this box, and every branch out of here
+            -- forks -- annasMirrorRefresh directly, browseReleases through
+            -- its own annasSearch, browseReleasesContinue through its
+            -- Prowlarr fallback. Unwrapped, picking either button froze the
+            -- UI for the length of a network round-trip.
             ok_callback = function()
+              Trapper:wrap(function()
                 local result = self:annasMirrorRefresh()
                 if result and result.switched then
                     UIManager:show(InfoMessage:new{
@@ -6560,9 +6586,12 @@ function Shelfmark:browseReleases(book, manual_query, caller_menu)
                         text = _("That mirror looks fine now — the earlier failure may have been temporary. Try your search again."),
                     })
                 end
+              end)
             end,
             cancel_callback = function()
-                self:browseReleasesContinue(book, manual_query, nil)
+                Trapper:wrap(function()
+                    self:browseReleasesContinue(book, manual_query, nil)
+                end)
             end,
         })
         return
@@ -6890,12 +6919,21 @@ local function confirmAndLogBookOnHardcover(self, title, author, status_id, stat
     UIManager:show(ConfirmBox:new{
         text = T(_("Found %1 on Hardcover. Mark as %2?"), desc, status_label),
         ok_text = _("Mark as ") .. status_label,
+        -- Wrapped even though this function's own body already runs inside a
+        -- coroutine: the note above ("both call sites ensure this") holds for
+        -- the body, not for this callback. A ConfirmBox callback fires from
+        -- the UI loop later, by which point that coroutine has returned, so
+        -- hardcoverSetStatus's fork had nothing to yield to and froze the UI
+        -- for the length of the write.
         ok_callback = function()
-            local ok, set_err = self:hardcoverSetStatus(id, status_id)
-            UIManager:show(InfoMessage:new{
-                text = ok and T(_("Marked as %1 on Hardcover."), status_label) or (set_err or _("Failed to update Hardcover.")),
-                timeout = ok and 2 or nil,
-            })
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
+                local ok, set_err = self:hardcoverSetStatus(id, status_id)
+                UIManager:show(InfoMessage:new{
+                    text = ok and T(_("Marked as %1 on Hardcover."), status_label) or (set_err or _("Failed to update Hardcover.")),
+                    timeout = ok and 2 or nil,
+                })
+            end)
         end,
     })
 end
@@ -6912,12 +6950,17 @@ local function confirmAndFollowAuthorOnHardcover(self, author_name)
     UIManager:show(ConfirmBox:new{
         text = T(_("Found \"%1\" on Hardcover. Follow this author?"), found_name),
         ok_text = _("Follow"),
+        -- Wrapped for the reason given on confirmAndLogBookOnHardcover's own
+        -- ok_callback above.
         ok_callback = function()
-            local ok, follow_err = self:hardcoverFollowAuthor(id)
-            UIManager:show(InfoMessage:new{
-                text = ok and T(_("Now following %1 on Hardcover."), found_name) or (follow_err or _("Failed to follow.")),
-                timeout = ok and 2 or nil,
-            })
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
+                local ok, follow_err = self:hardcoverFollowAuthor(id)
+                UIManager:show(InfoMessage:new{
+                    text = ok and T(_("Now following %1 on Hardcover."), found_name) or (follow_err or _("Failed to follow.")),
+                    timeout = ok and 2 or nil,
+                })
+            end)
         end,
     })
 end
