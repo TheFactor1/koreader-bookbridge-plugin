@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "version": "0.3.0",
-  "build": "f368c27+dirty",
-  "generated": "2026-09-06T14:13:20-04:00",
+  "build": "5b0d2a3",
+  "generated": "2026-09-06T14:15:14-04:00",
   "files": {
     "main.lua": { "sha256": "4764ed3e2d1555283c33ff949509a7d9b7104f3f3b82c5c542e970d9479f54fc", "size": 362452 },
     "_meta.lua": { "sha256": "c6256e175ade4239f6299a67538a2a0c7528eb893ceab2cb033ab3e5dca6eb8e", "size": 196 }
