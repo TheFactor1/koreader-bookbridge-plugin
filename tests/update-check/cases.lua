@@ -12,6 +12,20 @@ end
 local info, code, err = doCheckManifest(BASE, nil)
 check(info ~= nil, "manifest fetched", err or ("HTTP " .. tostring(code)))
 if not info then print("=== " .. fails .. " failure(s)") os.exit(1) end
+
+-- Read-only mode: report exactly what the menu would say for this plugin
+-- directory, and change nothing. Safe to point at the live install.
+if os.getenv("CHECK_ONLY") then
+  print(("       dir      %s"):format(DIR))
+  print(("       server   v%s build %s"):format(tostring(info.version), tostring(info.build)))
+  if #info.changed == 0 then
+    print(("       menu     \"You're up to date (v%s build %s).\""):format(tostring(info.version), tostring(info.build)))
+  else
+    print(("       menu     \"A different build of v%s build %s is available.  Changed: %s\"")
+      :format(tostring(info.version), tostring(info.build), table.concat(info.changed, ", ")))
+  end
+  os.exit(0)
+end
 check(info.manifest == true and info.version ~= nil, "manifest parsed",
   "version=" .. tostring(info.version) .. " build=" .. tostring(info.build))
 check(not info.unverifiable, "local files hashable (ffi/sha2 present)")

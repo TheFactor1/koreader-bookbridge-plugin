@@ -1248,7 +1248,21 @@ local function doHttpDownloadToFile(url, save_path, log_prefix, block_timeout, t
         debugLog(log_prefix .. " <- timed out: " .. tostring(code))
         return nil, nil, _("Download timed out.")
     end
-    if type(code) ~= "number" or code >= 400 then
+    -- luasocket signals a connection-level failure as a NON-NUMERIC second
+    -- return ("connection refused", "host unreachable"), not as a status,
+    -- and the timeout sentinels above are the only other non-numeric
+    -- values. Folding the rest into the HTTP branch produced "Download
+    -- failed (HTTP connection refused)", which names the wrong thing. It's
+    -- the same couldn't-reach case the pcall branch above already handles,
+    -- so it returns that same message -- which is also what lets
+    -- doAnnasFileDownload's remap relabel it for Anna's mirror instead of
+    -- leaking a raw socket string to the reader.
+    if type(code) ~= "number" then
+        os.remove(save_path)
+        debugLog(log_prefix .. " <- request failed: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the file server.")
+    end
+    if code >= 400 then
         os.remove(save_path)
         debugLog(log_prefix .. " <- HTTP " .. tostring(code) .. ", removed partial file")
         return nil, code, T(_("Download failed (HTTP %1)."), tostring(code))
