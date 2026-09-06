@@ -8,9 +8,10 @@
 #   bash tests/run-all.sh --update-baseline  # also rewrite baseline.txt
 #   bash tests/run-all.sh --no-device        # skip the on-Kindle suite, loudly
 #
-# The update-check suite runs ON THE KINDLE over ssh (see its own header). If
-# the device is asleep or off Wi-Fi it cannot run at all, and that is reported
-# as SKIPPED, not FAIL -- a suite that goes red every time the reader sleeps
+# The update-check suite needs KOReader's own luajit. With a local KOReader
+# Linux install present it runs there; otherwise ON THE KINDLE over ssh. If
+# neither is available it cannot run at all, and that is reported as SKIPPED,
+# not FAIL -- a suite that goes red every time the reader sleeps
 # is a suite people learn to ignore. SKIPPED is still not green: the default
 # exits non-zero so a partial pass is never mistaken for a pass. --no-device
 # makes that skip deliberate for a local-only iteration loop, and says so in
@@ -52,14 +53,21 @@ python3 tests/check-manifest.py || fail=1
 section "Trapper audits"
 python3 tests/audit-trapper.py || fail=1
 
-section "update-check suite (runs on the Kindle)"
+# Prefers a local KOReader Linux install (identical frontend and luajit, no
+# device needed), then the Kindle over ssh, then SKIPPED.
+section "update-check suite (needs KOReader's luajit: local install or the Kindle)"
+KLOCAL=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | sort -V | tail -1)}
 if [ $NODEV -eq 1 ]; then
   echo "SKIPPED  --no-device"; skipped="update-check (by request)"
+elif [ -x "${KLOCAL:-/nonexistent}/luajit" ]; then
+  out=$(KOREADER_DIR="$KLOCAL" bash tests/update-check/run.sh local 2>&1)
+  if echo "$out" | grep -q "=== 0 failure(s)"; then echo "PASS  on local KOReader ($KLOCAL)"
+  else echo "$out" | grep -E "^FAIL|failure\(s\)|No update source|No local KOReader"; echo "FAIL"; fail=1; fi
 elif ! timeout 8 ssh -o ConnectTimeout=5 -o BatchMode=yes "$DEV" true >/dev/null 2>&1; then
-  echo "SKIPPED  $DEV unreachable over ssh -- wake it, or pass --no-device"; skipped="update-check (device unreachable)"
+  echo "SKIPPED  no local KOReader and $DEV unreachable over ssh -- wake it, or pass --no-device"; skipped="update-check (device unreachable)"
 else
   out=$(bash tests/update-check/run.sh "$DEV" 2>&1)
-  if echo "$out" | grep -q "=== 0 failure(s)"; then echo "PASS"
+  if echo "$out" | grep -q "=== 0 failure(s)"; then echo "PASS  on $DEV"
   else echo "$out" | grep -E "^FAIL|failure\(s\)|No update source"; echo "FAIL"; fail=1; fi
 fi
 

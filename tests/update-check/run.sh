@@ -1,21 +1,29 @@
 #!/bin/bash
-# End-to-end test of "Check for updates" against a real update server, run on
-# a real Kindle using KOReader's own LuaJIT/sockets/SHA-256. The live plugin
-# install is never touched -- everything happens in /tmp on the device.
+# End-to-end test of "Check for updates" against a real update server, run
+# with KOReader's own LuaJIT/sockets/SHA-256 -- on a real Kindle over ssh, or
+# on a local KOReader Linux install, which runs the identical frontend. The
+# plugin install under test is never touched: everything happens in /tmp.
 #
-#   bash tests/update-check/run.sh [ssh-alias] [base-url]
+#   bash tests/update-check/run.sh [ssh-alias|local] [base-url]
 #
-# With no base-url, it asks the device which update source it is configured
-# with. That is deliberate: no server address is hardcoded here, because this
+# `local` uses $KOREADER_DIR, or the newest ~/.local/opt/koreader-*/lib/koreader
+# it can find, and seeds the scratch copy from this checkout's own
+# shelfmark.koplugin. With no base-url, it asks the target which update source
+# it is configured with -- the device's settings file over ssh, or the local
+# install's ~/.config/koreader/settings/shelfmark.lua. That is deliberate: no server address is hardcoded here, because this
 # repo is meant to go public eventually and a hardcoded Tailscale address had
 # to be scrubbed out of this history once already. A tailnet address is
 # useless to anyone else, but it does not belong in a public repo.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 DEV=${1:-kindle}; BASE=${2:-}
-if [ -z "$BASE" ]; then
-  BASE=$(ssh "$DEV" "grep -o '\[\"update_url\"\] = \"[^\"]*\"' /mnt/us/koreader/settings/shelfmark.lua" 2>/dev/null \
-    | sed 's/.*= "//; s/"$//') || true
+SETTINGS_GREP="grep -o '\[\"update_url\"\] = \"[^\"]*\"'"
+if [ "$DEV" = local ]; then
+  KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | sort -V | tail -1)}
+  [ -x "$KDIR/luajit" ] || { echo "No local KOReader: set KOREADER_DIR to a dir containing luajit." >&2; exit 2; }
+  [ -n "$BASE" ] || BASE=$(eval "$SETTINGS_GREP" ~/.config/koreader/settings/shelfmark.lua 2>/dev/null | sed 's/.*= "//; s/"$//') || true
+else
+  [ -n "$BASE" ] || BASE=$(ssh "$DEV" "$SETTINGS_GREP /mnt/us/koreader/settings/shelfmark.lua" 2>/dev/null | sed 's/.*= "//; s/"$//') || true
 fi
 if [ -z "$BASE" ]; then
   echo "No update source. Pass one as the 2nd argument, or set \"Update source\" on $DEV." >&2
@@ -23,6 +31,16 @@ if [ -z "$BASE" ]; then
 fi
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 bash "$HERE/build-harness.sh" "$REPO/shelfmark.koplugin/main.lua" "$TMP/harness.lua"
+if [ "$DEV" = local ]; then
+  # Same seeding as the device path below, from this checkout instead of the
+  # device's install, and the same deliberately-stale marker.
+  SEED="$TMP/upd-test"; mkdir -p "$SEED"
+  cp "$REPO/shelfmark.koplugin/main.lua" "$REPO/shelfmark.koplugin/_meta.lua" "$SEED/"
+  printf '\n-- harness: deliberately-stale seed copy\n' >> "$SEED/main.lua"
+  DIR=$SEED; [ -n "${LIVE:-}" ] && DIR="$KDIR/plugins/shelfmark.koplugin"
+  (cd "$KDIR" && BASE="$BASE" PLUGIN_DIR="$DIR" ${VERBOSE:+VERBOSE=1} ${CHECK_ONLY:+CHECK_ONLY=1} ./luajit "$TMP/harness.lua")
+  exit $?
+fi
 scp -q "$TMP/harness.lua" "$DEV:/tmp/shelfmark-update-test.lua"
 # Seed the scratch plugin dir from what the device actually runs, then append
 # a comment so the copy is guaranteed to differ from the server. Seeding it
