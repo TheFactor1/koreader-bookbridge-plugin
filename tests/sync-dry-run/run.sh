@@ -54,7 +54,7 @@ for f in "$W"/scenario_*.files; do
   # every doCwaRequest, so this is the number to watch when changing anything
   # that batches, caches or skips requests. Reported, never asserted: it moves
   # legitimately whenever the library or the scenarios change.
-  printf '       %s\n' "$(grep -o 'requests=[0-9]*' "$W/$tag.err.txt" || echo requests=?)"
+  printf '       %s %s\n' "tag=$tag" "$(grep -o 'requests=[0-9]*' "$W/$tag.err.txt" || echo requests=?)"
 done
 if [ $# -ge 3 ]; then
   cp "$1" "$W/device.files"; cp "$2" "$W/device.json"

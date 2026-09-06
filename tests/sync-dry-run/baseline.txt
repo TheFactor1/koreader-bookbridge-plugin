@@ -1,0 +1,25 @@
+# CWA request count per dry-run scenario, warm cache -- the number to watch
+# when changing anything in doSyncLibrary that batches, caches or skips
+# requests. A rise is a WARNING, not a failure: the scenarios are generated
+# from the live Calibre library, so every added book legitimately adds ~2
+# requests to each full-library scenario (one search, one /ajax/book), and a
+# new SERIES book adds more to the series scenarios (extra candidates for
+# series relaxation, each costing a series-index lookup). A rise with no
+# library change is the one worth explaining in a commit message.
+# Regenerate with:  bash tests/run-all.sh --update-baseline
+#
+# History: 65 books at build 501b324 read author_title=133 series_tag=41
+# book_roman_of_saga=87 negative=70. Adding one series book (All Systems Red,
+# 2026-09-06 20:16) with main.lua byte-identical moved them to the values
+# below -- the reference case for "the library grew, the code did not".
+#
+# Recorded 2026-09-06 at build 501b324, 66 books in the library.
+author_title 135
+bare_title 135
+book_roman_of_saga 98
+lastfirst_title 135
+negative 71
+paren_book_n 11
+series_tag 45
+title_author 135
+title_paren_author_zlib 135
