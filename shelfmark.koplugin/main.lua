@@ -5772,7 +5772,21 @@ function Shelfmark:addToMainMenu(menu_items)
             {
                 text = _("Sync library with CWA"),
                 keep_menu_open = true,
-                callback = function() self:syncLibrary() end,
+                -- Trapper:wrap, like every other network entry point in this
+                -- menu. This one was missing it, which meant syncLibrary ran
+                -- on the main thread instead of in a coroutine, and
+                -- Trapper:dismissableRunInSubprocess had nothing to yield to:
+                -- the whole sync blocked the UI loop rather than running
+                -- alongside it. Invisible while the sync only ever showed a
+                -- static message -- a blocked loop still paints that once --
+                -- but it meant the progress bar's poll was never serviced and
+                -- its dialog never repainted until the run was already over,
+                -- i.e. no bar at all. Cancelling was equally dead for the
+                -- same reason.
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function() self:syncLibrary() end)
+                end,
             },
             {
                 -- Only appears when a sync actually left something
