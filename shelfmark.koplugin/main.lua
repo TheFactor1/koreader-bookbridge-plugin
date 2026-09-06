@@ -501,7 +501,8 @@ end
 -- (no UI, and no confirmation logger output actually reaches anywhere the
 -- user can read without ADB set up), so writing directly to a file both
 -- of us can inspect is the only debug channel actually available here.
--- Appends across sessions; delete the file to clear it.
+-- Appends across sessions; rotates at DEBUG_LOG_MAX_BYTES (see below),
+-- or clear it by hand from the "View debug log" menu.
 -- Bumped by hand on any release tagged in the repo -- there's no build
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
@@ -520,11 +521,32 @@ local function getPluginDir()
 end
 
 local DEBUG_LOG_PATH = DataStorage:getSettingsDir() .. "/shelfmark-debug.log"
+local DEBUG_LOG_PREV_PATH = DEBUG_LOG_PATH .. ".1"
+-- One rotation rather than unbounded growth. This file is append-only across
+-- every session and nothing ever truncated it except the manual "Clear log"
+-- button in showDebugLog, so on a device left running a while it just grows
+-- forever -- wasted flash on a Kindle, where flash writes aren't free
+-- power-wise either. At the cap the current file becomes .1 (replacing any
+-- previous .1) and logging restarts, so the worst case on disk is 2x the cap
+-- and the most recent DEBUG_LOG_MAX_BYTES of history is always intact --
+-- unlike a plain truncate, which would throw the history away at exactly the
+-- moment something interesting had just filled it.
+local DEBUG_LOG_MAX_BYTES = 256 * 1024
 local function debugLog(msg)
     local ok, f = pcall(io.open, DEBUG_LOG_PATH, "a")
-    if ok and f then
-        f:write(os.date("%Y-%m-%d %H:%M:%S") .. "  " .. tostring(msg) .. "\n")
-        f:close()
+    if not (ok and f) then return end
+    f:write(os.date("%Y-%m-%d %H:%M:%S") .. "  " .. tostring(msg) .. "\n")
+    -- Size straight off the open handle rather than a separate
+    -- lfs.attributes() stat: this runs on all ~76 call sites, some of them
+    -- inside forked subprocesses, so it's worth not paying for a second
+    -- syscall per line just to find out we're nowhere near the cap.
+    local ok_size, size = pcall(f.seek, f, "end")
+    f:close()
+    if ok_size and size and size > DEBUG_LOG_MAX_BYTES then
+        -- pcall'd, and the return value deliberately ignored: a failed
+        -- rotation (read-only mount, .1 held open elsewhere) must not take
+        -- down whatever real operation was only trying to log a line.
+        pcall(os.rename, DEBUG_LOG_PATH, DEBUG_LOG_PREV_PATH)
     end
 end
 
@@ -3396,9 +3418,42 @@ end
 -- an-unreachable-CWA rule, the post-upload registration wait) lives here and
 -- has the regression tests behind it. A parallel implementation would be a
 -- second place for all of that to drift.
-local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, only_path)
+local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, only_path, progress_path)
     local report = {}
     local function addLine(s) table.insert(report, s) end
+
+    -- Progress is published by writing a percentage to a file the PARENT
+    -- polls, which is the only channel available: this whole function runs
+    -- in a forked subprocess, so it can't touch the parent's widgets, and
+    -- its return value doesn't arrive until it's already finished. Exactly
+    -- the trick the Anna's Archive download path uses to drive its progress
+    -- bar (see the poll note there) -- the parent watches a file the child
+    -- keeps updating.
+    --
+    -- A percentage rather than done/total counts because the total isn't
+    -- knowable up front: how many books need uploading is only decided by
+    -- the untracked pass, halfway through the run. Percent lets each phase
+    -- own a slice of the bar and fill it at whatever granularity it has.
+    -- nil progress_path (the regression harness, and any caller that just
+    -- doesn't want progress) makes every one of these a no-op.
+    local function reportProgress(pct)
+        if not progress_path then return end
+        local f = io.open(progress_path, "w")
+        if not f then return end
+        f:write(tostring(math.floor(pct)), "\n")
+        f:close()
+    end
+    -- Phase slices, in the order the run executes them. Tracked checks get
+    -- the largest share because on an established library that IS the sync
+    -- -- most files are already tracked and the untracked pass has nothing
+    -- to do.
+    local PCT_TRACKED_START, PCT_TRACKED_END = 0, 45
+    local PCT_UNTRACKED_START, PCT_UNTRACKED_END = 45, 85
+    local PCT_UPLOAD_START, PCT_UPLOAD_END = 85, 100
+    local function phasePct(from, to, done, total)
+        if not total or total <= 0 then return to end
+        return from + (to - from) * (done / total)
+    end
     -- Paths this run actually overwrote, handed back to the caller so it
     -- can drop KOReader's cached metadata for them -- see
     -- invalidateBookInfoCache on why that can't happen here (this whole
@@ -3505,9 +3560,12 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     local catalog = fetchCwaCatalog(cwa_url, cwa_username, cwa_password, socks5_proxy)
     local skipped_unchanged = 0
 
+    local tracked_done = 0
     for uuid, entry in pairs(registry) do
         if type(entry) == "table" and entry.path
                 and (not only_path or entry.path == only_path) then
+            tracked_done = tracked_done + 1
+            reportProgress(phasePct(PCT_TRACKED_START, PCT_TRACKED_END, tracked_done, tracked_count))
             local cat = catalog and catalog[uuid]
             if cat and cat.updated and entry.opds_updated == cat.updated then
                 -- Unchanged since the last sync saw it: no request needed.
@@ -3597,30 +3655,81 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         return series_map_cache
     end
 
-    -- series_index comes from /ajax/book (the one place it IS populated).
-    -- Memoized per uuid so a candidate appearing under several queries only
-    -- costs one request.
-    local series_index_cache = {}
-    local function getSeriesIndex(uuid)
-        if not uuid then return nil end
-        if series_index_cache[uuid] ~= nil then
-            local v = series_index_cache[uuid]
-            if v == false then return nil end
-            return v
+    -- One OPDS search per distinct query string per run, not per (file,
+    -- query) pair. The candidate ladder derives its queries from the
+    -- filename by progressive truncation, so files that share a prefix ask
+    -- CWA the exact same question: every volume of a series shortens through
+    -- the series name ("Wayward Pines - 01/02/03" all reach "Wayward
+    -- Pines"), and on a first sync of a fresh library -- the run where
+    -- nothing is tracked yet and every file walks its full ladder -- that
+    -- repetition is most of the traffic.
+    --
+    -- Strictly response-preserving: the same query returns the same body, so
+    -- every match decision is made on identical evidence, just without
+    -- re-asking. Same run-snapshot assumption as fetchCwaCatalog and
+    -- getBookAjax. Keyed by the raw query, and the failure case is cached as
+    -- false too -- a query that CWA couldn't answer is not worth retrying
+    -- once per file that happens to derive it.
+    local search_cache = {}
+    local function searchCwa(q)
+        local hit = search_cache[q]
+        if hit ~= nil then
+            if hit == false then return nil, 0 end
+            return hit, 200
         end
-        series_index_cache[uuid] = false
+        local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
+            "/opds/search/" .. socketurl.escape(q), socks5_proxy)
+        if resp_body and code == 200 then
+            search_cache[q] = resp_body
+            return resp_body, code
+        end
+        search_cache[q] = false
+        return resp_body, code
+    end
+
+    -- One memoized fetch of /ajax/book/<uuid> for the whole run, shared by
+    -- every caller that needs anything out of that response.
+    --
+    -- There used to be two independent readers of this exact URL: the
+    -- series_index lookup below, memoized in its own cache, and the
+    -- registration step further down (last_modified + main_format.epub),
+    -- memoized nowhere at all. A candidate that went through series
+    -- relaxation and then matched therefore fetched the same document
+    -- twice, and a uuid registered twice in one run fetched it twice again.
+    -- Same URL, same run, same immutable-for-this-run answer -- there was
+    -- never a reason for more than one request.
+    --
+    -- Caching across the run is safe for the same reason fetchCwaCatalog's
+    -- snapshot is: a sync already assumes CWA isn't being edited underneath
+    -- it, and every decision here is made against that one snapshot.
+    -- false is the negative cache (fetch failed / empty body) so a book that
+    -- doesn't answer isn't re-requested once per candidate query.
+    local book_ajax_cache = {}
+    local function getBookAjax(uuid)
+        if not uuid then return nil end
+        local hit = book_ajax_cache[uuid]
+        if hit ~= nil then
+            if hit == false then return nil end
+            return hit
+        end
+        book_ajax_cache[uuid] = false
         local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
             "/ajax/book/" .. uuid, socks5_proxy)
         if body and body ~= "" and code == 200 then
             local decode_ok, decoded = pcall(JSON.decode, body)
             local book = decode_ok and stripJsonNull(decoded)
-            local idx = book and tonumber(book.series_index)
-            if idx then
-                series_index_cache[uuid] = idx
-                return idx
+            if type(book) == "table" then
+                book_ajax_cache[uuid] = book
+                return book
             end
         end
         return nil
+    end
+
+    -- series_index comes from /ajax/book (the one place it IS populated).
+    local function getSeriesIndex(uuid)
+        local book = getBookAjax(uuid)
+        return book and tonumber(book.series_index) or nil
     end
 
     -- The whole "is this local file already in CWA?" check, as a function so
@@ -3968,8 +4077,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- make the subtitle-uniqueness test below think one book was
             -- several -- silently disabling the relaxation it guards.
             for _, q in ipairs(queries) do
-                local resp_body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
-                    "/opds/search/" .. socketurl.escape(q), socks5_proxy)
+                local resp_body, code = searchCwa(q)
                 if resp_body and code == 200 then
                     any_response = true
                     for _, e in ipairs(parseOpdsEntries(resp_body)) do
@@ -4300,14 +4408,12 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                     -- last_modified was being baselined off whatever CWA
                     -- said *right now*, not off anything the local file had
                     -- ever actually reflected.
-                    local book_body, book_code = doCwaRequest(cwa_url, cwa_username, cwa_password, "/ajax/book/" .. m.uuid, socks5_proxy)
-                    local last_modified, epub_path
-                    if book_body and book_code == 200 then
-                        local decode_ok, decoded = pcall(JSON.decode, book_body)
-                        local book = decode_ok and stripJsonNull(decoded)
-                        last_modified = book and book.last_modified
-                        epub_path = book and book.main_format and book.main_format.epub
-                    end
+                    -- getBookAjax, not a fresh request: series relaxation may
+                    -- already have fetched this exact uuid while deciding the
+                    -- match that got us here (see its note above).
+                    local book = getBookAjax(m.uuid)
+                    local last_modified = book and book.last_modified
+                    local epub_path = book and book.main_format and book.main_format.epub
                     if type(last_modified) == "string" and type(epub_path) == "string"
                             and doCwaFileDownload(cwa_url, cwa_username, cwa_password, epub_path, socks5_proxy, path) then
                         registry[m.uuid] = { path = path, title = m.title, last_modified = last_modified }
@@ -4399,8 +4505,10 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         -- call local '_' (a number value)" the first time this ran for
         -- real, thrown from the addLine(_(...)) calls below).
         for _idx, path in ipairs(unregistered) do
+            reportProgress(phasePct(PCT_UNTRACKED_START, PCT_UNTRACKED_END, _idx - 1, #unregistered))
             checkUntrackedPath(path, true)
         end
+        reportProgress(PCT_UNTRACKED_END)
         -- Cancelling this (a "dismissable" subprocess -- the user can
         -- back out mid-run) kills the child immediately
         -- (ffiutil.terminateSubProcess), and the only save was at the
@@ -4419,6 +4527,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             addLine(T(_("  couldn't log in to CWA to upload: %1"), tostring(login_err)))
         else
             for _idx, path in ipairs(to_upload) do -- see note above on why not "_"
+                reportProgress(phasePct(PCT_UPLOAD_START, PCT_UPLOAD_END, _idx - 1, #to_upload))
                 local fname = path:match("([^/]+)$") or path
                 -- Confirmed live: CWA's ingest watcher silently ignores an
                 -- uppercase .EPUB extension (no error, no log line at all)
@@ -4489,6 +4598,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
 
     saveSyncRegistry(registry)
     addLine(_("Done."))
+    reportProgress(100)
     return report, replaced_paths, unmatched
 end
 
@@ -4584,9 +4694,16 @@ function Shelfmark:apiRequest(method, path, body, progress_text, block_timeout, 
     local server_url, username, password, cookie, socks5_proxy =
         self.server_url, self.username, self.password, self.session_cookie, self.socks5_proxy
 
+    -- `== nil`, not `or`: false is a meaningful value to pass through here
+    -- (it selects Trapper's invisible trap widget -- run dismissably but
+    -- show nothing, as the download path already relies on), and
+    -- `progress_text or default` would quietly turn a deliberate false back
+    -- into the visible dialog. Only an omitted argument gets the default.
+    if progress_text == nil then progress_text = _("Talking to Shelfmark...") end
+
     local completed, resp, code, new_cookie, err = Trapper:dismissableRunInSubprocess(function()
         return doApiRequest(server_url, username, password, cookie, method, path, body, socks5_proxy, block_timeout, total_timeout)
-    end, progress_text or _("Talking to Shelfmark..."))
+    end, progress_text)
 
     if not completed then
         return nil, nil, _("Cancelled.")
@@ -4736,20 +4853,87 @@ function Shelfmark:annasFetchDownloadUrl(md5, progress_text)
     return dl_url, code, err
 end
 
+-- Runs doSyncLibrary in a Trapper subprocess with a live progress bar.
+--
+-- Shared by both sync entry points ("Sync library" and the per-book "Send to
+-- CWA") so the fork/poll/teardown plumbing exists once. Returns exactly what
+-- the subprocess returned, plus the completed flag, leaving each caller to
+-- do its own reporting.
+--
+-- The mechanism is the Anna's Archive download path's, for the same reason:
+-- the child can't reach the parent's widgets, so it writes a percentage to a
+-- file and the parent watches that file from out here. progress_text false
+-- (not nil) suppresses Trapper's own static info message -- otherwise it
+-- would sit on top of the progress bar saying the same thing less usefully.
+--
+-- Poll interval and the bar's own refresh_time_seconds are both 1s
+-- deliberately: this runs on e-ink, where every repaint costs real power, and
+-- the bar only actually redraws when the percentage it holds has changed.
+local function runSyncWithProgress(title, subtitle, sync_args)
+    local Trapper = require("ui/trapper")
+    local progress_path = DataStorage:getSettingsDir() .. "/shelfmark-sync-progress"
+    -- A killed run (cancelled, or a crash) leaves its last percentage behind;
+    -- clearing first means the new run's bar can't start at the old one's
+    -- high-water mark.
+    pcall(os.remove, progress_path)
+
+    local ProgressbarDialog = require("ui/widget/progressbardialog")
+    local progress_dialog = ProgressbarDialog:new{
+        title = title,
+        subtitle = subtitle,
+        progress_max = 100,
+        refresh_time_seconds = 1,
+    }
+    progress_dialog:show()
+
+    local stopped = false
+    local last_pct = -1
+    local function poll()
+        if stopped then return end
+        local f = io.open(progress_path, "r")
+        if f then
+            local pct = tonumber(f:read("*l"))
+            f:close()
+            -- Only report an actual change: reportProgress on an unchanged
+            -- value is a wasted e-ink refresh, and this polls once a second
+            -- through a sync that can run for minutes.
+            if pct and pct ~= last_pct then
+                last_pct = pct
+                progress_dialog:reportProgress(math.min(math.max(pct, 0), 100))
+            end
+        end
+        UIManager:scheduleIn(1, poll)
+    end
+    UIManager:scheduleIn(1, poll)
+
+    local cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, only_path =
+        sync_args[1], sync_args[2], sync_args[3], sync_args[4], sync_args[5], sync_args[6]
+    local completed, report, replaced_paths, unmatched = Trapper:dismissableRunInSubprocess(function()
+        return doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy,
+            download_dir, only_path, progress_path)
+    end, false)
+
+    stopped = true
+    UIManager:unschedule(poll)
+    progress_dialog:close()
+    pcall(os.remove, progress_path)
+
+    return completed, report, replaced_paths, unmatched
+end
+
 -- Manual trigger for doSyncLibrary above -- runs in a Trapper subprocess
 -- since it can involve several network round-trips in sequence (OPDS
 -- searches, a login, one or more uploads, then a check per tracked book),
 -- same reasoning as every other network entry point in this file.
 function Shelfmark:syncLibrary()
-    local Trapper = require("ui/trapper")
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
     local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
         or self:defaultDownloadDir()
 
-    local completed, report, replaced_paths, unmatched = Trapper:dismissableRunInSubprocess(function()
-        return doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir)
-    end, _("Syncing library with CWA..."))
+    local completed, report, replaced_paths, unmatched = runSyncWithProgress(
+        _("Syncing library with CWA..."), _("Checking books against CWA"),
+        { cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, nil })
 
     if not completed then return end
 
@@ -4841,15 +5025,14 @@ end
 -- refuses to upload at all if CWA can't be reached -- just without walking
 -- the rest of the library.
 function Shelfmark:sendBookToCwa(file)
-    local Trapper = require("ui/trapper")
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
     local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
         or self:defaultDownloadDir()
 
-    local completed, report, replaced_paths = Trapper:dismissableRunInSubprocess(function()
-        return doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, file)
-    end, _("Sending to CWA..."))
+    local completed, report, replaced_paths = runSyncWithProgress(
+        _("Sending to CWA..."), file:match("([^/]+)$") or file,
+        { cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, file })
 
     if not completed then return end
 
@@ -5722,12 +5905,21 @@ end
 
 function Shelfmark:showDebugLog()
     local TextViewer = require("ui/widget/textviewer")
-    local f = io.open(DEBUG_LOG_PATH, "r")
-    local content
-    if f then
-        content = f:read("*a")
-        f:close()
+    -- Reads the rotated .1 ahead of the live file (see debugLog's rotation
+    -- note) and concatenates: right after a rotation the live file holds
+    -- only a line or two, and a viewer that went nearly empty the moment the
+    -- log filled up would be useless at exactly the wrong time. Reading both
+    -- means the tail-trim below always has the real recent history to cut
+    -- from, whichever side of a rotation we happen to be on.
+    local parts = {}
+    for _, path in ipairs({ DEBUG_LOG_PREV_PATH, DEBUG_LOG_PATH }) do
+        local f = io.open(path, "r")
+        if f then
+            parts[#parts + 1] = f:read("*a")
+            f:close()
+        end
     end
+    local content = table.concat(parts)
     if not content or content == "" then
         content = _("No debug log yet -- try a search first.")
     else
@@ -5756,6 +5948,10 @@ function Shelfmark:showDebugLog()
                             ok_callback = function()
                                 local cf = io.open(DEBUG_LOG_PATH, "w")
                                 if cf then cf:close() end
+                                -- The rotated half too, or "clear" would
+                                -- leave up to DEBUG_LOG_MAX_BYTES on disk
+                                -- and the viewer would still show it.
+                                pcall(os.remove, DEBUG_LOG_PREV_PATH)
                                 UIManager:close(viewer)
                             end,
                         })
@@ -7392,7 +7588,23 @@ function Shelfmark:checkPendingRequestNotifications()
     local pending = loadPendingNotifyList()
     if next(pending) == nil then return end
 
-    local resp, code, err = self:apiRequest("GET", "/api/requests")
+    -- Explicit short timeouts, rather than apiRequest's 15s-block/45s-total
+    -- defaults. Those defaults are sized for a search the user is sitting
+    -- there waiting on; this call is unprompted background work nobody asked
+    -- for, and the common failure is exactly the slow one -- woken on a
+    -- Kindle with Wi-Fi still down or Tailscale not yet reconnected, where
+    -- the connect just hangs until it times out. At the defaults that parks
+    -- a forked subprocess on a dead socket for up to 45 seconds per wake,
+    -- keeping the CPU out of deep idle for no benefit: there is nothing to
+    -- salvage by waiting longer, since a failure here is silent and simply
+    -- retried on the next wake anyway.
+    -- progress_text false, not nil: nil takes apiRequest's default
+    -- "Talking to Shelfmark..." dialog, which on this path would flash a
+    -- popup -- and cost a full e-ink refresh -- on every single wake with a
+    -- request outstanding, for a check the user never asked for. false is
+    -- the invisible trap widget (same as the download path's own use of it),
+    -- so the check stays completely silent unless it actually has news.
+    local resp, code, err = self:apiRequest("GET", "/api/requests", nil, false, 8, 12)
     if err or code ~= 200 or not resp then return end
     local requests = resp.requests or resp
     if type(requests) ~= "table" then return end

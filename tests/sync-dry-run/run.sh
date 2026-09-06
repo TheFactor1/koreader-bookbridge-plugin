@@ -50,6 +50,11 @@ for f in "$W"/scenario_*.files; do
   tag=$(basename "$f" .files | sed 's/^scenario_//'); dir=$(dirname "$(head -1 "$f")")
   dryrun "$tag" "$(basename "$f")" "$dir" empty.json || FAIL=1
   python3 "$HERE/evaluate.py" "$W" "$tag" "$W/scenario_$tag.expected" || FAIL=1
+  # CWA request count for the final (warm-cache) pass -- the harness counts
+  # every doCwaRequest, so this is the number to watch when changing anything
+  # that batches, caches or skips requests. Reported, never asserted: it moves
+  # legitimately whenever the library or the scenarios change.
+  printf '       %s\n' "$(grep -o 'requests=[0-9]*' "$W/$tag.err.txt" || echo requests=?)"
 done
 if [ $# -ge 3 ]; then
   cp "$1" "$W/device.files"; cp "$2" "$W/device.json"
