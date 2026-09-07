@@ -8513,6 +8513,42 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             tag, px(d.x + 1, d.y + math.floor(d.h / 2)), px(d.x + math.floor(d.w / 2), d.y + 6),
             px(math.max(0, d.x - 8), d.y + math.floor(d.h / 2)), d.x, d.y, d.w, d.h))
     end
+    -- The Kindle showed the buffer intact for 4 s with the dialog on top of
+    -- the stack and still nothing on the panel: so log every refresh that
+    -- actually reaches the framebuffer driver for the next 6 s -- its mode,
+    -- its region, and whether that region covers the dialog at all.
+    do
+        local ok_s, Screen = pcall(function() return require("device").screen end)
+        local mt = ok_s and Screen and getmetatable(Screen)
+        local cls = mt and type(mt.__index) == "table" and mt.__index
+        if cls and rawget(Screen, "_hc_refresh_probe") == nil then
+            local wrapped = {}
+            for _unused, name in ipairs({ "refreshPartialImp", "refreshFlashPartialImp", "refreshUIImp",
+                                          "refreshFlashUIImp", "refreshFullImp", "refreshFastImp" }) do
+                local orig = rawget(cls, name) or cls[name]
+                if type(orig) == "function" and rawget(Screen, name) == nil then
+                    rawset(Screen, name, function(scr, x, y, w, h, ...)
+                        local d = dialog.movable and dialog.movable.dimen
+                        local covers = "?"
+                        if d and x and w then
+                            covers = (x <= d.x and y <= d.y and x + w >= d.x + d.w and y + h >= d.y + d.h) and "covers"
+                                or ((x < d.x + d.w and x + w > d.x and y < d.y + d.h and y + h > d.y) and "overlaps" or "misses")
+                        elseif not x then covers = "fullscreen" end
+                        debugLog(string.format("[hc] refresh %s %s,%s %sx%s -> %s", name:gsub("Imp$", ""),
+                            tostring(x), tostring(y), tostring(w), tostring(h), covers))
+                        return orig(scr, x, y, w, h, ...)
+                    end)
+                    wrapped[#wrapped + 1] = name
+                end
+            end
+            rawset(Screen, "_hc_refresh_probe", true)
+            UIManager:scheduleIn(6, function()
+                for _unused, name in ipairs(wrapped) do rawset(Screen, name, nil) end
+                rawset(Screen, "_hc_refresh_probe", nil)
+                debugLog("[hc] refresh probe off")
+            end)
+        end
+    end
     for _unused, delay in ipairs({ 0.2, 1, 2, 3, 4 }) do
         UIManager:scheduleIn(delay, function()
             if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
