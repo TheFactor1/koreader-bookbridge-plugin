@@ -8484,12 +8484,47 @@ function Shelfmark:showAfterCloseNotice(text)
     UIManager:show(msg, "ui")
     local ok_dev, Device = pcall(require, "device")
     if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
+    local function still_up()
+        return type(UIManager.isWidgetShown) ~= "function" or UIManager:isWidgetShown(msg)
+    end
+    -- Kindle: the notice's own refresh reaches the driver and never shows;
+    -- a repaint of the whole stack from the home screen up does.
     for _unused, delay in ipairs({ 1, 3 }) do
         UIManager:scheduleIn(delay, function()
-            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(msg) then return end
+            if not still_up() then return end
             pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
             UIManager:setDirty("all", "ui")
         end)
+    end
+    -- Android: the frame carrying the notice is posted (the blits lock and
+    -- post fine) but not composited until a touch or a window event. The
+    -- phone logs showed re-applying the current screen brightness -- a Java
+    -- window-attribute change -- draws a WINDOW_RESIZED straight away, and
+    -- the notice was on screen within a second; without it nothing shows
+    -- until the menu is opened. Nothing visible changes. Then post the
+    -- buffer again after the relayout has had its moment.
+    if Device.isAndroid and Device:isAndroid() then
+        for _unused, delay in ipairs({ 0.3, 2.0 }) do
+            UIManager:scheduleIn(delay, function()
+                if not still_up() then return end
+                local ok_n, nerr = pcall(function()
+                    local ok_a, android = pcall(require, "android")
+                    if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
+                    local cur = android.getScreenBrightness()
+                    android.setScreenBrightness(cur)
+                    return cur
+                end)
+                debugLog("[hc] notice: window nudge at +" .. tostring(delay) .. "s "
+                    .. (ok_n and ("ok (" .. tostring(nerr) .. ")") or ("failed: " .. tostring(nerr))))
+            end)
+        end
+        for _unused, delay in ipairs({ 0.7, 2.3 }) do
+            UIManager:scheduleIn(delay, function()
+                if not still_up() then return end
+                local ok_p, perr = pcall(function() Device.screen:_updateWindow() end)
+                debugLog("[hc] notice: explicit post at +" .. tostring(delay) .. "s " .. (ok_p and "ok" or ("failed: " .. tostring(perr))))
+            end)
+        end
     end
 end
 

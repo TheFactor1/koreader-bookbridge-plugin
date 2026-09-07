@@ -111,6 +111,37 @@ Shelfmark.pickHardcoverCandidate(inst{}, "h", { title="T", author="A" }, ranked,
 shown[1].buttons[4][1].callback()
 ck(MAP.h and MAP.h.decision=="review", "Not now leaves it in review")
 
+-- Android: the after-close notice nudges the window (brightness re-applied
+-- through the Java window attributes) and posts the buffer again; the
+-- whole-stack repaints run on every real device. Nothing on the desktop.
+do
+    local timers, logs, nudges, posts, dirty = {}, {}, 0, 0, 0
+    local old_UI, old_dev, old_log = UIManager, package.loaded["device"], debugLog
+    debugLog = function(m) logs[#logs+1] = m end
+    UIManager = { show = function() end, isWidgetShown = function() return true end,
+        scheduleIn = function(_s, d, f) timers[#timers+1] = { d = d, f = f } end,
+        setDirty = function(_s, w, m) if w == "all" and m == "ui" then dirty = dirty + 1 end end }
+    package.loaded["device"] = { isDesktop = function() return false end, isAndroid = function() return true end,
+        screen = { _updateWindow = function() posts = posts + 1 end, refreshWaitForLast = function() end } }
+    android = { getScreenBrightness = function() return 48 end, setScreenBrightness = function(v) if v == 48 then nudges = nudges + 1 end end }
+    Shelfmark.showAfterCloseNotice({}, "hi")
+    table.sort(timers, function(a, b) return a.d < b.d end)
+    for _, t in ipairs(timers) do t.f() end
+    ck(nudges == 2, "Android: brightness re-applied twice (window nudge) -- got " .. nudges)
+    ck(posts == 2, "Android: buffer posted again twice -- got " .. posts)
+    ck(dirty == 2, "whole-stack repaint twice -- got " .. dirty)
+    local order = {}; for _, t in ipairs(timers) do order[#order+1] = t.d end
+    ck(order[1] == 0.3 and order[2] == 0.7 and order[3] == 1, "nudge (0.3s) lands before the post (0.7s) and the repaint (1s)")
+    ck(logs[1] and logs[1]:find("window nudge at %+0.3s ok %(48%)"), "the nudge is logged with the brightness it re-applied")
+    -- Kindle: no nudge, no explicit post, just the repaints
+    timers, nudges, posts, dirty = {}, 0, 0, 0
+    package.loaded["device"].isAndroid = function() return false end
+    Shelfmark.showAfterCloseNotice({}, "hi")
+    for _, t in ipairs(timers) do t.f() end
+    ck(nudges == 0 and posts == 0 and dirty == 2, "Kindle: repaints only (nudges=" .. nudges .. " posts=" .. posts .. " dirty=" .. dirty .. ")")
+    UIManager, package.loaded["device"], debugLog, android = old_UI, old_dev, old_log, nil
+end
+
 print(pass.." passed, "..fail.." failed")
 os.exit(fail==0 and 0 or 1)
 LUA
