@@ -36,6 +36,11 @@ local function loadSyncRegistry()
   local ok, t = pcall(cjson.decode, s); return ok and t or {}
 end
 local function saveSyncRegistry(r) local f = io.open(os.getenv("REG_OUT"), "w"); f:write(cjson.encode(r)); f:close() end
+-- Pending-uploads list: the dry-run can never upload (uploads are stubbed to
+-- error), so this list is always empty here. Stubs keep doSyncLibrary's
+-- references resolvable without changing any match decision.
+local function loadPendingUploads() return {} end
+local function savePendingUploads() end
 local CACHE = os.getenv("CACHE")
 local function keyOf(path) return (path:gsub("[^%w]", function(c) return string.format("_%02x", c:byte()) end)) end
 local REQUESTS = 0

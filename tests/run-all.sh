@@ -110,6 +110,13 @@ else
   if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') assertions"
   elif [ $rc -eq 3 ]; then echo "$out" | grep '^SKIP' | sed 's/^SKIP /SKIPPED  /'; skipped="${skipped:+$skipped, }live-sync (prerequisites missing)"
   else echo "$out" | grep -E '^FAIL|^=== LIVE'; echo "FAIL"; fail=1; fi
+
+  # Duplicate-upload guard: a book whose embedded author disagrees with its
+  # filename, synced twice, must leave ONE copy in CWA (the on-device bug).
+  out=$(bash tests/live-sync/dup-guard.sh 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then echo "PASS  dup-guard: $(echo "$out" | grep -c '^PASS') assertions, no duplicate"
+  elif [ $rc -eq 3 ]; then echo "SKIPPED  dup-guard (prerequisites missing)"; skipped="${skipped:+$skipped, }dup-guard"
+  else echo "$out" | grep -E '^FAIL|^=== DUP'; echo "FAIL"; fail=1; fi
 fi
 
 printf '\n'

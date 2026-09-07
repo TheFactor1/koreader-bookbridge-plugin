@@ -650,6 +650,34 @@ end
 -- keys are always strings, and this round-trips through JSON.encode/decode
 -- on every save/load anyway) -> the book title, so the on-device
 -- notification can name what's ready without a second API round-trip.
+local PENDING_UPLOADS_PATH = DataStorage:getSettingsDir() .. "/shelfmark_pending_uploads.json"
+
+-- Files this device pushed to CWA that have NOT been matched back into the
+-- registry yet. CWA's ingest is async, and -- the case that made this
+-- necessary -- an epub whose embedded author disagrees with its filename gets
+-- indexed under metadata the filename-based matcher can't find (a real
+-- "Suzanne Collins - The Hunger Games.epub" whose embedded author was "David
+-- Wheeler"). Without this list such a file looks untracked on every sync and
+-- is uploaded again and again, one duplicate per run. Keyed by local path: a
+-- file we already pushed is never pushed a second time -- it only keeps
+-- retrying the match until CWA imports it or its metadata is fixed.
+local function loadPendingUploads()
+    local f = io.open(PENDING_UPLOADS_PATH, "r")
+    if not f then return {} end
+    local content = f:read("*a"); f:close()
+    if not content or content == "" then return {} end
+    local ok, decoded = pcall(JSON.decode, content)
+    if ok and type(decoded) == "table" then return decoded end
+    return {}
+end
+
+local function savePendingUploads(t)
+    local out = io.open(PENDING_UPLOADS_PATH, "w")
+    if not out then return false end
+    out:write(JSON.encode(t)); out:close()
+    return true
+end
+
 local PENDING_NOTIFY_PATH = DataStorage:getSettingsDir() .. "/shelfmark_pending_notify.json"
 
 local function loadPendingNotifyList()
@@ -3534,6 +3562,9 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     end
 
     local registry = loadSyncRegistry()
+    -- Files pushed on an earlier run that CWA hasn't matched back yet -- never
+    -- re-uploaded, only re-matched (see loadPendingUploads).
+    local pending_uploads = loadPendingUploads()
 
     -- Order matters here: prune, then check tracked books against CWA, and
     -- only THEN work out what's untracked. The tracked check is what
@@ -3579,6 +3610,15 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         end
     end
     if pruned > 0 then saveSyncRegistry(registry) end
+    -- Drop pending-upload rows whose local file is gone (same only_path guard
+    -- as the registry prune above: a single-book run must not sweep the list).
+    if not only_path then
+        local pu_pruned = false
+        for pu_path in pairs(pending_uploads) do
+            if not lfs.attributes(pu_path, "mode") then pending_uploads[pu_path] = nil; pu_pruned = true end
+        end
+        if pu_pruned then savePendingUploads(pending_uploads) end
+    end
 
     local tracked_count = 0
     for _uuid, _e in pairs(registry) do
@@ -4459,6 +4499,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                     if type(last_modified) == "string" and type(epub_path) == "string"
                             and doCwaFileDownload(cwa_url, cwa_username, cwa_password, epub_path, socks5_proxy, path) then
                         registry[m.uuid] = { path = path, title = m.title, last_modified = last_modified }
+                        pending_uploads[path] = nil
                         replaced_paths[#replaced_paths + 1] = path
                         addLine(T(_("  [%1] matched existing CWA book \"%2\" -- downloaded current copy, registered."), fname, m.title))
                     else
@@ -4470,6 +4511,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                         -- behavior exactly, as a fallback rather than
                         -- leaving a confirmed match unregistered.
                         registry[m.uuid] = { path = path, title = m.title }
+                        pending_uploads[path] = nil
                         addLine(T(_("  [%1] matched existing CWA book \"%2\" -- registered (couldn't confirm it's the current copy)."), fname, m.title))
                     end
                 end
@@ -4531,7 +4573,16 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- sync retries it normally.
                 addLine(T(_("  [%1] couldn't reach CWA to check -- skipped, will retry next sync."), fname))
             elseif allow_upload then
-                table.insert(to_upload, path)
+                if pending_uploads[path] then
+                    -- Pushed on an earlier run and still not matched back --
+                    -- async import, or embedded metadata that disagrees with
+                    -- the filename. Re-uploading would just make a duplicate,
+                    -- the exact failure this guards; keep retrying the match
+                    -- instead, and never upload a second copy.
+                    addLine(T(_("  [%1] already uploaded earlier -- CWA hasn't matched it back yet (its embedded author may differ from the filename); not re-uploading."), fname))
+                else
+                    table.insert(to_upload, path)
+                end
             end
             -- allow_upload=false and no match: stay silent. This is the
             -- post-upload retry pass, which runs up to three times -- a line
@@ -4585,6 +4636,9 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                     local up_ok, up_code, up_err = doCwaMultipartUpload(cwa_url, cookie, upload_name, file_bytes, socks5_proxy)
                     if up_ok and up_code == 200 then
                         uploaded[#uploaded + 1] = path
+                        -- Remember it so a slow/mismatched import never leads
+                        -- to a re-upload on the next run.
+                        pending_uploads[path] = { title = fname, at = os.time() }
                         addLine(T(_("  [%1] uploaded."), fname))
                     elseif up_err then
                         addLine(T(_("  [%1] upload failed: %2"), fname, up_err))
@@ -4650,9 +4704,11 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             addLine(T(_("  [%1] uploaded, but CWA hadn't imported it yet -- it'll register on the next sync."), fname))
         end
         saveSyncRegistry(registry)
+        savePendingUploads(pending_uploads)
     end
 
     saveSyncRegistry(registry)
+    savePendingUploads(pending_uploads)
     addLine(_("Done."))
     reportProgress(100)
     return report, replaced_paths, unmatched
