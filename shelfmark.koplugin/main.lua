@@ -8427,7 +8427,7 @@ function Shelfmark:pickHardcoverCandidate(md5, rec, others, token)
         dismissable = false,
         buttons = rows,
     }
-    UIManager:show(dialog, "flashui")
+    UIManager:show(dialog, "ui")   -- a plain refresh; no flash needed for a tap-driven picker
 end
 
 -- One-time match+confirm for a book not yet mapped. Reuses the same Hardcover
