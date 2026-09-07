@@ -8947,9 +8947,18 @@ function Shelfmark:onCloseDocument()
         local md5 = ui and ui.doc_settings and ui.doc_settings:readSetting("partial_md5_checksum")
         local warm = md5 and self._hc_prefetch and self._hc_prefetch[md5]
         if warm then
-            debugLog("[hc] close: prefetched match on hand, raising the dialog in the close itself")
-            local Trapper = require("ui/trapper")
-            Trapper:wrap(function() self:processHardcoverPending() end)
+            -- Next tick, not synchronously: shown inside the close, the dialog
+            -- ends up BELOW the file manager and home screen that the close
+            -- goes on to show (verified on desktop: [THIS < FM < bookshelf]).
+            -- A tick later those are on the stack, the dialog goes on top as
+            -- the modal it is, and UIManager repaints and posts again before
+            -- waiting for input -- immediately after the frame that shows
+            -- the shelf, not seconds after it.
+            debugLog("[hc] close: prefetched match on hand, raising the dialog next tick")
+            UIManager:nextTick(function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:processHardcoverPending() end)
+            end)
             return
         end
         -- Just long enough for the FileManager to finish painting; the dialog
