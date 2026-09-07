@@ -8742,6 +8742,9 @@ end
 -- Book opened: warm the Hardcover match in the background. Delayed so it never
 -- competes with rendering the first page.
 function Shelfmark:onReaderReady()
+    -- Bookshelf loads its parking module lazily; by reader-ready it has
+    -- (the shelf opened this book), and if not there is nothing to park.
+    if self:hookBookshelfPark() then debugLog("[hc] bookshelf parking hooked") end
     if not self.hardcover_progress_sync then return end
     UIManager:scheduleIn(3, function() self:prefetchHardcoverMatch() end)
 end
@@ -8754,6 +8757,61 @@ end
 -- setRequestedOrientation, an OS relayout request, right before our dialog)
 -- and every native app command KOReader receives, decoded by name. Installed
 -- here because both happen BEFORE the dialog exists.
+-- Bookshelf's "hot parking" (on by default): closing a book from the shelf
+-- does not close it. The shelf is lifted over the still-open reader, and the
+-- real close -- the CloseDocument event above -- runs only after 30-40 s of
+-- no input, or the moment the menu is opened. On both devices that was the
+-- whole "the notice only shows when I open the menu / after 15 s" story:
+-- nothing was hidden, the plugin had not been told the book was closed. So
+-- the park IS the close here: capture and sync at that instant. The later
+-- real close captures the same position and pushes nothing (see
+-- processHardcoverPending's same-position branch).
+--
+-- Two ways to hear about it: wrap Park.park itself once Bookshelf has loaded
+-- that module (precise), and the CloseConfigMenu event Park.park sends
+-- just before it raises the shelf (reaches plugins; CloseReaderMenu does
+-- not), checked a tick later against Park.isParked().
+local function bookshelfPark()
+    local Park = package.loaded["lib/bookshelf_reader_park"]
+    return type(Park) == "table" and Park or nil
+end
+
+function Shelfmark:hookBookshelfPark()
+    local Park = bookshelfPark()
+    if not Park or type(Park.park) ~= "function" or Park._shelfmark_hooked then return Park ~= nil end
+    local orig = Park.park
+    Park.park = function(...)
+        local parked = orig(...)
+        if parked then
+            local ok, rui = pcall(function() return require("apps/reader/readerui").instance end)
+            local sm = ok and rui and rui.shelfmark
+            if sm and sm.onBookshelfParked then pcall(function() sm:onBookshelfParked() end) end
+        end
+        return parked
+    end
+    Park._shelfmark_hooked = true
+    return true
+end
+
+function Shelfmark:onCloseConfigMenu()
+    UIManager:nextTick(function()
+        -- The module may not have existed at reader-ready (Bookshelf loads it
+        -- on first use, and on the desktop that first use WAS this park); hook
+        -- it now so the next park is caught by the wrap rather than this path.
+        self:hookBookshelfPark()
+        local Park = bookshelfPark()
+        if Park and type(Park.isParked) == "function" and Park.isParked() then self:onBookshelfParked() end
+    end)
+end
+
+function Shelfmark:onBookshelfParked()
+    local now = os.time()
+    if self._hc_park_at and now - self._hc_park_at < 5 then return end
+    self._hc_park_at = now
+    debugLog("[hc] parked under the shelf: treating it as the close")
+    self:onCloseDocument()
+end
+
 function Shelfmark:onCloseDocument()
     self:captureReadingProgress()
     if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then

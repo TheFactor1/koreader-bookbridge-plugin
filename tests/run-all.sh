@@ -71,6 +71,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, pref
 elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-confirm (no local KOReader)"; skipped="${skipped:+$skipped, }hardcover-confirm"
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
+section "Hardcover + Bookshelf hot parking (real Bookshelf plugin, desktop KOReader)"
+out=$(bash tests/hardcover-park/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- the park is treated as the close"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-park ($(echo "$out" | grep '^SKIP' | cut -c7-))"; skipped="${skipped:+$skipped, }hardcover-park"
+else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
+
 # Prefers a local KOReader Linux install (identical frontend and luajit, no
 # device needed), then the Kindle over ssh, then SKIPPED.
 section "update-check suite (needs KOReader's luajit: local install or the Kindle)"

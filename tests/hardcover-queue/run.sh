@@ -23,6 +23,10 @@ awk '/^function Shelfmark:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit
 awk '/^function Shelfmark:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Shelfmark:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Shelfmark:captureReadingProgress/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^local function bookshelfPark/{f=1}                 f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Shelfmark:hookBookshelfPark/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Shelfmark:onCloseConfigMenu/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Shelfmark:onBookshelfParked/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -q "processHardcoverPending" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
 grep -q "onNetworkConnected"      "$W/fns.lua" || { echo "FAIL  onNetworkConnected not extracted"; exit 1; }
 
@@ -145,6 +149,33 @@ ck(noted, "...and logs that the two disagreed")
 ui.view = nil; PENDING = {}
 Shelfmark.captureReadingProgress({ hardcover_progress_sync = true, hardcover_token = "t", ui = ui })
 ck(PENDING.cap1 and math.abs(PENDING.cap1.percent - 0.40) < 1e-9, "no footer value -> falls back to the raw ratio")
+
+-- Bookshelf hot parking: the park is treated as the close, once
+do
+    local closes, ticks = 0, {}
+    local old_next = UIManager.nextTick
+    UIManager.nextTick = function(_s, f) ticks[#ticks+1] = f end
+    local sm = { onCloseDocument = function() closes = closes + 1 end,
+        hookBookshelfPark = Shelfmark.hookBookshelfPark, onCloseConfigMenu = Shelfmark.onCloseConfigMenu,
+        onBookshelfParked = Shelfmark.onBookshelfParked }
+    package.loaded["apps/reader/readerui"] = { instance = { shelfmark = sm } }
+    ck(sm:hookBookshelfPark() == false, "no Bookshelf park module loaded -> nothing to hook")
+    local parked = false
+    package.loaded["lib/bookshelf_reader_park"] = { park = function() parked = true; return true end, isParked = function() return parked end }
+    ck(sm:hookBookshelfPark() == true and sm:hookBookshelfPark() == true, "hooks once the module is there (idempotent)")
+    package.loaded["lib/bookshelf_reader_park"].park()
+    ck(closes == 1, "Park.park() -> the plugin's close handler runs at once")
+    sm:onCloseConfigMenu(); for _, f in ipairs(ticks) do f() end; ticks = {}
+    ck(closes == 1, "the CloseConfigMenu fallback a tick later is debounced (same park)")
+    sm._hc_park_at = os.time() - 10; parked = false
+    sm:onCloseConfigMenu(); for _, f in ipairs(ticks) do f() end; ticks = {}
+    ck(closes == 1, "CloseConfigMenu with nothing parked (a normal config close) does nothing")
+    parked = true
+    sm:onCloseConfigMenu(); for _, f in ipairs(ticks) do f() end; ticks = {}
+    ck(closes == 2, "CloseConfigMenu while parked, past the debounce -> treated as a close")
+    UIManager.nextTick = old_next
+    package.loaded["lib/bookshelf_reader_park"] = nil; package.loaded["apps/reader/readerui"] = nil
+end
 
 print(pass.." passed, "..fail.." failed")
 os.exit(fail==0 and 0 or 1)
