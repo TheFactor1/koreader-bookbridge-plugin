@@ -8465,16 +8465,36 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         return base_paint(w, ...)
     end
     UIManager:show(dialog, "flashui")
-    local stack = UIManager._window_stack or {}
-    local top = stack[#stack] and stack[#stack].widget
-    local names = {}
-    for i, win in ipairs(stack) do
-        local w = win.widget
-        names[i] = (w == dialog) and "THIS" or tostring(w and (w.name or w.id or (w.title and "titled") or (w.text and "text")) or "?")
+    -- The window stack, bottom to top, THIS being our dialog. A window
+    -- with no name/id/title/text is described by a few of its keys so the
+    -- fourth window seen on the devices (absent on desktop) can be named.
+    local function stackDump()
+        local stack = UIManager._window_stack or {}
+        local names = {}
+        for i, win in ipairs(stack) do
+            local w = win.widget
+            local n = (w == dialog) and "THIS" or (w and (w.name or w.id or (w.title and "titled") or (w.text and "text")))
+            if not n and type(w) == "table" then
+                local keys, c = {}, 0
+                for k in pairs(w) do
+                    if type(k) == "string" and not k:match("^_") then keys[#keys + 1] = k; c = c + 1; if c >= 5 then break end end
+                end
+                n = "?{" .. table.concat(keys, ",") .. "}"
+            end
+            names[i] = tostring(n or "?")
+        end
+        local top = stack[#stack] and stack[#stack].widget
+        return string.format("stack=%d on_top=%s [%s]", #stack, tostring(top == dialog), table.concat(names, " < "))
     end
     dialog._hc_shown_at = os.time()
-    debugLog(string.format("[hc] dialog shown: stack=%d on_top=%s [%s]%s",
-        #stack, tostring(top == dialog), table.concat(names, " < "), windowState()))
+    debugLog("[hc] dialog shown: " .. stackDump() .. windowState())
+    -- And again later: if the order changes after showing, that is the bug.
+    for _unused, delay in ipairs({ 1.5, 4 }) do
+        UIManager:scheduleIn(delay, function()
+            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
+            debugLog("[hc] +" .. tostring(delay) .. "s: " .. stackDump() .. windowState())
+        end)
+    end
     -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
     -- discard input queued while the book was closing, which would otherwise
     -- land straight on a button.
