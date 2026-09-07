@@ -8041,22 +8041,24 @@ end
 -- file. Guarded so it is a no-op unless progress sync is on, a token is set,
 -- and we are actually in the reader with a document.
 function Shelfmark:captureReadingProgress()
-    if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
+    if not self.hardcover_progress_sync then debugLog("[hc] capture: progress sync off"); return end
+    if not self.hardcover_token or self.hardcover_token == "" then debugLog("[hc] capture: no token"); return end
     local ui = self.ui
-    if not ui or not ui.document or not ui.doc_settings then return end
+    if not ui or not ui.document or not ui.doc_settings then debugLog("[hc] capture: not in reader (no document)"); return end
     local md5 = ui.doc_settings:readSetting("partial_md5_checksum")
-    if not md5 or md5 == "" then return end
+    if not md5 or md5 == "" then debugLog("[hc] capture: no partial_md5"); return end
     local percent
     if ui.document.info and ui.document.info.has_pages then
         percent = ui.paging and ui.paging:getLastPercent()
     else
         percent = ui.rolling and ui.rolling:getLastPercent()
     end
-    if type(percent) ~= "number" then return end
+    if type(percent) ~= "number" then debugLog("[hc] capture: no percent"); return end
     local props = (ui.document.getProps and ui.document:getProps()) or {}
     local pending = loadHardcoverPending()
     pending[md5] = { title = props.title, author = props.authors, percent = percent, at = os.time() }
     saveHardcoverPending(pending)
+    debugLog(string.format("[hc] captured %d%% for %s", math.floor((percent or 0) * 100 + 0.5), tostring(props.title)))
 end
 
 function Shelfmark:clearHardcoverPending(md5)
@@ -8070,20 +8072,27 @@ end
 function Shelfmark:processHardcoverPending()
     if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
     local pending = loadHardcoverPending()
-    if next(pending) == nil then return end
+    if next(pending) == nil then debugLog("[hc] process: nothing pending"); return end
     local map = loadHardcoverMap()
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
+    local n = 0; for _ in pairs(pending) do n = n + 1 end
+    debugLog("[hc] process: " .. n .. " pending")
     local unmapped
     for md5, rec in pairs(pending) do
         local entry = map[md5]
         if entry and entry.decision == "skip" then
             pending[md5] = nil
         elseif entry and entry.decision == "sync" and entry.book_id then
-            local completed, ok = Trapper:dismissableRunInSubprocess(function()
+            local completed, ok, a, b = Trapper:dismissableRunInSubprocess(function()
                 return doHardcoverPushProgress(token, entry.book_id, rec.percent)
             end, false)  -- silent; a failure just stays pending to retry
-            if completed and ok then pending[md5] = nil end
+            if completed and ok then
+                pending[md5] = nil
+                debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
+            else
+                debugLog("[hc] push failed for " .. tostring(entry.title) .. ": " .. tostring(a))
+            end
         elseif not unmapped then
             unmapped = { md5 = md5, rec = rec }
         end
@@ -8098,10 +8107,12 @@ end
 function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
+    debugLog("[hc] confirm: searching Hardcover for " .. tostring(rec.title))
     local completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
         return doHardcoverFindBook(token, rec.title or "", rec.author)
     end, _("Finding on Hardcover..."))
-    if not completed then return end
+    if not completed then debugLog("[hc] confirm: search cancelled"); return end
+    debugLog("[hc] confirm: match = " .. tostring(book_id) .. " (" .. tostring(ft) .. ")")
     local ConfirmBox = require("ui/widget/confirmbox")
     local map = loadHardcoverMap()
     if not book_id then
