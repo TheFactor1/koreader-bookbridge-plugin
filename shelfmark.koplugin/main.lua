@@ -2780,6 +2780,12 @@ local function doApplyUpdate(target, socks5_proxy)
         local fname = UPDATE_FILES[idx]
         os.rename(plugin_dir .. "/" .. fname .. ".update-tmp", plugin_dir .. "/" .. fname)
     end
+    -- Leave a marker saying what was just installed. manifest.json is not
+    -- one of the updated files, so on an updated device it still describes
+    -- the build the plugin was originally zipped with -- which is what the
+    -- debug-log header reported from a phone, months of updates later.
+    local marker = io.open(plugin_dir .. "/installed-build", "w")
+    if marker then marker:write(label, "\n"); marker:close() end
     debugLog("[update] <- installed " .. label .. " to " .. plugin_dir)
     return true
 end
@@ -6434,11 +6440,20 @@ function Shelfmark:sendDebugLog()
     local Device = require("device")
     local ok_v, Version = pcall(require, "version")
     local rev = (ok_v and type(Version) == "table" and Version.getCurrentRevision and Version:getCurrentRevision()) or "?"
+    -- What the updater last installed, if it ever ran here; otherwise the
+    -- manifest the plugin was originally zipped with.
     local build = "?"
-    local mf = io.open(tostring(self.path or "") .. "/manifest.json", "r")
-    if mf then
-        local m = mf:read("*a"); mf:close()
-        build = m:match('"build"%s*:%s*"([^"]+)"') or build
+    local marker = io.open(tostring(self.path or "") .. "/installed-build", "r")
+    if marker then
+        build = (marker:read("*l") or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        marker:close()
+        if build == "" then build = "?" end
+    else
+        local mf = io.open(tostring(self.path or "") .. "/manifest.json", "r")
+        if mf then
+            local m = mf:read("*a"); mf:close()
+            build = (m:match('"build"%s*:%s*"([^"]+)"') or build) .. " (original install)"
+        end
     end
     local parts = { string.format(
         "# shelfmark debug log\n# sent: %s\n# device: %s (android=%s, eink=%s)\n# koreader: %s\n# plugin build: %s\n\n",
@@ -8392,6 +8407,7 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             {
                 text = _("Yes, sync"),
                 callback = function()
+                    debugLog("[hc] dialog answered: yes, " .. tostring(os.time() - (dialog._hc_shown_at or os.time())) .. "s after showing")
                     UIManager:close(dialog)
                     self._hc_confirm_open = nil
                     map[md5] = { book_id = book_id, title = ft, decision = "sync" }; saveHardcoverMap(map)
@@ -8409,6 +8425,7 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             {
                 text = _("Not this book"),
                 callback = function()
+                    debugLog("[hc] dialog answered: no, " .. tostring(os.time() - (dialog._hc_shown_at or os.time())) .. "s after showing")
                     UIManager:close(dialog)
                     self._hc_confirm_open = nil
                     map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
@@ -8429,9 +8446,15 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     -- the debug log records whether the dialog was painted at all and, on
     -- Android, whether a window existed at show time and at paint time.
     local function windowState()
+        -- android.app is a C struct (cdata), so it is probed under pcall
+        -- rather than type-checked: the first diagnostic build did the
+        -- latter and printed nothing on the phone.
         local ok_a, android = pcall(require, "android")
-        if not ok_a or type(android) ~= "table" or type(android.app) ~= "table" then return "" end
-        return android.app.window ~= nil and " window=yes" or " window=NO"
+        if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
+        if not android then return "" end
+        local ok_w, has_window = pcall(function() return android.app ~= nil and android.app.window ~= nil end)
+        if not ok_w then return " window=?" end
+        return has_window and " window=yes" or " window=NO"
     end
     local base_paint = dialog.paintTo
     dialog.paintTo = function(w, ...)
@@ -8444,7 +8467,14 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     UIManager:show(dialog, "flashui")
     local stack = UIManager._window_stack or {}
     local top = stack[#stack] and stack[#stack].widget
-    debugLog(string.format("[hc] dialog shown: stack=%d on_top=%s%s", #stack, tostring(top == dialog), windowState()))
+    local names = {}
+    for i, win in ipairs(stack) do
+        local w = win.widget
+        names[i] = (w == dialog) and "THIS" or tostring(w and (w.name or w.id or (w.title and "titled") or (w.text and "text")) or "?")
+    end
+    dialog._hc_shown_at = os.time()
+    debugLog(string.format("[hc] dialog shown: stack=%d on_top=%s [%s]%s",
+        #stack, tostring(top == dialog), table.concat(names, " < "), windowState()))
     -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
     -- discard input queued while the book was closing, which would otherwise
     -- land straight on a button.
