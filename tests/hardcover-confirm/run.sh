@@ -23,11 +23,11 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 # Extracted by name so it cannot drift from the real implementation.
-awk '/^function Shelfmark:confirmHardcoverMatchForProgress/{f=1} f{print} f&&/^end$/{exit}' \
+awk '/^function Shelfmark:resolveHardcoverMatch/{f=1} f{print} f&&/^end$/{exit}' \
     "$REPO/shelfmark.koplugin/main.lua" > "$W/confirm.lua"
 awk '/^function Shelfmark:pickHardcoverCandidate/{f=1} f{print} f&&/^end$/{exit}' \
     "$REPO/shelfmark.koplugin/main.lua" >> "$W/confirm.lua"
-grep -q "confirmHardcoverMatchForProgress" "$W/confirm.lua" || { echo "FAIL  could not extract the confirm method"; exit 1; }
+grep -q "resolveHardcoverMatch" "$W/confirm.lua" || { echo "FAIL  could not extract resolveHardcoverMatch"; exit 1; }
 
 cd "$KDIR" || exit 1
 KDIR="$KDIR" SRC="$W/confirm.lua" ./luajit - <<'LUA'
@@ -44,6 +44,7 @@ debugLog = function() end
 UIManager = { show = function(_s,w) shown[#shown+1] = w end, scheduleIn = function() end }
 package.loaded["ui/widget/confirmbox"] = { new = function(_s,t) return t end }
 package.loaded["ui/widget/buttondialog"] = { new = function(_s,t) return t end }
+InfoMessage = { new = function(_s,t) return t end }
 package.loaded["device"] = { input = { inhibitInputUntil = function() end } }
 UIManager.close = function() end
 package.loaded["ui/trapper"] = {
@@ -51,73 +52,60 @@ package.loaded["ui/trapper"] = {
     dismissableRunInSubprocess = function(_s,f) return true, f() end,
 }
 local SEARCHES = 0
-doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return 999, "SEARCHED", "Someone" end
+doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return 999, "SEARCHED", "Someone", nil, { {id=999,title="SEARCHED",author="Someone"} }, false end
 doHardcoverPushProgress = function() return true, 8, 382 end
 Shelfmark = {}
 assert(load(io.open(SRC):read("*a")))()
 
 local pass, fail = 0, 0
 local function ck(c,m) if c then pass=pass+1; print("PASS  "..m) else fail=fail+1; print("FAIL  "..m) end end
+local CLEARED = {}
+local function inst(extra)
+    local t = { hardcover_token="t", clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end }
+    for k,v in pairs(extra or {}) do t[k]=v end
+    return t
+end
 
-local warm = { hardcover_token="t",
-    _hc_prefetch = { md5a = { book_id=427473, title="Red Rising", author="Pierce Brown" } } }
-Shelfmark.confirmHardcoverMatchForProgress(warm, "md5a", { title="Red Rising", author="Pierce Brown", percent=0.02 })
-ck(SEARCHES == 0, "prefetched match -> ZERO searches, dialog is instant")
-local box = shown[1]
-ck(box ~= nil, "dialog is shown")
-ck(box and box.title:find("This book:",1,true) and box.title:find("Hardcover match:",1,true),
-   "shows the book's own metadata next to Hardcover's, for approval")
-ck(box and box.dismissable == false, "not dismissable (a stray tap cannot answer it)")
--- The important one: a ConfirmBox calls cancel_callback from onClose, so the
--- dialog merely going away recorded decision="skip" permanently. ButtonDialog
--- only calls tap_close_callback, and none is set.
-ck(box and box.tap_close_callback == nil,
-   "no close callback: the dialog going away records NOTHING")
-ck(box and box.buttons and box.buttons[1] and #box.buttons[1] == 2, "offers exactly two buttons")
+-- 1. confident prefetch -> silent sync + push, no UI at all
+shown = {}; MAP = {}; SEARCHES = 0; CLEARED = {}
+local PUSHES = 0; doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
+Shelfmark.resolveHardcoverMatch(inst{ _hc_prefetch = { m = { book_id=427473, title="Red Rising", author="Pierce Brown", ranked={}, confident=true } } },
+    "m", { title="Red Rising", author="Pierce Brown", percent=0.02 })
+ck(#shown == 0, "confident match: no dialog of any kind")
+ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==427473, "confident match: recorded as sync")
+ck(PUSHES == 1 and CLEARED[1] == "m", "confident match: progress pushed and the queue entry cleared")
+ck(SEARCHES == 0, "confident match from prefetch: zero searches")
 
-shown = {}
-Shelfmark.confirmHardcoverMatchForProgress({ hardcover_token="t" }, "md5b",
-    { title="Whatever", author="A Person", percent=0.5 })
-ck(SEARCHES == 1, "no prefetch -> falls back to exactly one search")
-ck(shown[1] ~= nil, "cold path still shows a dialog")
+-- 2. uncertain prefetch -> review, no UI, no push, progress kept
+shown = {}; MAP = {}; PUSHES = 0; CLEARED = {}
+local ranked = { {id=427798,title="The Hitchhiker's Guide to the Galaxy",author="Douglas Adams"}, {id=205829,title="Omnibus",author="Douglas Adams"} }
+Shelfmark.resolveHardcoverMatch(inst{ _hc_prefetch = { h = { book_id=427798, title="The Hitchhiker's Guide to the Galaxy", author="Douglas Adams", ranked=ranked, confident=false } } },
+    "h", { title="The Ultimate Hitchhiker's Guide to the Galaxy", author="Douglas Adams", percent=0.07 })
+ck(#shown == 0 and PUSHES == 0, "uncertain match: nothing shown, nothing pushed")
+ck(MAP.h and MAP.h.decision=="review" and #MAP.h.ranked == 2, "uncertain match: parked for review with its candidates")
+ck(#CLEARED == 0, "uncertain match: progress stays queued")
 
-shown = {}; MAP = {}
-local st = { hardcover_token="t", _hc_prefetch={ m={book_id=1,title="T",author="A"} },
-             clearHardcoverPending=function() end }
-Shelfmark.confirmHardcoverMatchForProgress(st, "m", { title="T", author="A", percent=0.1 })
-shown[1].buttons[1][1].callback()      -- "Yes, sync"
-ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==1, "tapping Yes records decision=sync")
+-- 3. no prefetch -> one search, then the same rules
+shown = {}; MAP = {}; SEARCHES = 0
+Shelfmark.resolveHardcoverMatch(inst{}, "c", { title="Whatever", author="A Person", percent=0.5 })
+ck(SEARCHES == 1, "no prefetch -> exactly one search")
+ck(MAP.c and MAP.c.decision=="review", "search stub (not confident) -> review")
 
-shown = {}; MAP = {}
-Shelfmark.confirmHardcoverMatchForProgress(st, "m", { title="T", author="A", percent=0.1 })
-shown[1].buttons[1][2].callback()      -- "Not this book"
-ck(MAP.m and MAP.m.decision=="skip", "Not this book with no alternatives records decision=skip")
-
--- With alternatives, "Not this book" opens a picker instead of skipping
-shown = {}; MAP = {}
-local st2 = { hardcover_token="t", clearHardcoverPending=function() end,
-    _hc_prefetch = { m = { book_id=1, title="Omnibus", author="A",
-        ranked = { {id=1,title="Omnibus",author="A"}, {id=2,title="The Novel",author="A"}, {id=3,title="Other",author="B"} } } } }
-st2.pickHardcoverCandidate = Shelfmark.pickHardcoverCandidate
-Shelfmark.confirmHardcoverMatchForProgress(st2, "m", { title="T", author="A", percent=0.1 })
-shown[1].buttons[1][2].callback()      -- "Not this book"
-ck(next(MAP) == nil, "Not this book with alternatives records NOTHING yet")
-local picker = shown[2]
-ck(picker and picker.dismissable == false and #picker.buttons == 3, "opens a picker: 2 alternatives + None of these")
-ck(picker and picker.buttons[1][1].text:find("The Novel", 1, true) ~= nil, "alternatives exclude the rejected match")
-picker.buttons[1][1].callback()        -- choose "The Novel"
-ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==2, "choosing an alternative records it as the match")
-shown = {}; MAP = {}
-Shelfmark.confirmHardcoverMatchForProgress(st2, "m", { title="T", author="A", percent=0.1 })
-shown[1].buttons[1][2].callback(); shown[2].buttons[3][1].callback()   -- None of these
-ck(MAP.m and MAP.m.decision=="skip", "None of these records decision=skip")
-
--- Teardown regression: build the dialog, touch no button, and the map must
--- stay empty. This is the bug that silently condemned a book on Android
--- whenever the OS reclaimed a backgrounded KOReader.
-shown = {}; MAP = {}
-Shelfmark.confirmHardcoverMatchForProgress(st, "m", { title="T", author="A", percent=0.1 })
-ck(next(MAP) == nil, "dialog dismissed without an answer records nothing")
+-- 4. the review picker: choose -> sync + push; None -> skip; Not now -> nothing
+shown = {}; MAP = { h = { decision="review", title="T" } }; PUSHES = 0; CLEARED = {}
+Shelfmark.pickHardcoverCandidate(inst{}, "h", { title="T", author="A", percent=0.1 }, ranked, "t")
+local pk = shown[1]
+ck(pk and #pk.buttons == 4, "picker: 2 candidates + None of these + Not now")
+pk.buttons[1][1].callback()
+ck(MAP.h and MAP.h.decision=="sync" and MAP.h.book_id==427798 and PUSHES == 1, "picking a candidate records sync and pushes the waiting progress")
+shown = {}; MAP = { h = { decision="review", title="T" } }
+Shelfmark.pickHardcoverCandidate(inst{}, "h", { title="T", author="A" }, ranked, "t")
+shown[1].buttons[3][1].callback()
+ck(MAP.h and MAP.h.decision=="skip", "None of these records skip")
+shown = {}; MAP = { h = { decision="review", title="T" } }
+Shelfmark.pickHardcoverCandidate(inst{}, "h", { title="T", author="A" }, ranked, "t")
+shown[1].buttons[4][1].callback()
+ck(MAP.h and MAP.h.decision=="review", "Not now leaves it in review")
 
 print(pass.." passed, "..fail.." failed")
 os.exit(fail==0 and 0 or 1)

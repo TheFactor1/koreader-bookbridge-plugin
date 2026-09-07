@@ -1900,7 +1900,11 @@ local function doHardcoverFindBook(token, title, author, lang)
                 for _, n in ipairs(doc.author_names or {}) do
                     if type(n) == "string" then names[#names + 1] = n end
                 end
-                candidates[#candidates + 1] = { id = id, title = doc.title, names = names }
+                candidates[#candidates + 1] = { id = id, title = doc.title, names = names,
+                    -- Both decide confidence below: an omnibus is flagged
+                    -- compilation, and Hardcover's near-empty duplicate entries
+                    -- have a handful of readers where the real one has thousands.
+                    compilation = (doc.compilation == true), users = tonumber(doc.users_count) or 0 }
             end
         end
     end
@@ -1939,7 +1943,7 @@ local function doHardcoverFindBook(token, title, author, lang)
                         end
                     end
                 end
-                candidates[#candidates + 1] = { id = b.id, title = b.title, names = names }
+                candidates[#candidates + 1] = { id = b.id, title = b.title, names = names, compilation = false, users = 0 }
             end
         end
     end
@@ -1980,36 +1984,55 @@ local function doHardcoverFindBook(token, title, author, lang)
         end
     end
 
-    -- Pick on author surname when we have one, else keep the top hit. The
-    -- search document flattens every contributor into author_names, so this
-    -- checks all of them exactly like the old per-contribution loop did.
-    local chosen, chosen_name = candidates[1], nil
-    if author and author ~= "" then
-        -- Surname only, matching releaseRelevanceScore's convention elsewhere
-        -- in this file -- robust to "Blake Crouch" vs "Crouch, Blake" ordering
-        -- differences between embedded metadata and Hardcover's own names.
-        local surname = author:match("(%S+)%s*$")
-        if surname and #surname > 1 then
-            surname = surname:lower()
-            for _, c in ipairs(candidates) do
-                for _, n in ipairs(c.names) do
-                    if n:lower():find(surname, 1, true) then
-                        chosen, chosen_name = c, n
-                        break
-                    end
-                end
-                if chosen_name then break end
+    -- Score every candidate and pick the best; report whether that pick is
+    -- confident enough to sync silently. Confident means: the author matches
+    -- (when the file has one), the title matches after normalisation
+    -- (case, punctuation, a subtitle after ":", a leading article), and the
+    -- candidate is not an omnibus unless the file's own title says it is
+    -- one. Anything less goes to the review list instead of Hardcover.
+    local function norm(t)
+        t = (t or ""):lower():gsub("\u{2019}", "'"):gsub("\u{2018}", "'"):gsub("`", "'")
+        t = t:gsub("%s*:.*$", "")
+        t = t:gsub("[^%w%s']", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        t = t:gsub("^the ", ""):gsub("^an ", ""):gsub("^a ", "")
+        return t
+    end
+    local want = norm(title)
+    local lt = (title or ""):lower()
+    local local_omnibus = lt:find("omnibus", 1, true) or lt:find("complete", 1, true) or lt:find("collection", 1, true)
+        or lt:find("novels", 1, true) or lt:find("trilogy", 1, true) or lt:find("box set", 1, true) or lt:find("books 1", 1, true)
+    -- Surname only, matching releaseRelevanceScore's convention elsewhere in
+    -- this file -- robust to "Blake Crouch" vs "Crouch, Blake".
+    local surname = author and author ~= "" and author:match("(%S+)%s*$") or nil
+    if surname and #surname <= 1 then surname = nil end
+    if surname then surname = surname:lower() end
+    for i2, c in ipairs(candidates) do
+        local score = -0.01 * i2                       -- search order breaks ties
+        c.author_hit = nil
+        if surname then
+            for _, n in ipairs(c.names) do
+                if n:lower():find(surname, 1, true) then c.author_hit = n; break end
             end
         end
+        if c.author_hit then score = score + 3 end
+        local have = norm(c.title)
+        c.title_exact = (want ~= "" and have == want)
+        if c.title_exact then score = score + 3
+        elseif want ~= "" and have ~= "" and (have:find(want, 1, true) or want:find(have, 1, true)) then score = score + 1 end
+        if c.compilation then score = score + (local_omnibus and 1 or -2) end
+        score = score + math.log10((c.users or 0) + 1) * 0.5
+        c.score = score
     end
+    table.sort(candidates, function(a, b) return a.score > b.score end)
+    local chosen = candidates[1]
+    local confident = chosen.title_exact and not (chosen.compilation and not local_omnibus)
+        and ((surname and chosen.author_hit ~= nil) or (not surname and (chosen.users or 0) >= 50))
 
-    -- Report the contributor actually matched on; otherwise the first, which
-    -- the search index already orders author-first. The full ranked list
-    -- travels along as a fifth value so a "not this book" answer can offer
-    -- the alternatives instead of giving up.
+    -- The full ranked list travels along so the review list can offer the
+    -- alternatives; confidence is the sixth value.
     local ranked = {}
-    for i, c in ipairs(candidates) do ranked[i] = { id = c.id, title = c.title, author = c.names[1] } end
-    return chosen.id, chosen.title, chosen_name or chosen.names[1], nil, ranked
+    for i2, c in ipairs(candidates) do ranked[i2] = { id = c.id, title = c.title, author = c.author_hit or c.names[1] } end
+    return chosen.id, chosen.title, chosen.author_hit or chosen.names[1], nil, ranked, confident and true or false
 end
 
 local function doHardcoverFindAuthor(token, name)
@@ -6323,9 +6346,18 @@ function Shelfmark:addToMainMenu(menu_items)
                         callback = function()
                             self.hardcover_progress_sync = not self.hardcover_progress_sync
                             self:saveAllSettings(self.hardcover_progress_sync
-                                and _("On. As you read, progress will sync to Hardcover when you close a book or the device sleeps.")
+                                and _("On. Progress syncs silently when you close a book or the device sleeps; anything Hardcover can't be sure of waits under Review matches.")
                                 or _("Off."))
                         end,
+                    },
+                    {
+                        text_func = function()
+                            local n = 0
+                            for _unused, e in pairs(loadHardcoverMap()) do if e.decision == "review" then n = n + 1 end end
+                            return n > 0 and T(_("Review Hardcover matches (%1)"), n) or _("Review Hardcover matches")
+                        end,
+                        keep_menu_open = true,
+                        callback = function() self:reviewHardcoverMatches() end,
                     },
                     {
                         -- Answering "No" -- or, before build 9b45e72, a stray
@@ -8335,6 +8367,9 @@ function Shelfmark:processHardcoverPending()
                 "[hc] skip: %s is marked never-sync; dropping. Undo with Shelfmark > Forget Hardcover book choices.",
                 tostring(entry.title or rec.title)))
             pending[md5] = nil
+        elseif entry and entry.decision == "review" then
+            -- Waiting in Hardcover > Review matches: never pushed, never
+            -- prompted, and the record keeps its progress for later.
         elseif entry and entry.decision == "sync" and entry.book_id then
             -- {} trap, not false/a string: a TrapWidget (visible or invisible)
             -- is dismissed by ANY queued gesture/keypress, and the reader ->
@@ -8357,9 +8392,7 @@ function Shelfmark:processHardcoverPending()
         end
     end
     saveHardcoverPending(pending)
-    -- One confirm at a time: rapid closes each schedule a process pass, and
-    -- without this two passes could stack two dialogs for the same book.
-    if unmapped and not self._hc_confirm_open then
+    if unmapped then
         -- If the open-time lookup for this book is STILL running, wait for it
         -- instead of starting a competing second search. Hardcover throttles
         -- rapid requests by hanging the connection rather than answering 429
@@ -8380,36 +8413,113 @@ function Shelfmark:processHardcoverPending()
             debugLog("[hc] process: lookup never landed; searching now")
         end
         self._hc_wait_tries = nil
-        self:confirmHardcoverMatchForProgress(unmapped.md5, unmapped.rec)
+        self:resolveHardcoverMatch(unmapped.md5, unmapped.rec)
     end
 end
 
--- The alternatives after "Not this book": one button per remaining
--- candidate, then "None of these". Only the last option records a skip;
--- choosing a book records it as the match and pushes progress at once.
--- Must run in the UI loop (it is called from a button callback).
-function Shelfmark:pickHardcoverCandidate(md5, rec, others, token)
+-- Decides a book not yet mapped, with no UI. A confident match (see
+-- doHardcoverFindBook) is recorded and pushed on the spot; anything else is
+-- parked as "review" -- never synced, never prompted -- keeping its progress
+-- so it pushes once picked in Hardcover > Review matches. Runs inside a
+-- Trapper:wrap (both callers provide one).
+function Shelfmark:resolveHardcoverMatch(md5, rec)
+    local token = self.hardcover_token
+    local Trapper = require("ui/trapper")
+    local book_id, ft, fa, ranked, confident
+    local warm = self._hc_prefetch and self._hc_prefetch[md5]
+    if warm then
+        book_id, ft, fa, ranked, confident = warm.book_id, warm.title, warm.author, warm.ranked, warm.confident
+    else
+        local completed, _err
+        completed, book_id, ft, fa, _err, ranked, confident = Trapper:dismissableRunInSubprocess(function()
+            return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language)
+        end, {})
+        if not completed then return end
+    end
+    local map = loadHardcoverMap()
+    if book_id and confident then
+        map[md5] = { book_id = book_id, title = ft, decision = "sync" }; saveHardcoverMap(map)
+        debugLog(string.format("[hc] auto-matched %s -> %s by %s", tostring(rec.title), tostring(ft), tostring(fa)))
+        local completed, ok, a, b = Trapper:dismissableRunInSubprocess(function()
+            return doHardcoverPushProgress(token, book_id, rec.percent)
+        end, {})
+        if completed and ok then
+            self:clearHardcoverPending(md5)
+            debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(ft), tostring(a), tostring(b)))
+        else
+            debugLog("[hc] push failed for " .. tostring(ft) .. ": " .. tostring(a))   -- stays pending; retried later
+        end
+        return
+    end
+    map[md5] = { decision = "review", title = rec.title, author = rec.author, ranked = ranked or {}, book_id = book_id, found = ft }
+    saveHardcoverMap(map)
+    debugLog(string.format("[hc] needs review: %s (%s)", tostring(rec.title),
+        book_id and ("best guess " .. tostring(ft)) or "no candidates"))
+end
+
+-- Hardcover > Review matches: the books parked as "review", one button each.
+function Shelfmark:reviewHardcoverMatches()
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local map = loadHardcoverMap()
+    local items = {}
+    for md5, e in pairs(map) do
+        if e.decision == "review" then items[#items + 1] = { md5 = md5, e = e } end
+    end
+    table.sort(items, function(a, b) return tostring(a.e.title) < tostring(b.e.title) end)
+    if #items == 0 then
+        UIManager:show(InfoMessage:new{ text = _("Nothing to review -- every book has a Hardcover decision.") })
+        return
+    end
+    local dialog
+    local rows = {}
+    for _unused, it in ipairs(items) do
+        local e = it.e
+        rows[#rows + 1] = {{
+            text = (e.author and e.author ~= "") and T(_("%1 by %2"), e.title, e.author) or tostring(e.title),
+            callback = function()
+                UIManager:close(dialog)
+                local pending = loadHardcoverPending()
+                local rec = pending[it.md5] or { title = e.title, author = e.author }
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:pickHardcoverCandidate(it.md5, rec, e.ranked or {}, self.hardcover_token) end)
+            end,
+        }}
+    end
+    dialog = ButtonDialog:new{
+        title = T(_("Books waiting for a Hardcover match (%1)"), #items),
+        title_align = "left",
+        buttons = rows,
+    }
+    UIManager:show(dialog, "ui")
+end
+
+-- The picker for one reviewed book: one button per candidate (best guess
+-- first), then "None of these" (recorded as never-sync) and "Not now"
+-- (stays in the review list). Choosing a book records it as the match and,
+-- if progress is waiting, pushes it at once.
+function Shelfmark:pickHardcoverCandidate(md5, rec, candidates, token)
     local ButtonDialog = require("ui/widget/buttondialog")
     local map = loadHardcoverMap()
     local dialog
     local rows = {}
-    for i = 1, math.min(#others, 5) do
-        local c = others[i]
+    for i = 1, math.min(#candidates, 5) do
+        local c = candidates[i]
         rows[#rows + 1] = {{
             text = (c.author and c.author ~= "") and T(_("%1 by %2"), c.title, c.author) or c.title,
             callback = function()
                 UIManager:close(dialog)
-                self._hc_confirm_open = nil
-                debugLog("[hc] picked alternative " .. tostring(c.id) .. " (" .. tostring(c.title) .. ")")
+                debugLog("[hc] picked " .. tostring(c.id) .. " (" .. tostring(c.title) .. ") for " .. tostring(rec.title))
                 map[md5] = { book_id = c.id, title = c.title, decision = "sync" }; saveHardcoverMap(map)
-                local Trapper = require("ui/trapper")
-                Trapper:wrap(function()
-                    Trapper:dismissableRunInSubprocess(function()
-                        return doHardcoverPushProgress(token, c.id, rec.percent)
-                    end, {})
-                    self:clearHardcoverPending(md5)
-                    UIManager:scheduleIn(1, function() Trapper:wrap(function() self:processHardcoverPending() end) end)
-                end)
+                if rec.percent then
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        Trapper:dismissableRunInSubprocess(function()
+                            return doHardcoverPushProgress(token, c.id, rec.percent)
+                        end, {})
+                        self:clearHardcoverPending(md5)
+                        UIManager:scheduleIn(1, function() Trapper:wrap(function() self:processHardcoverPending() end) end)
+                    end)
+                end
             end,
         }}
     end
@@ -8417,180 +8527,16 @@ function Shelfmark:pickHardcoverCandidate(md5, rec, others, token)
         text = _("None of these -- don't sync this book"),
         callback = function()
             UIManager:close(dialog)
-            self._hc_confirm_open = nil
             map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
         end,
     }}
+    rows[#rows + 1] = {{ text = _("Not now"), callback = function() UIManager:close(dialog) end }}
     dialog = ButtonDialog:new{
         title = T(_("Which Hardcover book is\n%1?"), rec.title or _("this book")),
         title_align = "left",
-        dismissable = false,
         buttons = rows,
     }
-    UIManager:show(dialog, "ui")   -- a plain refresh; no flash needed for a tap-driven picker
-end
-
--- One-time match+confirm for a book not yet mapped. Reuses the same Hardcover
--- search the "Mark as read" flow uses, shows what it found, and remembers the
--- decision (sync or skip) so it never asks again. Must run inside a wrap.
-function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
-    local token = self.hardcover_token
-    local Trapper = require("ui/trapper")
-    self._hc_confirm_open = true
-    local book_id, ft, fa, ranked
-    local warm = self._hc_prefetch and self._hc_prefetch[md5]
-    if warm then
-        -- Looked up when the book was opened: the dialog can go straight up.
-        book_id, ft, fa, ranked = warm.book_id, warm.title, warm.author, warm.ranked
-        debugLog("[hc] confirm: using the match prefetched at open")
-    else
-        -- No prefetch (progress sync switched on mid-book, or the plugin
-        -- restarted since this book was opened): fall back to searching now.
-        debugLog("[hc] confirm: no prefetch, searching Hardcover for " .. tostring(rec.title))
-        local completed, _err
-        completed, book_id, ft, fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
-            return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language)
-        end, {})  -- {} = non-dismissable (see the note on the silent push above)
-        if not completed then debugLog("[hc] confirm: search cancelled"); self._hc_confirm_open = nil; return end
-    end
-    debugLog("[hc] confirm: match = " .. tostring(book_id) .. " (" .. tostring(ft) .. ")")
-    local ConfirmBox = require("ui/widget/confirmbox")
-    local map = loadHardcoverMap()
-    if not book_id then
-        UIManager:show(ConfirmBox:new{
-            dismissable = false,        -- a tap must not answer this for you
-            flush_events_on_show = true, -- drop taps queued during the search
-            text = T(_("No Hardcover match for \"%1\".\n\nStop trying to sync its progress?"), rec.title or _("this book")),
-            ok_text = _("Stop"),
-            ok_callback = function()
-                self._hc_confirm_open = nil
-                map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
-            end,
-            cancel_callback = function() self._hc_confirm_open = nil end,
-            cancel_text = _("Keep trying"),
-        })
-        return
-    end
-    -- Both sides shown, not just Hardcover's: a wrong match almost always
-    -- traces back to the book's own title/author, so the pairing is what gets
-    -- approved here.
-    local mine = (rec.author and rec.author ~= "")
-        and T(_("%1\nby %2"), rec.title or _("this book"), rec.author)
-        or (rec.title or _("this book"))
-    local theirs = (fa and fa ~= "") and T(_("%1\nby %2"), ft, fa) or ft
-    -- ButtonDialog, deliberately not ConfirmBox. A ConfirmBox calls its
-    -- cancel_callback from onClose as well as from the Cancel button, so the
-    -- dialog merely going away counted as "No" -- and this cancel path records
-    -- decision="skip", which is permanent. Tearing KOReader down with the
-    -- dialog on screen (Android reclaiming a backgrounded app does exactly
-    -- this) therefore condemned the book with nobody having answered, and no
-    -- dialog ever appeared for it again. Verified on desktop KOReader: kill it
-    -- with the dialog up and a "skip" lands in the map.
-    --
-    -- ButtonDialog:onClose only calls tap_close_callback, and none is set
-    -- here, so if this closes without a button being tapped NOTHING is
-    -- recorded: the book stays pending and is asked about again next time.
-    local ButtonDialog = require("ui/widget/buttondialog")
-    local dialog
-    dialog = ButtonDialog:new{
-        title = T(_("This book:\n%1\n\nHardcover match:\n%2\n\nSync reading progress to it?"), mine, theirs),
-        title_align = "left",
-        dismissable = false,   -- a tap outside must not answer for you
-        buttons = {{
-            {
-                text = _("Yes, sync"),
-                callback = function()
-                    debugLog("[hc] dialog answered: yes, " .. tostring(os.time() - (dialog._hc_shown_at or os.time())) .. "s after showing")
-                    UIManager:close(dialog)
-                    self._hc_confirm_open = nil
-                    map[md5] = { book_id = book_id, title = ft, decision = "sync" }; saveHardcoverMap(map)
-                    local Trapper = require("ui/trapper")
-                    Trapper:wrap(function()
-                        Trapper:dismissableRunInSubprocess(function()
-                            return doHardcoverPushProgress(token, book_id, rec.percent)
-                        end, {})
-                        self:clearHardcoverPending(md5)
-                        -- continue with any other pending books
-                        UIManager:scheduleIn(1, function() Trapper:wrap(function() self:processHardcoverPending() end) end)
-                    end)
-                end,
-            },
-            {
-                text = _("Not this book"),
-                callback = function()
-                    debugLog("[hc] dialog answered: no, " .. tostring(os.time() - (dialog._hc_shown_at or os.time())) .. "s after showing")
-                    UIManager:close(dialog)
-                    -- Hardcover usually returned more than one plausible book
-                    -- (an omnibus and the novel it contains, say). Offer those
-                    -- before giving up on the book for good.
-                    local others = {}
-                    for _unused, c in ipairs(ranked or {}) do
-                        if c.id ~= book_id then others[#others + 1] = c end
-                    end
-                    if #others == 0 then
-                        self._hc_confirm_open = nil
-                        map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
-                        return
-                    end
-                    local Trapper = require("ui/trapper")
-                    Trapper:wrap(function() self:pickHardcoverCandidate(md5, rec, others, token) end)
-                end,
-            },
-        }},
-    }
-    -- A plain "ui" refresh, as any ButtonDialog. The full-screen flash used
-    -- earlier takes most of a second on e-ink, and Bookshelf's own repaint of
-    -- the shelf -- re-sorting the just-closed book to the front of Recent --
-    -- lands inside it and is dropped as a collision. With no flash, that
-    -- repaint carries this dialog (already on the stack, one tick after the
-    -- close) to the screen for free; the repaints below are insurance.
     UIManager:show(dialog, "ui")
-    dialog._hc_shown_at = os.time()
-    debugLog("[hc] dialog shown")
-    -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
-    -- discard input queued while the book was closing, which would otherwise
-    -- land straight on a button.
-    local ok_dev, Device = pcall(require, "device")
-    if ok_dev and Device and Device.input and Device.input.inhibitInputUntil then
-        Device.input:inhibitInputUntil(true)
-    end
-    -- Found on both devices with the Bookshelf home screen installed: the
-    -- dialog's own refresh reaches the driver and does not take effect, while
-    -- the next refresh that repaints the WHOLE stack from the home screen up
-    -- does. On the Kindle a Bookshelf poll timer used to supply one 10-15 s
-    -- later; on the phone nothing did until a touch. So repaint the whole
-    -- stack deliberately one second in -- verified to put the dialog on both
-    -- screens at +1 s -- and on Android first re-apply the current screen
-    -- brightness, a Java window-attribute update that makes Android
-    -- recompose (it answers with a WINDOW_RESIZED command) with nothing
-    -- visibly changing. Real devices only; the desktop never needed it.
-    if ok_dev and Device and not (Device.isDesktop and Device:isDesktop()) then
-        if Device.isAndroid and Device:isAndroid() then
-            UIManager:scheduleIn(0.3, function()
-                if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-                pcall(function()
-                    local ok_a, android = pcall(require, "android")
-                    if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
-                    android.setScreenBrightness(android.getScreenBrightness())
-                end)
-            end)
-        end
-        -- Twice, and only after the panel is idle: on the Kindle the dialog's
-        -- own full-screen flash takes most of a second, and a partial refresh
-        -- landing while it is still in flight is a collision the EPDC can
-        -- drop -- seen as one close answered 2 s after showing and the next
-        -- 15 s after, on the same build. refreshWaitForLast blocks until the
-        -- in-flight update is done (a no-op on LCD/OLED); the repeat at +3 s
-        -- is insurance that costs nothing visible, since a partial refresh
-        -- of unchanged pixels does not show on e-ink.
-        for _unused, delay in ipairs({ 1, 3 }) do
-            UIManager:scheduleIn(delay, function()
-                if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-                pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
-                UIManager:setDirty("all", "ui")
-            end)
-        end
-    end
 end
 
 -- Looks this book up on Hardcover while it is being OPENED, and keeps the
@@ -8627,15 +8573,15 @@ function Shelfmark:prefetchHardcoverMatch()
     local Trapper = require("ui/trapper")
     self._hc_prefetch_inflight[md5] = true
     Trapper:wrap(function()
-        local completed, book_id, ft, fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
+        local completed, book_id, ft, fa, _err, ranked, confident = Trapper:dismissableRunInSubprocess(function()
             return doHardcoverFindBook(token, title, author, lang)
         end, {})   -- invisible and non-dismissable; see the note in processHardcoverPending
         self._hc_prefetch_inflight[md5] = nil
         if not completed then debugLog("[hc] prefetch: interrupted"); return end
-        -- A miss is cached too, so the close-time dialog is instant either way.
-        self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa, ranked = ranked }
+        -- A miss is cached too, so the close costs no network either way.
+        self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa, ranked = ranked, confident = confident }
         debugLog("[hc] prefetch: " .. (book_id
-            and ("matched " .. tostring(ft) .. " by " .. tostring(fa))
+            and ((confident and "confident match " or "uncertain match ") .. tostring(ft) .. " by " .. tostring(fa))
             or "no match"))
     end)
 end

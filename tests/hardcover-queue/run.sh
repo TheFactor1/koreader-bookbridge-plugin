@@ -54,11 +54,12 @@ local function ck(c,m) if c then pass=pass+1; print("PASS  "..m) else fail=fail+
 local confirms = 0
 local s1 = { hardcover_progress_sync=true, hardcover_token="t",
              _hc_prefetch_inflight = { md5a = true },
-             confirmHardcoverMatchForProgress = function() confirms = confirms + 1 end }
+             resolveHardcoverMatch = function() confirms = confirms + 1 end }
 PENDING = { md5a = { title="Red Rising", percent=0.5 } }; MAP = {}; scheduled = {}
 Shelfmark.processHardcoverPending(s1)
 ck(confirms == 0, "open-time lookup in flight -> does NOT start a competing search")
 ck(#scheduled == 1, "instead it schedules a retry")
+
 ck(scheduled[1] and scheduled[1].delay == 1, "retry is one second out")
 
 -- ...and gives up eventually rather than waiting forever
@@ -66,11 +67,17 @@ s1._hc_wait_tries = 20
 scheduled = {}
 Shelfmark.processHardcoverPending(s1)
 ck(confirms == 1, "after 20 tries it stops waiting and searches")
+-- a book parked for review is neither pushed nor resolved again
+local resolves = 0
+local sr = { hardcover_progress_sync=true, hardcover_token="t", resolveHardcoverMatch=function() resolves = resolves + 1 end }
+PENDING = { r = { title="R", percent=0.3 } }; MAP = { r = { decision="review", title="R" } }; PUSHES = 0
+Shelfmark.processHardcoverPending(sr)
+ck(resolves == 0 and PUSHES == 0 and PENDING.r ~= nil, "review entry: not pushed, not re-resolved, progress kept")
 
 -- 2. no lookup in flight -> confirm immediately
 local confirms2 = 0
 local s2 = { hardcover_progress_sync=true, hardcover_token="t",
-             confirmHardcoverMatchForProgress = function() confirms2 = confirms2 + 1 end }
+             resolveHardcoverMatch = function() confirms2 = confirms2 + 1 end }
 PENDING = { m = { title="X", percent=0.2 } }; MAP = {}; scheduled = {}
 Shelfmark.processHardcoverPending(s2)
 ck(confirms2 == 1, "nothing in flight -> confirms straight away")
@@ -78,7 +85,7 @@ ck(confirms2 == 1, "nothing in flight -> confirms straight away")
 -- 3. a book already mapped pushes silently, no dialog
 local confirms3 = 0
 local s3 = { hardcover_progress_sync=true, hardcover_token="t",
-             confirmHardcoverMatchForProgress = function() confirms3 = confirms3 + 1 end }
+             resolveHardcoverMatch = function() confirms3 = confirms3 + 1 end }
 PENDING = { m = { title="X", percent=0.2 } }
 MAP = { m = { decision="sync", book_id=42, title="X" } }
 PUSHES = 0

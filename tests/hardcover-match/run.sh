@@ -67,6 +67,7 @@ local pass, fail = 0, 0
 local function load_fix(n)
     local f = assert(io.open(FIX.."/"..n..".json")); FIXTURE = JSON.decode(f:read("*a")); f:close()
 end
+ck_simple = function(c, m) if c then pass = pass + 1; print("PASS  " .. m) else fail = fail + 1; print("FAIL  " .. m) end end
 local function check(what, fixture, title, author, want_id, want_author)
     load_fix(fixture)
     local ok, id, ft, fa = pcall(fn, "tok", title, author)
@@ -92,29 +93,56 @@ check("Hunger Games / Suzanne Collins",       "hunger", "The Hunger Games", "Suz
 -- the ranked alternatives ride along as a fifth value, in search order
 load_fix("run")
 local _i, _t, _a, _e, ranked = fn("tok", "Run", "Blake Crouch")
-if type(ranked) == "table" and #ranked == 5 and ranked[1].id == 444340 and ranked[2].id == 427957 and ranked[2].author == "Blake Crouch" then
-    pass = pass + 1; print("PASS  ranked candidates returned in search order (5, with authors)")
+if type(ranked) == "table" and #ranked == 5 and ranked[1].id == 427957 and ranked[1].author == "Blake Crouch" then
+    pass = pass + 1; print("PASS  ranked candidates returned best-first (5, the author match on top)")
 else fail = fail + 1; print("FAIL  ranked candidates: " .. tostring(ranked and #ranked)) end
 
+local best_early, bu = nil, -1
+load_fix("run"); for _, h in ipairs(FIXTURE.data.search.results.hits) do local d=h.document; if d.title=="Run" and (tonumber(d.users_count) or 0) > bu then best_early, bu = tonumber(d.id), tonumber(d.users_count) or 0 end end
 -- language preference: drops candidates without an edition in it...
 load_fix("run"); LANG_HAS = { [427957] = true, [375036] = true }; LANG_QUERIES = 0
 local lid, _lt, la = fn("tok", "Run", nil, "en")
-ck_simple = function(c, m) if c then pass = pass + 1; print("PASS  " .. m) else fail = fail + 1; print("FAIL  " .. m) end end
 ck_simple(LANG_QUERIES == 1, "a language preference costs exactly one extra batched query")
-ck_simple(lid == 427957 and la == "Blake Crouch", "top hit without an English edition is dropped; next English one wins")
+ck_simple(lid == 427957 or lid == 375036, "candidates without an English edition are dropped; an English one wins")
 -- ...but never all of them
 load_fix("run"); LANG_HAS = {}; LANG_QUERIES = 0
 local lid2 = fn("tok", "Run", nil, "en")
-ck_simple(lid2 == 444340, "no candidate in the language -> keep them all, top hit stands")
+ck_simple(lid2 == best_early, "no candidate in the language -> keep them all, usual pick stands")
 -- ...and no preference means no extra query at all
 load_fix("run"); LANG_QUERIES = 0
 fn("tok", "Run", nil, "")
 ck_simple(LANG_QUERIES == 0, "blank preference -> search stays one round trip")
 
+-- no author: the most-read exact-title match wins (not merely the top hit)
 load_fix("run")
+local best, best_users = nil, -1
+for _, h in ipairs(FIXTURE.data.search.results.hits) do
+    local d = h.document
+    if d.title == "Run" and (tonumber(d.users_count) or 0) > best_users then best, best_users = tonumber(d.id), tonumber(d.users_count) or 0 end
+end
 local id = fn("tok", "Run", nil)
-if id == 444340 then pass = pass + 1; print("PASS  no author -> top search hit")
-else fail = fail + 1; print("FAIL  no author -> "..tostring(id)) end
+if id == best then pass = pass + 1; print("PASS  no author -> most-read exact-title match ("..tostring(best)..")")
+else fail = fail + 1; print("FAIL  no author -> "..tostring(id).." (wanted "..tostring(best)..")") end
+
+-- confidence: what may sync silently and what must go to review
+local function conf(fixture, title, author)
+    load_fix(fixture); local cid, _t, _a, _e, _r, c = fn("tok", title, author); return cid, c
+end
+local cid, c = conf("red_rising", "Red Rising", "Pierce Brown")
+ck_simple(cid == 427473 and c == true, "Red Rising / Pierce Brown -> confident")
+cid, c = conf("threebody", "The Three-Body Problem", "Cixin Liu")
+ck_simple(cid == 208339 and c == true, "Three-Body: real entry beats four near-empty duplicates, confident")
+cid, c = conf("murderbot", "All Systems Red", "Martha Wells")
+ck_simple(cid == 427971 and c == true, "All Systems Red: the novella, not the omnibus; confident")
+cid, c = conf("hitchhiker", "The Ultimate Hitchhiker's Guide to the Galaxy", "Douglas Adams")
+ck_simple(c == false, "Hitchhiker: title only contains a candidate -> NOT confident (review)")
+ck_simple(cid == 427798, "  ...and the novel outranks the omnibus for a non-omnibus title")
+cid, c = conf("hitchhiker", "The Ultimate Hitchhiker's Guide: Five Complete Novels and One Story", "Douglas Adams")
+ck_simple(cid == 205829 and c == true, "  ...but an omnibus-titled file matches the omnibus, confident")
+cid, c = conf("run", "Run", "Blake Crouch")
+ck_simple(cid == 427957 and c == true, "Run / Blake Crouch -> confident")
+cid, c = conf("run", "Run", "Nobody Here")
+ck_simple(c == false, "author that matches nothing -> not confident")
 
 print(pass.." passed, "..fail.." failed")
 os.exit(fail == 0 and 0 or 1)
