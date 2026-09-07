@@ -8475,11 +8475,12 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             local w = win.widget
             local n = (w == dialog) and "THIS" or (w and (w.name or w.id or (w.title and "titled") or (w.text and "text")))
             if not n and type(w) == "table" then
-                local keys, c = {}, 0
-                for k in pairs(w) do
-                    if type(k) == "string" and not k:match("^_") then keys[#keys + 1] = k; c = c + 1; if c >= 5 then break end end
-                end
-                n = "?{" .. table.concat(keys, ",") .. "}"
+                local keys = {}
+                for k in pairs(w) do if type(k) == "string" then keys[#keys + 1] = k end end
+                table.sort(keys)
+                local mt = getmetatable(w)
+                local cls = mt and type(mt.__index) == "table" and (mt.__index.name or mt.__index._name) or nil
+                n = "?{" .. table.concat(keys, ",") .. "}" .. (cls and ("<" .. tostring(cls) .. ">") or "")
             end
             names[i] = tostring(n or "?")
         end
@@ -8493,6 +8494,32 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         UIManager:scheduleIn(delay, function()
             if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
             debugLog("[hc] +" .. tostring(delay) .. "s: " .. stackDump() .. windowState())
+        end)
+    end
+    -- Is the dialog still IN the screen buffer a few seconds later? With
+    -- Bookshelf installed it is painted, on top of the stack, and posted --
+    -- yet not on screen until a menu forces a repaint; without Bookshelf it
+    -- appears at once. If these samples show the frame's black border turning
+    -- light, something is drawing over the buffer behind UIManager's back.
+    local function pixelProbe(tag)
+        local ok_s, Screen = pcall(function() return require("device").screen end)
+        local d = dialog.movable and dialog.movable.dimen
+        if not ok_s or not Screen or not Screen.bb or not d then debugLog("[hc] px " .. tag .. ": no dimen yet"); return end
+        local function px(x, y)
+            local ok_p, v = pcall(function() return Screen.bb:getPixel(x, y):getColor8().a end)
+            return ok_p and tostring(v) or "?"
+        end
+        debugLog(string.format("[hc] px %s: border=%s inside=%s outside=%s (dimen %d,%d %dx%d)",
+            tag, px(d.x + 1, d.y + math.floor(d.h / 2)), px(d.x + math.floor(d.w / 2), d.y + 6),
+            px(math.max(0, d.x - 8), d.y + math.floor(d.h / 2)), d.x, d.y, d.w, d.h))
+    end
+    for _unused, delay in ipairs({ 0.2, 1, 2, 3, 4 }) do
+        UIManager:scheduleIn(delay, function()
+            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
+            pixelProbe("+" .. tostring(delay) .. "s")
+            if delay == 3 and ok_dev and Device and not Device:isDesktop() then
+                pcall(function() Device.screen:shot(DataStorage:getSettingsDir() .. "/hc_dialog_t3.png") end)
+            end
         end)
     end
     -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
