@@ -2999,6 +2999,46 @@ local function doPairingUpload(relay_url, ciphertext_b64, socks5_proxy)
     return decoded.code, code
 end
 
+-- Ships the debug log to the pairing relay's POST /log, so a problem seen on
+-- a phone or Kindle can be read on the homeserver without adb, screenshots of
+-- the log viewer, or remoting into the device. Plain text; the relay files it
+-- under a timestamped name and never serves it back.
+local function doDebugLogUpload(relay_url, text, socks5_proxy)
+    local headers = {
+        ["Content-Type"] = "text/plain; charset=utf-8",
+        ["Content-Length"] = tostring(#text),
+    }
+    local url = relay_url .. "/log"
+    debugLog("[log] -> POST " .. url .. " (" .. #text .. " bytes)")
+    socketutil:set_timeout(15, 60)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "POST", url = url, headers = headers, sink = sink, source = ltn12.source.string(text) }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+    local ok, code = pcall(function() return socket.skip(1, http.request(request)) end)
+    socketutil:reset_timeout()
+    if not ok then
+        debugLog("[log] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the server -- check the pairing relay URL under Settings > Connections.")
+    end
+    local content = table.concat(sink_table)
+    debugLog("[log] <- HTTP " .. tostring(code))
+    if code == 404 then
+        return nil, code, _("The server doesn't accept debug logs (its relay needs LOG_DIR set).")
+    elseif code ~= 200 then
+        return nil, code, T(_("Server refused the log (HTTP %1)."), tostring(code))
+    end
+    local decode_ok, decoded = pcall(JSON.decode, content)
+    if not decode_ok or type(decoded) ~= "table" or type(decoded.id) ~= "string" then
+        return nil, code, _("Server gave an unexpected response.")
+    end
+    return decoded.id, code
+end
+
 local function doPairingDownload(relay_url, pair_code, socks5_proxy)
     local url = relay_url .. "/pair/" .. pair_code
     debugLog("[pair] -> GET " .. url)
@@ -6352,10 +6392,63 @@ function Shelfmark:addToMainMenu(menu_items)
                         keep_menu_open = true,
                         callback = function() self:showDebugLog() end,
                     },
+                    {
+                        text = _("Send debug log to server"),
+                        keep_menu_open = true,
+                        callback = function()
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() self:sendDebugLog() end)
+                        end,
+                    },
                 },
             },
         },
     }
+end
+
+-- "Send debug log to server". Must run inside a Trapper:wrap (the menu
+-- callback provides one): the upload runs in a subprocess behind a
+-- dismissable progress box, so a slow link never freezes the UI.
+function Shelfmark:sendDebugLog()
+    if not self.pairing_relay_url or self.pairing_relay_url == "" then
+        UIManager:show(InfoMessage:new{
+            text = _("Set the pairing relay URL first (Settings > Connections > Server settings)."),
+        })
+        return
+    end
+    -- A header the reader of the file will want before anything else: what
+    -- device, what KOReader, which plugin build.
+    local Device = require("device")
+    local ok_v, Version = pcall(require, "version")
+    local rev = (ok_v and type(Version) == "table" and Version.getCurrentRevision and Version:getCurrentRevision()) or "?"
+    local build = "?"
+    local mf = io.open(tostring(self.path or "") .. "/manifest.json", "r")
+    if mf then
+        local m = mf:read("*a"); mf:close()
+        build = m:match('"build"%s*:%s*"([^"]+)"') or build
+    end
+    local parts = { string.format(
+        "# shelfmark debug log\n# sent: %s\n# device: %s (android=%s, eink=%s)\n# koreader: %s\n# plugin build: %s\n\n",
+        os.date("%Y-%m-%d %H:%M:%S"), tostring(Device.model), tostring(Device:isAndroid()),
+        tostring(Device:hasEinkScreen()), tostring(rev), build) }
+    for _unused, path in ipairs({ DEBUG_LOG_PREV_PATH, DEBUG_LOG_PATH }) do
+        local f = io.open(path, "r")
+        if f then parts[#parts + 1] = f:read("*a"); f:close() end
+    end
+    local text = table.concat(parts)
+    local max_bytes = 480 * 1024   -- the relay refuses over 512 KB
+    if #text > max_bytes then text = parts[1] .. "...\n" .. text:sub(-max_bytes) end
+    local relay_url, socks5_proxy = self.pairing_relay_url, self.socks5_proxy
+    local Trapper = require("ui/trapper")
+    local completed, id, _code, err = Trapper:dismissableRunInSubprocess(function()
+        return doDebugLogUpload(relay_url, text, socks5_proxy)
+    end, _("Sending debug log..."))
+    if not completed then return end
+    if id then
+        UIManager:show(InfoMessage:new{ text = T(_("Debug log sent. It's filed on the server as %1"), id) })
+    else
+        UIManager:show(InfoMessage:new{ text = err or _("Couldn't send the debug log.") })
+    end
 end
 
 function Shelfmark:showDebugLog()
@@ -8317,13 +8410,45 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     -- becomes visible when something else forces a redraw, such as opening a
     -- menu. UIManager coalesces this with the widget's own setDirty into a
     -- single refresh pass, so it costs one flash, not two.
+    -- Diagnostics for the Android report that this dialog only appears once
+    -- a menu is opened. framebuffer_android's _updateWindow() skips the blit
+    -- SILENTLY (logcat only) when the native window is momentarily gone, so
+    -- the debug log records whether the dialog was painted at all and, on
+    -- Android, whether a window existed at show time and at paint time.
+    local function windowState()
+        local ok_a, android = pcall(require, "android")
+        if not ok_a or type(android) ~= "table" or type(android.app) ~= "table" then return "" end
+        return android.app.window ~= nil and " window=yes" or " window=NO"
+    end
+    local base_paint = dialog.paintTo
+    dialog.paintTo = function(w, ...)
+        if not w._hc_paint_logged then
+            w._hc_paint_logged = true
+            debugLog("[hc] dialog painted" .. windowState())
+        end
+        return base_paint(w, ...)
+    end
     UIManager:show(dialog, "flashui")
+    local stack = UIManager._window_stack or {}
+    local top = stack[#stack] and stack[#stack].widget
+    debugLog(string.format("[hc] dialog shown: stack=%d on_top=%s%s", #stack, tostring(top == dialog), windowState()))
     -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
     -- discard input queued while the book was closing, which would otherwise
     -- land straight on a button.
     local ok_dev, Device = pcall(require, "device")
     if ok_dev and Device and Device.input and Device.input.inhibitInputUntil then
         Device.input:inhibitInputUntil(true)
+    end
+    -- Android only: post the dialog's region once more a moment later. If the
+    -- first blit hit a window gap it was dropped without a word, and nothing
+    -- else would redraw until the next tap. One partial refresh of the
+    -- dialog's own rectangle; nothing on other platforms.
+    if ok_dev and Device and Device.isAndroid and Device:isAndroid() then
+        UIManager:scheduleIn(1.5, function()
+            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
+            debugLog("[hc] dialog re-posted" .. windowState())
+            UIManager:setDirty(dialog, "ui")
+        end)
     end
 end
 
