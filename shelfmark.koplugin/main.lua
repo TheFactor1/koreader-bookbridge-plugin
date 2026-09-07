@@ -8749,14 +8749,6 @@ function Shelfmark:onReaderReady()
     UIManager:scheduleIn(3, function() self:prefetchHardcoverMatch() end)
 end
 
--- Fires in the reader when a document closes: capture, then push a moment
--- later (network off the teardown path, in FileManager context).
--- Ten seconds of close-time diagnostics on real devices: every
--- Screen:setRotationMode call (Bookshelf restores a stashed rotation on the
--- way back from a book -- on Android that reaches Java's
--- setRequestedOrientation, an OS relayout request, right before our dialog)
--- and every native app command KOReader receives, decoded by name. Installed
--- here because both happen BEFORE the dialog exists.
 -- Bookshelf's "hot parking" (on by default): closing a book from the shelf
 -- does not close it. The shelf is lifted over the still-open reader, and the
 -- real close -- the CloseDocument event above -- runs only after 30-40 s of
@@ -8812,30 +8804,20 @@ function Shelfmark:onBookshelfParked()
     self:onCloseDocument()
 end
 
+-- Fires in the reader when a document closes (and, via onBookshelfParked,
+-- when Bookshelf parks it): capture now, sync a moment later off the
+-- teardown path.
 function Shelfmark:onCloseDocument()
     self:captureReadingProgress()
     if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then
-        -- If the match was prefetched when the book opened, show the dialog
-        -- NOW, inside the close itself, rather than 0.4 s later. On the
-        -- phone every later post of the dialog was correct, accepted, and
-        -- never presented until the next touch, while the frame that shows
-        -- the shelf (posted within the same close, seconds earlier) always
-        -- was. Raised here, the dialog is a modal already on the stack when
-        -- the file manager and any home screen are shown beneath it, so it
-        -- rides on that first frame. Nothing here touches the network; the
-        -- delayed path remains for the cases with no prefetch.
+        -- A match prefetched at open costs no network: decide and push on the
+        -- next tick, once the shelf/file manager is on the stack beneath the
+        -- notice. Without one, wait for the file manager to finish painting.
         local ui = self.ui
         local md5 = ui and ui.doc_settings and ui.doc_settings:readSetting("partial_md5_checksum")
         local warm = md5 and self._hc_prefetch and self._hc_prefetch[md5]
         if warm then
-            -- Next tick, not synchronously: shown inside the close, the dialog
-            -- ends up BELOW the file manager and home screen that the close
-            -- goes on to show (verified on desktop: [THIS < FM < bookshelf]).
-            -- A tick later those are on the stack, the dialog goes on top as
-            -- the modal it is, and UIManager repaints and posts again before
-            -- waiting for input -- immediately after the frame that shows
-            -- the shelf, not seconds after it.
-            debugLog("[hc] close: prefetched match on hand, raising the dialog next tick")
+            debugLog("[hc] close: prefetched match on hand, deciding next tick")
             UIManager:nextTick(function()
                 local Trapper = require("ui/trapper")
                 Trapper:wrap(function() self:processHardcoverPending() end)
