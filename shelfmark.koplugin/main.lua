@@ -8468,7 +8468,7 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             end,
             cancel_callback = function() self._hc_confirm_open = nil end,
             cancel_text = _("Keep trying"),
-        }, "flashui")   -- same reason as the match dialog below
+        })
         return
     end
     -- Both sides shown, not just Hardcover's: a wrong match almost always
@@ -8538,14 +8538,13 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             },
         }},
     }
-    -- "flashui", not the default: this appears moments after the reader tore
-    -- down and the file browser painted itself, and on e-ink a partial refresh
-    -- landing in the middle of that transition can leave the dialog sitting in
-    -- the framebuffer without the panel actually being updated -- it then only
-    -- becomes visible when something else forces a redraw, such as opening a
-    -- menu. UIManager coalesces this with the widget's own setDirty into a
-    -- single refresh pass, so it costs one flash, not two.
-    UIManager:show(dialog, "flashui")
+    -- A plain "ui" refresh, as any ButtonDialog. The full-screen flash used
+    -- earlier takes most of a second on e-ink, and Bookshelf's own repaint of
+    -- the shelf -- re-sorting the just-closed book to the front of Recent --
+    -- lands inside it and is dropped as a collision. With no flash, that
+    -- repaint carries this dialog (already on the stack, one tick after the
+    -- close) to the screen for free; the repaints below are insurance.
+    UIManager:show(dialog, "ui")
     dialog._hc_shown_at = os.time()
     debugLog("[hc] dialog shown")
     -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
