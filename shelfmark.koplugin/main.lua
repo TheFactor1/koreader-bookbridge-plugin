@@ -128,6 +128,8 @@ function Shelfmark:loadSettings()
     -- Archive/CWA/the Shelfmark server, so no self-hosted companion or
     -- SOCKS5 proxy is needed for this one; it's reachable directly.
     self.hardcover_token = self.sm_settings.data.shelfmark.hardcover_token
+    -- Opt-in: push reading progress to Hardcover on close/suspend (see onCloseDocument).
+    self.hardcover_progress_sync = self.sm_settings.data.shelfmark.hardcover_progress_sync
 end
 
 function Shelfmark:defaultDownloadDir()
@@ -161,6 +163,7 @@ function Shelfmark:saveAllSettings(msg)
         annas_download_key = self.annas_download_key,
         annas_tld = self.annas_tld,
         hardcover_token = self.hardcover_token,
+        hardcover_progress_sync = self.hardcover_progress_sync,
         ai_relay_url = self.ai_relay_url,
         ai_relay_token = self.ai_relay_token,
         update_url = self.update_url,
@@ -676,6 +679,46 @@ local function savePendingUploads(t)
     if not out then return false end
     out:write(JSON.encode(t)); out:close()
     return true
+end
+
+local HARDCOVER_MAP_PATH = DataStorage:getSettingsDir() .. "/shelfmark_hardcover_map.json"
+-- Maps a book's KOReader partial-md5 to its Hardcover identity and the user's
+-- one-time decision, so a local file is matched to Hardcover exactly once and
+-- then synced silently. Keyed by md5 -> { book_id, title, decision } where
+-- decision is "sync" (matched -- keep pushing progress) or "skip" (declined --
+-- never ask again). partial-md5, not path: a renamed/moved file keeps syncing.
+local function loadHardcoverMap()
+    local f = io.open(HARDCOVER_MAP_PATH, "r")
+    if not f then return {} end
+    local c = f:read("*a"); f:close()
+    if not c or c == "" then return {} end
+    local ok, d = pcall(JSON.decode, c)
+    if ok and type(d) == "table" then return d end
+    return {}
+end
+local function saveHardcoverMap(t)
+    local out = io.open(HARDCOVER_MAP_PATH, "w")
+    if not out then return false end
+    out:write(JSON.encode(t)); out:close(); return true
+end
+
+local HARDCOVER_PENDING_PATH = DataStorage:getSettingsDir() .. "/shelfmark_hardcover_pending.json"
+-- Reading progress captured on close/suspend but not yet pushed. The push runs
+-- the network from a calm context (FileManager, or on resume), never during
+-- document teardown. md5 -> { title, author, percent, at }.
+local function loadHardcoverPending()
+    local f = io.open(HARDCOVER_PENDING_PATH, "r")
+    if not f then return {} end
+    local c = f:read("*a"); f:close()
+    if not c or c == "" then return {} end
+    local ok, d = pcall(JSON.decode, c)
+    if ok and type(d) == "table" then return d end
+    return {}
+end
+local function saveHardcoverPending(t)
+    local out = io.open(HARDCOVER_PENDING_PATH, "w")
+    if not out then return false end
+    out:write(JSON.encode(t)); out:close(); return true
 end
 
 local PENDING_NOTIFY_PATH = DataStorage:getSettingsDir() .. "/shelfmark_pending_notify.json"
@@ -1921,6 +1964,71 @@ local function doHardcoverSetStatus(token, book_id, status_id)
         return false, (result and result.error) or _("Hardcover didn't confirm the update.")
     end
     return true
+end
+
+-- The user's relationship to a Hardcover book: the user_book row with its
+-- edition and latest read, or nil if the book isn't on their shelf yet.
+local function doHardcoverGetUserBook(token, book_id)
+    local data, err = doHardcoverGraphQL(token, [[
+        query UB($id: Int!) {
+            me {
+                user_books(where: { book_id: { _eq: $id } }, limit: 1) {
+                    id
+                    status_id
+                    edition { id pages }
+                    user_book_reads(order_by: { id: desc }, limit: 1) {
+                        id progress_pages edition_id finished_at
+                    }
+                }
+            }
+        }
+    ]], { id = book_id })
+    if not data then return nil, err end
+    local me = data.me
+    return me and me[1] and me[1].user_books and me[1].user_books[1]  -- may be nil
+end
+
+-- Pushes reading progress (percent, 0..1) to Hardcover for a resolved book_id.
+-- Converts to the edition's page count so KOReader's own pagination doesn't
+-- matter -- 42% of a 352-page edition is recorded as page 148, matching what
+-- Hardcover shows. Auto-marks the book currently-reading if it isn't already,
+-- and never downgrades a book already marked read.
+local function doHardcoverPushProgress(token, book_id, percent)
+    local ub, err = doHardcoverGetUserBook(token, book_id)
+    if err then return false, err end
+    if not ub or (ub.status_id ~= 2 and ub.status_id ~= 3) then
+        local ok, serr = doHardcoverSetStatus(token, book_id, 2)  -- 2 = currently reading
+        if not ok then return false, serr end
+        ub = doHardcoverGetUserBook(token, book_id)
+        if not ub then return false, _("Couldn't mark the book currently reading on Hardcover.") end
+    end
+    local edition = ub.edition
+    local pages = edition and tonumber(edition.pages)
+    if not edition or not pages or pages <= 0 then
+        return false, _("Hardcover has no page count for this edition -- can't record progress.")
+    end
+    local progress_pages = math.floor(percent * pages + 0.5)
+    if progress_pages < 1 then progress_pages = 1 end
+    if progress_pages > pages then progress_pages = pages end
+    local read = ub.user_book_reads and ub.user_book_reads[1]
+    if read and not read.finished_at then
+        local data, uerr = doHardcoverGraphQL(token, [[
+            mutation UpdRead($id: Int!, $p: Int!) {
+                update_user_book_read(id: $id, object: { progress_pages: $p }) { id error }
+            }
+        ]], { id = read.id, p = progress_pages })
+        local r = data and data.update_user_book_read
+        if not r or r.error then return false, (r and r.error) or uerr or _("Hardcover didn't confirm the progress update.") end
+    else
+        local data, ierr = doHardcoverGraphQL(token, [[
+            mutation InsRead($ubid: Int!, $eid: Int!, $p: Int!, $d: date!) {
+                insert_user_book_read(user_book_id: $ubid, user_book_read: { edition_id: $eid, progress_pages: $p, started_at: $d }) { id error }
+            }
+        ]], { ubid = ub.id, eid = edition.id, p = progress_pages, d = os.date("!%Y-%m-%d") })
+        local r = data and data.insert_user_book_read
+        if not r or r.error then return false, (r and r.error) or ierr or _("Hardcover didn't confirm the new reading record.") end
+    end
+    return true, progress_pages, pages
 end
 
 local function doHardcoverFollowAuthor(token, author_id)
@@ -6099,6 +6207,17 @@ function Shelfmark:addToMainMenu(menu_items)
                         callback = function() self:editHardcoverSettings() end,
                     },
                     {
+                        text = _("Sync reading progress to Hardcover"),
+                        keep_menu_open = true,
+                        checked_func = function() return self.hardcover_progress_sync == true end,
+                        callback = function()
+                            self.hardcover_progress_sync = not self.hardcover_progress_sync
+                            self:saveAllSettings(self.hardcover_progress_sync
+                                and _("On. As you read, progress will sync to Hardcover when you close a book or the device sleeps.")
+                                or _("Off."))
+                        end,
+                    },
+                    {
                         text = _("Match suggestions (AI)"),
                         keep_menu_open = true,
                         callback = function() self:editAiSettings() end,
@@ -7913,13 +8032,144 @@ function Shelfmark:checkPendingRequestNotifications()
     UIManager:show(InfoMessage:new{ text = text })
 end
 
+-- ===== Hardcover reading-progress sync =====
+-- Captured on close/suspend (instant, local), pushed from a calm context
+-- (FileManager after close, or on resume). See doHardcoverPushProgress and the
+-- map/pending stores above.
+
+-- Reads the just-closed (or suspending) document's progress into the pending
+-- file. Guarded so it is a no-op unless progress sync is on, a token is set,
+-- and we are actually in the reader with a document.
+function Shelfmark:captureReadingProgress()
+    if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
+    local ui = self.ui
+    if not ui or not ui.document or not ui.doc_settings then return end
+    local md5 = ui.doc_settings:readSetting("partial_md5_checksum")
+    if not md5 or md5 == "" then return end
+    local percent
+    if ui.document.info and ui.document.info.has_pages then
+        percent = ui.paging and ui.paging:getLastPercent()
+    else
+        percent = ui.rolling and ui.rolling:getLastPercent()
+    end
+    if type(percent) ~= "number" then return end
+    local props = (ui.document.getProps and ui.document:getProps()) or {}
+    local pending = loadHardcoverPending()
+    pending[md5] = { title = props.title, author = props.authors, percent = percent, at = os.time() }
+    saveHardcoverPending(pending)
+end
+
+function Shelfmark:clearHardcoverPending(md5)
+    local pending = loadHardcoverPending()
+    if pending[md5] ~= nil then pending[md5] = nil; saveHardcoverPending(pending) end
+end
+
+-- Pushes every pending record it can: known books silently, and the FIRST
+-- unmatched book through a one-time confirm (the rest wait for the next pass).
+-- Must run inside a Trapper:wrap (both callers provide one).
+function Shelfmark:processHardcoverPending()
+    if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
+    local pending = loadHardcoverPending()
+    if next(pending) == nil then return end
+    local map = loadHardcoverMap()
+    local token = self.hardcover_token
+    local Trapper = require("ui/trapper")
+    local unmapped
+    for md5, rec in pairs(pending) do
+        local entry = map[md5]
+        if entry and entry.decision == "skip" then
+            pending[md5] = nil
+        elseif entry and entry.decision == "sync" and entry.book_id then
+            local completed, ok = Trapper:dismissableRunInSubprocess(function()
+                return doHardcoverPushProgress(token, entry.book_id, rec.percent)
+            end, false)  -- silent; a failure just stays pending to retry
+            if completed and ok then pending[md5] = nil end
+        elseif not unmapped then
+            unmapped = { md5 = md5, rec = rec }
+        end
+    end
+    saveHardcoverPending(pending)
+    if unmapped then self:confirmHardcoverMatchForProgress(unmapped.md5, unmapped.rec) end
+end
+
+-- One-time match+confirm for a book not yet mapped. Reuses the same Hardcover
+-- search the "Mark as read" flow uses, shows what it found, and remembers the
+-- decision (sync or skip) so it never asks again. Must run inside a wrap.
+function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
+    local token = self.hardcover_token
+    local Trapper = require("ui/trapper")
+    local completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverFindBook(token, rec.title or "", rec.author)
+    end, _("Finding on Hardcover..."))
+    if not completed then return end
+    local ConfirmBox = require("ui/widget/confirmbox")
+    local map = loadHardcoverMap()
+    if not book_id then
+        UIManager:show(ConfirmBox:new{
+            text = T(_("No Hardcover match for \"%1\".\n\nStop trying to sync its progress?"), rec.title or _("this book")),
+            ok_text = _("Stop"),
+            ok_callback = function()
+                map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
+            end,
+            cancel_text = _("Keep trying"),
+        })
+        return
+    end
+    local desc = (fa and fa ~= "") and T(_("%1 by %2"), ft, fa) or ft
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Sync reading progress for\n\"%1\"\nto this Hardcover book?\n\n%2"), rec.title or _("this book"), desc),
+        ok_text = _("Yes, sync"),
+        ok_callback = function()
+            map[md5] = { book_id = book_id, title = ft, decision = "sync" }; saveHardcoverMap(map)
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
+                Trapper:dismissableRunInSubprocess(function()
+                    return doHardcoverPushProgress(token, book_id, rec.percent)
+                end, _("Updating Hardcover..."))
+                self:clearHardcoverPending(md5)
+                -- continue with any other pending books
+                UIManager:scheduleIn(1, function() Trapper:wrap(function() self:processHardcoverPending() end) end)
+            end)
+        end,
+        cancel_text = _("No"),
+        cancel_callback = function()
+            map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
+        end,
+    })
+end
+
+-- Fires in the reader when a document closes: capture, then push a moment
+-- later (network off the teardown path, in FileManager context).
+function Shelfmark:onCloseDocument()
+    self:captureReadingProgress()
+    if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then
+        UIManager:scheduleIn(1, function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:processHardcoverPending() end)
+        end)
+    end
+end
+
+-- Device sleeping: capture now, push on the next resume (a scheduled push
+-- wouldn't survive the sleep). No-op in FileManager (no document).
+function Shelfmark:onSuspend()
+    self:captureReadingProgress()
+end
+
 function Shelfmark:onResume()
-    -- scheduleIn rather than checking immediately -- confirmed live earlier
-    -- this session that Tailscale's userspace daemon isn't necessarily
-    -- reconnected the instant the device wakes, so an immediate check would
-    -- routinely just fail silently for no good reason. Throttled separately
-    -- (self._last_notify_check) so a quick series of wake/sleep cycles
-    -- (e.g. repeatedly checking the time) doesn't spam requests.
+    -- Push any progress captured on suspend/close. No throttle needed -- at
+    -- most one record per book, and processHardcoverPending is a cheap no-op
+    -- when nothing is pending.
+    if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then
+        UIManager:scheduleIn(3, function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:processHardcoverPending() end)
+        end)
+    end
+    -- Delivered-request notifications. scheduleIn rather than checking
+    -- immediately -- Tailscale's userspace daemon isn't necessarily reconnected
+    -- the instant the device wakes. Throttled (self._last_notify_check) so a
+    -- quick series of wake/sleep cycles doesn't spam requests.
     local now = os.time()
     if self._last_notify_check and (now - self._last_notify_check) < 300 then
         return
