@@ -2509,6 +2509,44 @@ end
 -- files, verify, and only then swap -- the manifest path additionally
 -- checks each file's SHA-256, so a truncated or stale-manifest download is
 -- refused outright rather than parse-checked and hoped for.
+-- Fetches the settings the setup wizard staged under a short pairing code
+-- (see shelfmark-stack/setup): GET <base>/claim/<code> returns
+-- {"shelfmark": {...}} exactly once -- the wizard invalidates the code on
+-- read -- so a failure here often just means the code was already used or
+-- expired. Runs inside the caller's Trapper subprocess like every network call.
+local function doClaimFromServer(base_url, code, socks5_proxy)
+    local base = (base_url or ""):gsub("%s", ""):gsub("/*$", "")
+    if base == "" then return nil, _("No server address given.") end
+    if not base:match("^https?://") then base = "http://" .. base end
+    local url = base .. "/claim/" .. (code or ""):gsub("%s", "")
+    local body, http_code, err = doHttpGetString(url, socks5_proxy, "[pair]", 8, 15)
+    if not body then
+        if http_code == 404 then
+            return nil, _("That code wasn't found -- it may have expired or already been used. Make a new one in the wizard.")
+        end
+        return nil, err or T(_("Couldn't reach the setup server (HTTP %1)."), tostring(http_code))
+    end
+    local ok, decoded = pcall(JSON.decode, body)
+    local settings = ok and type(decoded) == "table" and decoded.shelfmark
+    if type(settings) ~= "table" then
+        return nil, _("The server's reply couldn't be read.")
+    end
+    return settings
+end
+
+-- Reachability probe for the connection-status screen: does this base URL
+-- answer HTTP at all? Any status -- even 401/403 -- counts as "up"; we're
+-- testing that the service is reachable, not that credentials are right.
+local function doTestService(base_url, socks5_proxy)
+    local base = (base_url or ""):gsub("%s", ""):gsub("/*$", "")
+    if base == "" then return false end
+    if not base:match("^https?://") then base = "http://" .. base end
+    local body, http_code = doHttpGetString(base .. "/", socks5_proxy, "[status]", 5, 10)
+    if body ~= nil then return true, http_code end          -- 2xx/3xx
+    if type(http_code) == "number" then return true, http_code end  -- 4xx/5xx, still reachable
+    return false                                            -- no connection
+end
+
 local function doApplyUpdate(target, socks5_proxy)
     local plugin_dir = getPluginDir()
     local is_manifest = type(target) == "table" and target.manifest
@@ -5319,6 +5357,113 @@ function Shelfmark:refreshBookMetadata(file)
 end
 
 -- Mirrors syncLibrary's Trapper-subprocess wrapping above.
+-- Two-field claim of a wizard-staged config (address + code). The counterpart
+-- to the setup wizard's pairing screen: it fetches /claim/<code> and writes
+-- whatever settings the server put there, closing the loop the wizard opens.
+function Shelfmark:importFromServer()
+    local MultiInputDialog = require("ui/widget/multiinputdialog")
+    local prefill = self.server_url and self.server_url:match("^(https?://[^:/]+)") or ""
+    local dialog
+    dialog = MultiInputDialog:new{
+        title = _("Import from server"),
+        description = _("Run the setup wizard on your computer, then enter this machine's address and the code it shows."),
+        fields = {
+            { text = prefill:gsub("^https?://", ""), hint = _("Server address, e.g. 100.90.18.11") },
+            { text = "", hint = _("6-character code") },
+        },
+        buttons = {{
+            { text = _("Cancel"), id = "close", callback = function() UIManager:close(dialog) end },
+            {
+                text = _("Import"),
+                is_enter_default = true,
+                callback = function()
+                    local fields = dialog:getFields()
+                    local addr, code = fields[1], fields[2]
+                    UIManager:close(dialog)
+                    -- Wrapped: this fires from the UI loop, and applyServerClaim
+                    -- runs a Trapper subprocess that needs a coroutine to yield
+                    -- to (see the Trapper audit).
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function() self:applyServerClaim(addr, code) end)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function Shelfmark:applyServerClaim(addr, code)
+    if not addr or addr:gsub("%s", "") == "" or not code or code:gsub("%s", "") == "" then
+        UIManager:show(InfoMessage:new{ text = _("Enter both the address and the code.") })
+        return
+    end
+    local socks5_proxy = self.socks5_proxy
+    local Trapper = require("ui/trapper")
+    local completed, settings, err = Trapper:dismissableRunInSubprocess(function()
+        return doClaimFromServer(addr, code, socks5_proxy)
+    end, _("Fetching settings..."))
+    if not completed then return end
+    if not settings then
+        UIManager:show(InfoMessage:new{ text = err or _("Couldn't import.") })
+        return
+    end
+    -- Only the keys the claim actually carries are written; anything already
+    -- set that the claim doesn't mention is left alone.
+    local fields = { "server_url", "cwa_url", "cwa_username", "cwa_password",
+                     "annas_url", "ai_relay_url", "ai_relay_token" }
+    local applied = 0
+    for _, k in ipairs(fields) do
+        if type(settings[k]) == "string" and settings[k] ~= "" then
+            self[k] = settings[k]
+            applied = applied + 1
+        end
+    end
+    if applied == 0 then
+        UIManager:show(InfoMessage:new{ text = _("The server sent nothing to import.") })
+        return
+    end
+    self:saveAllSettings(T(_("Imported %1 setting(s) from the server."), tostring(applied)))
+end
+
+-- One screen: each configured service, whether it answers, and what it
+-- enables. Read-only, run only when opened -- never on a timer (battery).
+function Shelfmark:showConnectionStatus()
+    local socks5_proxy = self.socks5_proxy
+    local services = {}
+    local function add(url, name, enables)
+        if url and url ~= "" then services[#services + 1] = { url = url, name = name, enables = enables } end
+    end
+    add(self.server_url, _("Shelfmark server"), _("search & requests"))
+    add(self.cwa_url, _("Calibre-Web-Automated"), _("library sync"))
+    add(self.annas_url, _("Anna's Archive API"), _("Anna's Archive as primary source"))
+    add(self.ai_relay_url, _("AI relay"), _("match suggestions"))
+    if #services == 0 then
+        UIManager:show(InfoMessage:new{ text = _("Nothing is configured yet -- use 'Import from server' or Settings.") })
+        return
+    end
+    local Trapper = require("ui/trapper")
+    local completed, results = Trapper:dismissableRunInSubprocess(function()
+        local out = {}
+        for i, sv in ipairs(services) do out[i] = doTestService(sv.url, socks5_proxy) and 1 or 0 end
+        return out
+    end, _("Checking services..."))
+    if not completed then return end
+    local lines = {}
+    for i, sv in ipairs(services) do
+        local up = results[i] == 1
+        lines[#lines + 1] = string.format("%s  %s\n      %s -- %s",
+            up and "[up]" or "[--]", sv.name,
+            up and _("reachable") or _("no response"), sv.enables)
+    end
+    local TextViewer = require("ui/widget/textviewer")
+    UIManager:show(TextViewer:new{
+        title = _("Connection status"),
+        text = table.concat(lines, "\n\n"),
+        justified = false,
+    })
+end
+
 function Shelfmark:checkForUpdate()
     local Trapper = require("ui/trapper")
     local update_url, socks5_proxy = self.update_url, self.socks5_proxy
@@ -5925,8 +6070,21 @@ function Shelfmark:addToMainMenu(menu_items)
                     {
                         text = _("Import settings from text"),
                         keep_menu_open = true,
+                                                callback = function() self:importSettingsFromText() end,
+                    },
+                    {
+                        text = _("Import from server"),
+                        keep_menu_open = true,
+                        callback = function() self:importFromServer() end,
+                    },
+                    {
+                        text = _("Connection status"),
+                        keep_menu_open = true,
                         separator = true,
-                        callback = function() self:importSettingsFromText() end,
+                        callback = function()
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() self:showConnectionStatus() end)
+                        end,
                     },
                     {
                         text_func = function()
