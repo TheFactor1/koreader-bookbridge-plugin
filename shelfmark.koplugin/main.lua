@@ -8934,6 +8934,24 @@ function Shelfmark:onCloseDocument()
     self:captureReadingProgress()
     if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then
         pcall(function() self:installCloseProbes() end)
+        -- If the match was prefetched when the book opened, show the dialog
+        -- NOW, inside the close itself, rather than 0.4 s later. On the
+        -- phone every later post of the dialog was correct, accepted, and
+        -- never presented until the next touch, while the frame that shows
+        -- the shelf (posted within the same close, seconds earlier) always
+        -- was. Raised here, the dialog is a modal already on the stack when
+        -- the file manager and any home screen are shown beneath it, so it
+        -- rides on that first frame. Nothing here touches the network; the
+        -- delayed path remains for the cases with no prefetch.
+        local ui = self.ui
+        local md5 = ui and ui.doc_settings and ui.doc_settings:readSetting("partial_md5_checksum")
+        local warm = md5 and self._hc_prefetch and self._hc_prefetch[md5]
+        if warm then
+            debugLog("[hc] close: prefetched match on hand, raising the dialog in the close itself")
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:processHardcoverPending() end)
+            return
+        end
         -- Just long enough for the FileManager to finish painting; the dialog
         -- no longer cares about stray input, so this needn't be generous.
         UIManager:scheduleIn(0.4, function()
