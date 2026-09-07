@@ -144,6 +144,7 @@ end
 function Shelfmark:init()
     self:loadSettings()
     self.ui.menu:registerToMainMenu(self)
+    pcall(function() self:installRotationGuard() end)
     self:registerFileDialogButtons()
 end
 
@@ -8846,12 +8847,41 @@ end
 -- setRequestedOrientation, an OS relayout request, right before our dialog)
 -- and every native app command KOReader receives, decoded by name. Installed
 -- here because both happen BEFORE the dialog exists.
+-- A rotation request for the mode already in effect is a no-op in meaning,
+-- and KOReader's own FileManager guards against issuing one. Bookshelf's
+-- return-from-reader path does not: it restores a stashed mode
+-- unconditionally, and on the phone the log shows setRotationMode(0)
+-- current=0 right before our dialog. On Android that reaches Java's
+-- setRequestedOrientation -- an OS relayout request -- after which the
+-- dialog's frames (correct, posted, accepted) are not presented until the
+-- next touch. Installed once, on real devices only, on the screen instance:
+-- same-mode requests are dropped and logged; different modes pass through.
+function Shelfmark:installRotationGuard()
+    local ok_dev, Device = pcall(require, "device")
+    if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
+    local Screen = Device.screen
+    if not Screen or rawget(Screen, "setRotationMode") ~= nil then return end
+    local mt = getmetatable(Screen)
+    local cls = mt and type(mt.__index) == "table" and mt.__index
+    local orig = cls and cls.setRotationMode
+    if type(orig) ~= "function" or type(cls.getRotationMode) ~= "function" then return end
+    rawset(Screen, "setRotationMode", function(scr, mode, ...)
+        local ok_c, cur = pcall(function() return scr:getRotationMode() end)
+        if ok_c and mode ~= nil and mode == cur then
+            debugLog("[hc] setRotationMode(" .. tostring(mode) .. ") is the current mode -- skipped")
+            return
+        end
+        return orig(scr, mode, ...)
+    end)
+    debugLog("[hc] rotation guard installed")
+end
+
 function Shelfmark:installCloseProbes()
     local ok_dev, Device = pcall(require, "device")
     if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
     local Screen = Device.screen
     local restores = {}
-    -- rotation calls
+    -- rotation calls (only when the guard isn't already reporting them)
     if Screen and rawget(Screen, "setRotationMode") == nil then
         local mt = getmetatable(Screen)
         local cls = mt and type(mt.__index) == "table" and mt.__index
