@@ -141,6 +141,15 @@ cid, c = conf("hitchhiker", "The Ultimate Hitchhiker's Guide: Five Complete Nove
 ck_simple(cid == 205829 and c == true, "  ...but an omnibus-titled file matches the omnibus, confident")
 cid, c = conf("run", "Run", "Blake Crouch")
 ck_simple(cid == 427957 and c == true, "Run / Blake Crouch -> confident")
+-- metadata as devices actually hand it over
+cid, c = conf("1984", "1984", "George Orwell\nPeter Hobley Davison")
+ck_simple(cid == 379760 and c == true, "1984 with a newline-joined editor credit -> still confident")
+cid, c = conf("1984", "1984", "George Orwell\nunknown author")
+ck_simple(cid == 379760 and c == true, "1984 exactly as the Kindle credits it (\"unknown author\" second line) -> confident")
+cid, c = conf("1984", "1984", "George Orwell; Shepard Fairey")
+ck_simple(cid == 379760 and c == true, "  ...semicolon-joined too")
+cid, c = conf("summerfrost", "Summer Frost (Forward collection)", "Blake Crouch")
+ck_simple(cid == 427934 and c == true, "Summer Frost (Forward collection): parenthetical tag ignored -> confident")
 cid, c = conf("run", "Run", "Nobody Here")
 ck_simple(c == false, "author that matches nothing -> not confident")
 

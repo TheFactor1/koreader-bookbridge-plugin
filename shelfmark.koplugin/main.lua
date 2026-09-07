@@ -1993,6 +1993,8 @@ local function doHardcoverFindBook(token, title, author, lang)
     local function norm(t)
         t = (t or ""):lower():gsub("\u{2019}", "'"):gsub("\u{2018}", "'"):gsub("`", "'")
         t = t:gsub("%s*:.*$", "")
+        -- "(Forward collection)", "[Kindle Edition]": tags, not title.
+        t = t:gsub("%b()", " "):gsub("%b[]", " ")
         t = t:gsub("[^%w%s']", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
         t = t:gsub("^the ", ""):gsub("^an ", ""):gsub("^a ", "")
         return t
@@ -2001,17 +2003,40 @@ local function doHardcoverFindBook(token, title, author, lang)
     local lt = (title or ""):lower()
     local local_omnibus = lt:find("omnibus", 1, true) or lt:find("complete", 1, true) or lt:find("collection", 1, true)
         or lt:find("novels", 1, true) or lt:find("trilogy", 1, true) or lt:find("box set", 1, true) or lt:find("books 1", 1, true)
-    -- Surname only, matching releaseRelevanceScore's convention elsewhere in
-    -- this file -- robust to "Blake Crouch" vs "Crouch, Blake".
-    local surname = author and author ~= "" and author:match("(%S+)%s*$") or nil
-    if surname and #surname <= 1 then surname = nil end
-    if surname then surname = surname:lower() end
+    -- The file may credit several people -- KOReader joins them with newlines,
+    -- other tools with ";", "&" or "and" -- and 1984 on the Kindle credits
+    -- its editor after Orwell. Taking the last word of the whole field gave
+    -- the editor's surname, which matched nothing, and a plainly right book
+    -- went to review. So: every credited person's surname counts, and a
+    -- candidate that carries any of them is an author hit. Surname only,
+    -- matching releaseRelevanceScore's convention elsewhere in this file --
+    -- robust to "Blake Crouch" vs "Crouch, Blake".
+    local surnames = {}
+    for person in ((author or "") .. "\n"):gmatch("([^\n;&]+)") do
+        person = person:gsub("%s+and%s+", "\n")
+        for one in (person .. "\n"):gmatch("([^\n]+)") do
+            local sn = one:match("(%S+)%s*$")
+            if sn then
+                sn = sn:lower():gsub("[%.,]+$", "")
+                -- "unknown author", "Anonymous", "Various": not surnames. The
+                -- Kindle's 1984 credits "George Orwell\nunknown author".
+                local generic = { jr = true, sr = true, phd = true, md = true, author = true, unknown = true,
+                                  anonymous = true, various = true, editor = true, translator = true, illustrator = true }
+                if #sn > 1 and not generic[sn] then surnames[#surnames + 1] = sn end
+            end
+        end
+    end
+    local surname = surnames[1]
     for i2, c in ipairs(candidates) do
         local score = -0.01 * i2                       -- search order breaks ties
         c.author_hit = nil
         if surname then
             for _, n in ipairs(c.names) do
-                if n:lower():find(surname, 1, true) then c.author_hit = n; break end
+                local nl = n:lower()
+                for _, sn in ipairs(surnames) do
+                    if nl:find(sn, 1, true) then c.author_hit = n; break end
+                end
+                if c.author_hit then break end
             end
         end
         if c.author_hit then score = score + 3 end
