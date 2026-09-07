@@ -8425,6 +8425,8 @@ function Shelfmark:processHardcoverPending()
                 pending[md5] = nil
                 entry.last_percent = rec.percent; map[md5] = entry; saveHardcoverMap(map)
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
+                self:showAfterCloseNotice(T(_("Hardcover: \"%1\" -- page %2 of %3 (%4%)."),
+                    tostring(entry.title), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
             else
                 debugLog("[hc] push failed for " .. tostring(entry.title) .. ": " .. tostring(a))
             end
@@ -8458,7 +8460,27 @@ function Shelfmark:processHardcoverPending()
     end
 end
 
--- Decides a book not yet mapped, with no UI. A confident match (see
+-- A brief note over whatever the close left on screen (the home screen,
+-- usually). Shown the tick after the close, then -- the part that makes it
+-- actually appear under Bookshelf -- the whole stack is repainted at +1 s
+-- and +3 s after waiting for the panel's own refresh to finish: a widget
+-- painted on top and refreshed alone did not reach either device's panel,
+-- while a repaint from the home screen up always did.
+function Shelfmark:showAfterCloseNotice(text)
+    local msg = InfoMessage:new{ text = text, timeout = 6 }
+    UIManager:show(msg, "ui")
+    local ok_dev, Device = pcall(require, "device")
+    if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
+    for _unused, delay in ipairs({ 1, 3 }) do
+        UIManager:scheduleIn(delay, function()
+            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(msg) then return end
+            pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
+            UIManager:setDirty("all", "ui")
+        end)
+    end
+end
+
+-- Decides a book not yet mapped, with no UI beyond the after-close note. A confident match (see
 -- doHardcoverFindBook) is recorded and pushed on the spot; anything else is
 -- parked as "review" -- never synced, never prompted -- keeping its progress
 -- so it pushes once picked in Hardcover > Review matches. Runs inside a
@@ -8488,8 +8510,11 @@ function Shelfmark:resolveHardcoverMatch(md5, rec)
             self:clearHardcoverPending(md5)
             map[md5].last_percent = rec.percent; saveHardcoverMap(map)
             debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(ft), tostring(a), tostring(b)))
+            self:showAfterCloseNotice(T(_("Hardcover: synced as \"%1\" by %2 -- page %3 of %4 (%5%)."),
+                ft, tostring(fa), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
         else
             debugLog("[hc] push failed for " .. tostring(ft) .. ": " .. tostring(a))   -- stays pending; retried later
+            self:showAfterCloseNotice(T(_("Hardcover: matched \"%1\"; progress will sync when Hardcover answers."), ft))
         end
         return
     end
@@ -8497,6 +8522,9 @@ function Shelfmark:resolveHardcoverMatch(md5, rec)
     saveHardcoverMap(map)
     debugLog(string.format("[hc] needs review: %s (%s)", tostring(rec.title),
         book_id and ("best guess " .. tostring(ft)) or "no candidates"))
+    self:showAfterCloseNotice(book_id
+        and T(_("Hardcover isn't sure this is \"%1\" -- waiting under Hardcover > Review matches."), ft)
+        or _("Hardcover has no match for this book -- waiting under Hardcover > Review matches."))
 end
 
 -- Hardcover > Review matches: the books parked as "review", one button each.
@@ -8625,19 +8653,6 @@ function Shelfmark:prefetchHardcoverMatch()
         debugLog("[hc] prefetch: " .. (book_id
             and ((confident and "confident match " or "uncertain match ") .. tostring(ft) .. " by " .. tostring(fa))
             or "no match"))
-        -- Say what will happen, once, the first time this book is opened --
-        -- here in the reader, where a message shows reliably, rather than at
-        -- the close, which stays silent. Auto-dismisses; no buttons.
-        local msg
-        if book_id and confident then
-            msg = (fa and fa ~= "") and T(_("Hardcover: progress will sync as \"%1\" by %2."), ft, fa)
-                or T(_("Hardcover: progress will sync as \"%1\"."), ft)
-        elseif book_id then
-            msg = T(_("Hardcover isn't sure this is \"%1\" -- it will wait under Hardcover > Review matches."), ft)
-        else
-            msg = _("Hardcover has no match for this book -- it will wait under Hardcover > Review matches.")
-        end
-        UIManager:show(InfoMessage:new{ text = msg, timeout = 6 })
     end)
 end
 

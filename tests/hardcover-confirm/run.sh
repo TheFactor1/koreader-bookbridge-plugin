@@ -27,6 +27,8 @@ awk '/^function Shelfmark:resolveHardcoverMatch/{f=1} f{print} f&&/^end$/{exit}'
     "$REPO/shelfmark.koplugin/main.lua" > "$W/confirm.lua"
 awk '/^function Shelfmark:pickHardcoverCandidate/{f=1} f{print} f&&/^end$/{exit}' \
     "$REPO/shelfmark.koplugin/main.lua" >> "$W/confirm.lua"
+awk '/^function Shelfmark:showAfterCloseNotice/{f=1} f{print} f&&/^end$/{exit}' \
+    "$REPO/shelfmark.koplugin/main.lua" >> "$W/confirm.lua"
 grep -q "resolveHardcoverMatch" "$W/confirm.lua" || { echo "FAIL  could not extract resolveHardcoverMatch"; exit 1; }
 
 cd "$KDIR" || exit 1
@@ -45,7 +47,7 @@ UIManager = { show = function(_s,w) shown[#shown+1] = w end, scheduleIn = functi
 package.loaded["ui/widget/confirmbox"] = { new = function(_s,t) return t end }
 package.loaded["ui/widget/buttondialog"] = { new = function(_s,t) return t end }
 InfoMessage = { new = function(_s,t) return t end }
-package.loaded["device"] = { input = { inhibitInputUntil = function() end } }
+package.loaded["device"] = { input = { inhibitInputUntil = function() end }, isDesktop = function() return true end }
 UIManager.close = function() end
 package.loaded["ui/trapper"] = {
     wrap = function(_s,f) return f() end,
@@ -61,7 +63,8 @@ local pass, fail = 0, 0
 local function ck(c,m) if c then pass=pass+1; print("PASS  "..m) else fail=fail+1; print("FAIL  "..m) end end
 local CLEARED = {}
 local function inst(extra)
-    local t = { hardcover_token="t", clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end }
+    local t = { hardcover_token="t", clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end,
+                showAfterCloseNotice = Shelfmark.showAfterCloseNotice }
     for k,v in pairs(extra or {}) do t[k]=v end
     return t
 end
@@ -71,7 +74,8 @@ shown = {}; MAP = {}; SEARCHES = 0; CLEARED = {}
 local PUSHES = 0; doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
 Shelfmark.resolveHardcoverMatch(inst{ _hc_prefetch = { m = { book_id=427473, title="Red Rising", author="Pierce Brown", ranked={}, confident=true } } },
     "m", { title="Red Rising", author="Pierce Brown", percent=0.02 })
-ck(#shown == 0, "confident match: no dialog of any kind")
+ck(#shown == 1 and shown[1].timeout and not shown[1].buttons, "confident match: one auto-dismissing note, no dialog")
+ck(shown[1].text:find("page 8 of 382", 1, true) ~= nil, "the note carries the page numbers")
 ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==427473, "confident match: recorded as sync")
 ck(PUSHES == 1 and CLEARED[1] == "m", "confident match: progress pushed and the queue entry cleared")
 ck(SEARCHES == 0, "confident match from prefetch: zero searches")
@@ -81,7 +85,7 @@ shown = {}; MAP = {}; PUSHES = 0; CLEARED = {}
 local ranked = { {id=427798,title="The Hitchhiker's Guide to the Galaxy",author="Douglas Adams"}, {id=205829,title="Omnibus",author="Douglas Adams"} }
 Shelfmark.resolveHardcoverMatch(inst{ _hc_prefetch = { h = { book_id=427798, title="The Hitchhiker's Guide to the Galaxy", author="Douglas Adams", ranked=ranked, confident=false } } },
     "h", { title="The Ultimate Hitchhiker's Guide to the Galaxy", author="Douglas Adams", percent=0.07 })
-ck(#shown == 0 and PUSHES == 0, "uncertain match: nothing shown, nothing pushed")
+ck(#shown == 1 and shown[1].timeout and not shown[1].buttons and PUSHES == 0, "uncertain match: one note pointing at Review matches, nothing pushed")
 ck(MAP.h and MAP.h.decision=="review" and #MAP.h.ranked == 2, "uncertain match: parked for review with its candidates")
 ck(#CLEARED == 0, "uncertain match: progress stays queued")
 

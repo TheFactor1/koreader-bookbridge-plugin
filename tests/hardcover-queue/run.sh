@@ -21,6 +21,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/shelfmark.koplugin/main.lua"
 awk '/^function Shelfmark:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit}' "$M" >  "$W/fns.lua"
 awk '/^function Shelfmark:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Shelfmark:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -q "processHardcoverPending" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
 grep -q "onNetworkConnected"      "$W/fns.lua" || { echo "FAIL  onNetworkConnected not extracted"; exit 1; }
 
@@ -38,7 +39,10 @@ saveHardcoverPending = function(t) PENDING=t end
 loadHardcoverMap = function() return MAP end
 saveHardcoverMap = function(t) MAP = t end
 debugLog = function() end
-UIManager = { scheduleIn = function(_s,d,f) scheduled[#scheduled+1]={delay=d,fn=f} end, show=function() end }
+local shown = {}
+UIManager = { scheduleIn = function(_s,d,f) scheduled[#scheduled+1]={delay=d,fn=f} end, show=function(_s,w) shown[#shown+1]=w end }
+InfoMessage = { new = function(_s,t) return t end }
+package.loaded["device"] = { isDesktop = function() return true end }
 package.loaded["ui/trapper"] = {
     wrap = function(_s,f) return f() end,
     dismissableRunInSubprocess = function(_s,f) return true, f() end,
@@ -86,12 +90,14 @@ ck(confirms2 == 1, "nothing in flight -> confirms straight away")
 -- 3. a book already mapped pushes silently, no dialog
 local confirms3 = 0
 local s3 = { hardcover_progress_sync=true, hardcover_token="t",
-             resolveHardcoverMatch = function() confirms3 = confirms3 + 1 end }
+             resolveHardcoverMatch = function() confirms3 = confirms3 + 1 end,
+             showAfterCloseNotice = Shelfmark.showAfterCloseNotice }
 PENDING = { m = { title="X", percent=0.2 } }
 MAP = { m = { decision="sync", book_id=42, title="X" } }
 PUSHES = 0
 Shelfmark.processHardcoverPending(s3)
-ck(PUSHES == 1 and confirms3 == 0, "already-matched book pushes silently, no dialog")
+ck(PUSHES == 1 and confirms3 == 0, "already-matched book pushes without a dialog")
+ck(#shown == 1 and shown[1].timeout and shown[1].text:find("page 8 of 382", 1, true), "...and shows the page it recorded in a brief note")
 ck(next(PENDING) == nil, "a successful push clears the queue entry")
 ck(MAP.m.last_percent == 0.2, "...and remembers the position it pushed")
 
