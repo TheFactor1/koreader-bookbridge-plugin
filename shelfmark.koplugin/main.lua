@@ -144,7 +144,6 @@ end
 function Shelfmark:init()
     self:loadSettings()
     self.ui.menu:registerToMainMenu(self)
-    pcall(function() self:installRotationGuard() end)
     self:registerFileDialogButtons()
 end
 
@@ -8546,141 +8545,9 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     -- becomes visible when something else forces a redraw, such as opening a
     -- menu. UIManager coalesces this with the widget's own setDirty into a
     -- single refresh pass, so it costs one flash, not two.
-    -- Diagnostics for the Android report that this dialog only appears once
-    -- a menu is opened. framebuffer_android's _updateWindow() skips the blit
-    -- SILENTLY (logcat only) when the native window is momentarily gone, so
-    -- the debug log records whether the dialog was painted at all and, on
-    -- Android, whether a window existed at show time and at paint time.
-    local function windowState()
-        -- android.app is a C struct (cdata), so it is probed under pcall
-        -- rather than type-checked: the first diagnostic build did the
-        -- latter and printed nothing on the phone.
-        local ok_a, android = pcall(require, "android")
-        if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
-        if not android then return "" end
-        local ok_w, has_window = pcall(function() return android.app ~= nil and android.app.window ~= nil end)
-        if not ok_w then return " window=?" end
-        return has_window and " window=yes" or " window=NO"
-    end
-    local base_paint = dialog.paintTo
-    dialog.paintTo = function(w, ...)
-        if not w._hc_paint_logged then
-            w._hc_paint_logged = true
-            debugLog("[hc] dialog painted" .. windowState())
-        end
-        return base_paint(w, ...)
-    end
     UIManager:show(dialog, "flashui")
-    -- The window stack, bottom to top, THIS being our dialog. A window
-    -- with no name/id/title/text is described by a few of its keys so the
-    -- fourth window seen on the devices (absent on desktop) can be named.
-    local function stackDump()
-        local stack = UIManager._window_stack or {}
-        local names = {}
-        for i, win in ipairs(stack) do
-            local w = win.widget
-            local n = (w == dialog) and "THIS" or (w and (w.name or w.id or (w.title and "titled") or (w.text and "text")))
-            if not n and type(w) == "table" then
-                local keys = {}
-                for k in pairs(w) do if type(k) == "string" then keys[#keys + 1] = k end end
-                table.sort(keys)
-                local mt = getmetatable(w)
-                local cls = mt and type(mt.__index) == "table" and (mt.__index.name or mt.__index._name) or nil
-                n = "?{" .. table.concat(keys, ",") .. "}" .. (cls and ("<" .. tostring(cls) .. ">") or "")
-            end
-            names[i] = tostring(n or "?")
-        end
-        local top = stack[#stack] and stack[#stack].widget
-        return string.format("stack=%d on_top=%s [%s]", #stack, tostring(top == dialog), table.concat(names, " < "))
-    end
     dialog._hc_shown_at = os.time()
-    debugLog("[hc] dialog shown: " .. stackDump() .. windowState())
-    -- And again later: if the order changes after showing, that is the bug.
-    for _unused, delay in ipairs({ 1.5, 4 }) do
-        UIManager:scheduleIn(delay, function()
-            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-            debugLog("[hc] +" .. tostring(delay) .. "s: " .. stackDump() .. windowState())
-        end)
-    end
-    -- Is the dialog still IN the screen buffer a few seconds later? With
-    -- Bookshelf installed it is painted, on top of the stack, and posted --
-    -- yet not on screen until a menu forces a repaint; without Bookshelf it
-    -- appears at once. If these samples show the frame's black border turning
-    -- light, something is drawing over the buffer behind UIManager's back.
-    local function pixelProbe(tag)
-        local ok_s, Screen = pcall(function() return require("device").screen end)
-        local d = dialog.movable and dialog.movable.dimen
-        if not ok_s or not Screen or not Screen.bb or not d then debugLog("[hc] px " .. tag .. ": no dimen yet"); return end
-        local function px(x, y)
-            local ok_p, v = pcall(function() return Screen.bb:getPixel(x, y):getColor8().a end)
-            return ok_p and tostring(v) or "?"
-        end
-        debugLog(string.format("[hc] px %s: border=%s inside=%s outside=%s (dimen %d,%d %dx%d)",
-            tag, px(d.x + 1, d.y + math.floor(d.h / 2)), px(d.x + math.floor(d.w / 2), d.y + 6),
-            px(math.max(0, d.x - 8), d.y + math.floor(d.h / 2)), d.x, d.y, d.w, d.h))
-    end
-    -- The Kindle showed the buffer intact for 4 s with the dialog on top of
-    -- the stack and still nothing on the panel: so log every refresh that
-    -- actually reaches the framebuffer driver for the next 6 s -- its mode,
-    -- its region, and whether that region covers the dialog at all.
-    do
-        local ok_s, Screen = pcall(function() return require("device").screen end)
-        local mt = ok_s and Screen and getmetatable(Screen)
-        local cls = mt and type(mt.__index) == "table" and mt.__index
-        if cls and rawget(Screen, "_hc_refresh_probe") == nil then
-            local wrapped = {}
-            for _unused, name in ipairs({ "refreshPartialImp", "refreshFlashPartialImp", "refreshUIImp",
-                                          "refreshFlashUIImp", "refreshFullImp", "refreshFastImp" }) do
-                local orig = rawget(cls, name) or cls[name]
-                if type(orig) == "function" and rawget(Screen, name) == nil then
-                    rawset(Screen, name, function(scr, x, y, w, h, ...)
-                        local d = dialog.movable and dialog.movable.dimen
-                        local covers = "?"
-                        if d and x and w then
-                            covers = (x <= d.x and y <= d.y and x + w >= d.x + d.w and y + h >= d.y + d.h) and "covers"
-                                or ((x < d.x + d.w and x + w > d.x and y < d.y + d.h and y + h > d.y) and "overlaps" or "misses")
-                        elseif not x then covers = "fullscreen" end
-                        debugLog(string.format("[hc] refresh %s %s,%s %sx%s -> %s", name:gsub("Imp$", ""),
-                            tostring(x), tostring(y), tostring(w), tostring(h), covers))
-                        return orig(scr, x, y, w, h, ...)
-                    end)
-                    wrapped[#wrapped + 1] = name
-                end
-            end
-            rawset(Screen, "_hc_refresh_probe", true)
-            UIManager:scheduleIn(6, function()
-                for _unused, name in ipairs(wrapped) do rawset(Screen, name, nil) end
-                rawset(Screen, "_hc_refresh_probe", nil)
-                debugLog("[hc] refresh probe off")
-            end)
-        end
-    end
-    for _unused, delay in ipairs({ 0.2, 1, 2, 3, 4 }) do
-        UIManager:scheduleIn(delay, function()
-            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-            pixelProbe("+" .. tostring(delay) .. "s")
-            if delay == 3 and ok_dev and Device and not Device:isDesktop() then
-                pcall(function() Device.screen:shot(DataStorage:getSettingsDir() .. "/hc_dialog_t3.png") end)
-            end
-        end)
-    end
-    -- On both devices the dialog's own refresh reaches the driver and does
-    -- not take effect, while the next unrelated refresh does: on the Kindle
-    -- a Bookshelf poll timer supplies one 10-15 s later and the dialog
-    -- appears with no input; on the phone nothing does until a touch. What
-    -- those later refreshes have that this dialog's did not is a repaint of
-    -- the WHOLE stack from the home screen up, not the dialog alone. So do
-    -- that on purpose, one second in. Real devices only; logged.
-    do
-        local ok_d, Dev = pcall(require, "device")
-        if ok_d and Dev and not (Dev.isDesktop and Dev:isDesktop()) then
-            UIManager:scheduleIn(1, function()
-                if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-                debugLog("[hc] full-stack repaint at +1s")
-                UIManager:setDirty("all", "ui")
-            end)
-        end
-    end
+    debugLog("[hc] dialog shown")
     -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
     -- discard input queued while the book was closing, which would otherwise
     -- land straight on a button.
@@ -8688,118 +8555,31 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     if ok_dev and Device and Device.input and Device.input.inhibitInputUntil then
         Device.input:inhibitInputUntil(true)
     end
-    -- Android only: post the dialog's region once more a moment later. If the
-    -- first blit hit a window gap it was dropped without a word, and nothing
-    -- else would redraw until the next tap. One partial refresh of the
-    -- dialog's own rectangle; nothing on other platforms.
-    if ok_dev and Device and Device.isAndroid and Device:isAndroid() then
-        UIManager:scheduleIn(1.5, function()
-            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-            debugLog("[hc] dialog re-posted" .. windowState())
-            UIManager:setDirty(dialog, "ui")
-        end)
-        -- The phone's log showed this dialog painted into KOReader's buffer
-        -- and still not on screen until a tap. So probe the last step: for
-        -- the next few seconds count every blit into the native window
-        -- (framebuffer_android:_updateWindow), with the window state at
-        -- each. A refresh that never reaches it is a queue problem; one that
-        -- does and still isn't visible is the post not being presented.
-        local Screen = Device.screen
-        -- Device.screen is an instance whose metatable is the framebuffer
-        -- class (fb:new -> extend: __index = class), and the class holds
-        -- _updateWindow. Resolve the class method once; if the shape is
-        -- ever different, no probe rather than a Lua error mid-refresh.
-        local mt = Screen and getmetatable(Screen)
-        local orig = mt and type(mt.__index) == "table" and rawget(mt.__index, "_updateWindow")
-        if type(orig) == "function" and rawget(Screen, "_updateWindow") == nil then
-            local n = 0
-            -- A faithful copy of framebuffer_android:_updateWindow that also
-            -- reports what the original swallows: the ANativeWindow_lock
-            -- return code, and the window buffer's format/size/stride against
-            -- Screen.bb. Every earlier probe showed the blit being *called*
-            -- with a window present and the dialog still not on screen until
-            -- a touch; a failing lock is the one step that would explain it.
-            -- After a successful lock this always unlocks, so it cannot wedge
-            -- the surface; on any other trouble it defers to the original.
-            local function probedBlit(scr)
-                local ffi = require("ffi")
-                local BB = require("ffi/blitbuffer")
-                local ok_a, android = pcall(require, "android")
-                if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
-                if not android or android.app == nil or android.app.window == nil then return nil, "window=nil" end
-                local C = ffi.C
-                local buffer = ffi.new("ANativeWindow_Buffer[1]")
-                local rc = android.lib.ANativeWindow_lock(android.app.window, buffer, nil)
-                if rc < 0 then return nil, "lock FAILED rc=" .. tostring(rc) .. " win=" .. tostring(android.app.window) end
-                local b = buffer[0]
-                local desc = string.format("lock ok fmt=%s %sx%s stride=%s | bb %sx%s rot=%s inv=%s | win=%s",
-                    tostring(tonumber(b.format)), tostring(tonumber(b.width)), tostring(tonumber(b.height)),
-                    tostring(tonumber(b.stride)), tostring(scr.bb:getWidth()), tostring(scr.bb:getHeight()),
-                    tostring(scr.bb:getRotation()), tostring(scr.bb:getInverse()), tostring(android.app.window))
-                local ok_blit, berr = pcall(function()
-                    local bb
-                    if b.format == C.WINDOW_FORMAT_RGBA_8888 or b.format == C.WINDOW_FORMAT_RGBX_8888 then
-                        bb = BB.new(b.width, b.height, BB.TYPE_BBRGB32, b.bits, b.stride * 4, b.stride)
-                    elseif b.format == C.WINDOW_FORMAT_RGB_565 then
-                        bb = BB.new(b.width, b.height, BB.TYPE_BBRGB16, b.bits, b.stride * 2, b.stride)
-                    else
-                        error("unsupported window format " .. tostring(tonumber(b.format)))
-                    end
-                    local ext_bb = scr.full_bb or scr.bb
-                    bb:setInverse(ext_bb:getInverse())
-                    bb:setRotation(ext_bb:getRotation())
-                    if bb:getInverse() == 1 and BB:getUseCBB() then
-                        if bb:getType() == ext_bb:getType() then bb:invertblitFrom(ext_bb)
-                        else bb:blitFrom(ext_bb); bb:invertRect(0, 0, bb:getWidth(), bb:getHeight()) end
-                    else
-                        bb:blitFrom(ext_bb)
-                    end
-                end)
-                android.lib.ANativeWindow_unlockAndPost(android.app.window)
-                return true, desc .. (ok_blit and "" or (" blit error: " .. tostring(berr)))
-            end
-            rawset(Screen, "_updateWindow", function(scr, ...)
-                n = n + 1
-                local ok_p, posted, info = pcall(probedBlit, scr)
-                debugLog("[hc] blit #" .. n .. " " .. (ok_p and tostring(info) or ("probe error: " .. tostring(posted))))
-                if ok_p and posted then return end   -- we locked, blitted and posted; don't post twice
-                return orig(scr, ...)                -- lock failed / no window / probe error: let the original try
-            end)
-            UIManager:scheduleIn(4, function()
-                rawset(Screen, "_updateWindow", nil)   -- back to the class method
-                debugLog("[hc] blit probe off after " .. n .. " blit(s)")
-            end)
-        end
-        -- Android is compositing frames after the close (a system screenshot
-        -- shows the freshly drawn shelf) but not the frame carrying this
-        -- dialog, posted straight after it -- until a touch or a window event
-        -- (an app switch re-presents everything). So give it a window event
-        -- that changes nothing visible: re-applying the current screen
-        -- brightness goes through the Java window attributes and forces a
-        -- relayout and recomposition. Logged either way.
-        for _unused, delay in ipairs({ 0.3, 2.0 }) do
-            UIManager:scheduleIn(delay, function()
+    -- Found on both devices with the Bookshelf home screen installed: the
+    -- dialog's own refresh reaches the driver and does not take effect, while
+    -- the next refresh that repaints the WHOLE stack from the home screen up
+    -- does. On the Kindle a Bookshelf poll timer used to supply one 10-15 s
+    -- later; on the phone nothing did until a touch. So repaint the whole
+    -- stack deliberately one second in -- verified to put the dialog on both
+    -- screens at +1 s -- and on Android first re-apply the current screen
+    -- brightness, a Java window-attribute update that makes Android
+    -- recompose (it answers with a WINDOW_RESIZED command) with nothing
+    -- visibly changing. Real devices only; the desktop never needed it.
+    if ok_dev and Device and not (Device.isDesktop and Device:isDesktop()) then
+        if Device.isAndroid and Device:isAndroid() then
+            UIManager:scheduleIn(0.3, function()
                 if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-                local ok_n, nerr = pcall(function()
+                pcall(function()
                     local ok_a, android = pcall(require, "android")
                     if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
-                    local cur = android.getScreenBrightness()
-                    android.setScreenBrightness(cur)
-                    return cur
+                    android.setScreenBrightness(android.getScreenBrightness())
                 end)
-                debugLog("[hc] window nudge at +" .. tostring(delay) .. "s: " .. (ok_n and ("brightness re-applied (" .. tostring(nerr) .. ")") or ("failed: " .. tostring(nerr))))
             end)
         end
-        -- And two explicit whole-buffer posts, bypassing the refresh queue
-        -- entirely. If these make the dialog visible, this is also the fix.
-        for _unused, delay in ipairs({ 0.7, 2.0 }) do
-            UIManager:scheduleIn(delay, function()
-                if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-                debugLog("[hc] explicit post at +" .. tostring(delay) .. "s" .. windowState())
-                local ok_p, perr = pcall(function() Screen:_updateWindow() end)
-                if not ok_p then debugLog("[hc] explicit post failed: " .. tostring(perr)) end
-            end)
-        end
+        UIManager:scheduleIn(1, function()
+            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
+            UIManager:setDirty("all", "ui")
+        end)
     end
 end
 
@@ -8884,93 +8664,9 @@ end
 -- setRequestedOrientation, an OS relayout request, right before our dialog)
 -- and every native app command KOReader receives, decoded by name. Installed
 -- here because both happen BEFORE the dialog exists.
--- A rotation request for the mode already in effect is a no-op in meaning,
--- and KOReader's own FileManager guards against issuing one. Bookshelf's
--- return-from-reader path does not: it restores a stashed mode
--- unconditionally, and on the phone the log shows setRotationMode(0)
--- current=0 right before our dialog. On Android that reaches Java's
--- setRequestedOrientation -- an OS relayout request -- after which the
--- dialog's frames (correct, posted, accepted) are not presented until the
--- next touch. Installed once, on real devices only, on the screen instance:
--- same-mode requests are dropped and logged; different modes pass through.
-function Shelfmark:installRotationGuard()
-    local ok_dev, Device = pcall(require, "device")
-    if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
-    local Screen = Device.screen
-    if not Screen or rawget(Screen, "setRotationMode") ~= nil then return end
-    local mt = getmetatable(Screen)
-    local cls = mt and type(mt.__index) == "table" and mt.__index
-    local orig = cls and cls.setRotationMode
-    if type(orig) ~= "function" or type(cls.getRotationMode) ~= "function" then return end
-    rawset(Screen, "setRotationMode", function(scr, mode, ...)
-        local ok_c, cur = pcall(function() return scr:getRotationMode() end)
-        if ok_c and mode ~= nil and mode == cur then
-            debugLog("[hc] setRotationMode(" .. tostring(mode) .. ") is the current mode -- skipped")
-            return
-        end
-        return orig(scr, mode, ...)
-    end)
-    debugLog("[hc] rotation guard installed")
-end
-
-function Shelfmark:installCloseProbes()
-    local ok_dev, Device = pcall(require, "device")
-    if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
-    local Screen = Device.screen
-    local restores = {}
-    -- rotation calls (only when the guard isn't already reporting them)
-    if Screen and rawget(Screen, "setRotationMode") == nil then
-        local mt = getmetatable(Screen)
-        local cls = mt and type(mt.__index) == "table" and mt.__index
-        local orig = cls and cls.setRotationMode
-        if type(orig) == "function" then
-            rawset(Screen, "setRotationMode", function(scr, mode, ...)
-                local ok_c, cur = pcall(function() return scr:getRotationMode() end)
-                debugLog("[hc] setRotationMode(" .. tostring(mode) .. ") current=" .. tostring(ok_c and cur or "?"))
-                return orig(scr, mode, ...)
-            end)
-            restores[#restores + 1] = function() rawset(Screen, "setRotationMode", nil) end
-        end
-    end
-    -- native app commands (Android: APP_CMD_*; elsewhere EV_MSC codes, rare)
-    local input = Device.input
-    if type(input) == "table" and type(input.handleMiscEv) == "function" and not input._hc_misc_probe then
-        local was_raw = rawget(input, "handleMiscEv") ~= nil
-        local iorig = input.handleMiscEv
-        local names = {}
-        local ok_ffi, ffi = pcall(require, "ffi")
-        if ok_ffi then
-            for _unused, n in ipairs({ "INPUT_CHANGED", "INIT_WINDOW", "TERM_WINDOW", "WINDOW_RESIZED",
-                    "WINDOW_REDRAW_NEEDED", "CONTENT_RECT_CHANGED", "GAINED_FOCUS", "LOST_FOCUS",
-                    "CONFIG_CHANGED", "LOW_MEMORY", "START", "RESUME", "SAVE_STATE", "PAUSE", "STOP", "DESTROY" }) do
-                local ok_k, v = pcall(function() return ffi.C["APP_CMD_" .. n] end)
-                if ok_k and v ~= nil then names[tonumber(v)] = n end
-            end
-        end
-        input.handleMiscEv = function(this, ev, ...)
-            local code = ev and tonumber(ev.code)
-            debugLog("[hc] app cmd " .. tostring(code and names[code] or "?") .. "(" .. tostring(code) .. ")")
-            return iorig(this, ev, ...)
-        end
-        input._hc_misc_probe = true
-        restores[#restores + 1] = function()
-            if was_raw then input.handleMiscEv = iorig else rawset(input, "handleMiscEv", nil) end
-            input._hc_misc_probe = nil
-        end
-    end
-    if #restores > 0 then
-        debugLog("[hc] close probes on")
-        UIManager:scheduleIn(10, function()
-            for _unused, f in ipairs(restores) do pcall(f) end
-            debugLog("[hc] close probes off")
-        end)
-    end
-end
-
 function Shelfmark:onCloseDocument()
     self:captureReadingProgress()
     if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then
-        pcall(function() self:installCloseProbes() end)
         -- If the match was prefetched when the book opened, show the dialog
         -- NOW, inside the close itself, rather than 0.4 s later. On the
         -- phone every later post of the dialog was correct, accepted, and
