@@ -128,6 +128,11 @@ function Shelfmark:loadSettings()
     -- Archive/CWA/the Shelfmark server, so no self-hosted companion or
     -- SOCKS5 proxy is needed for this one; it's reachable directly.
     self.hardcover_token = self.sm_settings.data.shelfmark.hardcover_token
+    -- Preferred language for Hardcover matches (ISO 639-1, e.g. "en"); blank
+    -- means no preference. Default English: searches otherwise return foreign
+    -- editions and near-empty duplicate entries ahead of the real book.
+    self.hardcover_language = self.sm_settings.data.shelfmark.hardcover_language
+    if self.hardcover_language == nil then self.hardcover_language = "en" end
     -- Opt-in: push reading progress to Hardcover on close/suspend (see onCloseDocument).
     self.hardcover_progress_sync = self.sm_settings.data.shelfmark.hardcover_progress_sync
 end
@@ -163,6 +168,7 @@ function Shelfmark:saveAllSettings(msg)
         annas_download_key = self.annas_download_key,
         annas_tld = self.annas_tld,
         hardcover_token = self.hardcover_token,
+        hardcover_language = self.hardcover_language,
         hardcover_progress_sync = self.hardcover_progress_sync,
         ai_relay_url = self.ai_relay_url,
         ai_relay_token = self.ai_relay_token,
@@ -376,6 +382,10 @@ function Shelfmark:editHardcoverSettings()
                 text_type = "password",
                 hint = _("Hardcover API token"),
             },
+            {
+                text = self.hardcover_language,
+                hint = _("Preferred language for matches, 2-letter code (en, de, fr...) -- blank for any"),
+            },
         },
         buttons = {
             {
@@ -391,6 +401,7 @@ function Shelfmark:editHardcoverSettings()
                     callback = function()
                         local fields = self.hardcover_settings_dialog:getFields()
                         self.hardcover_token = fields[1] ~= "" and fields[1] or nil
+                        self.hardcover_language = (fields[2] or ""):lower():gsub("%s", "")
                         UIManager:close(self.hardcover_settings_dialog)
                         self:saveAllSettings(_("Saved."))
                     end,
@@ -1865,7 +1876,7 @@ end
 --
 -- `results.hits` arrives in relevance order (same order as `ids`). Don't
 -- reorder it: hits[1] is the fallback pick when no author matches.
-local function doHardcoverFindBook(token, title, author)
+local function doHardcoverFindBook(token, title, author, lang)
     local data, err = doHardcoverGraphQL(token, [[
         query Search($q: String!) {
             search(query: $q, query_type: "Book", per_page: 5) { ids results }
@@ -1935,6 +1946,38 @@ local function doHardcoverFindBook(token, title, author)
 
     if #candidates == 0 then
         return nil, nil, nil, _("No matching book found on Hardcover.")
+    end
+
+    -- Language preference. The search index carries no language at all; it
+    -- lives on editions. One batched query asks, for every candidate, whether
+    -- ANY edition exists in the preferred language, and candidates without
+    -- one are dropped -- but only when at least one candidate has one, so a
+    -- book Hardcover only knows in another language is never lost. Measured:
+    -- for "The Three-Body Problem" the real entry has 101 editions with
+    -- English; the four near-empty duplicates ahead of it have none.
+    if lang and lang ~= "" and #candidates > 1 then
+        local ids = {}
+        for i, c in ipairs(candidates) do ids[i] = c.id end
+        local ld = doHardcoverGraphQL(token, [[
+            query Lang($ids: [Int!]!, $lang: String!) {
+                books(where: { id: { _in: $ids } }) {
+                    id
+                    editions(where: { language: { code2: { _eq: $lang } } }, limit: 1) { id }
+                }
+            }
+        ]], { ids = ids, lang = lang })
+        if ld and type(ld.books) == "table" then
+            local has = {}
+            for _, b in ipairs(ld.books) do
+                if type(b.editions) == "table" and b.editions[1] then has[b.id] = true end
+            end
+            local kept = {}
+            for _, c in ipairs(candidates) do if has[c.id] then kept[#kept + 1] = c end end
+            if #kept > 0 and #kept < #candidates then
+                debugLog(string.format("[hardcover] language %s: kept %d of %d candidates", lang, #kept, #candidates))
+                candidates = kept
+            end
+        end
     end
 
     -- Pick on author surname when we have one, else keep the top hit. The
@@ -5082,9 +5125,9 @@ end
 
 function Shelfmark:hardcoverFindBook(title, author)
     local Trapper = require("ui/trapper")
-    local token = self.hardcover_token
+    local token, lang = self.hardcover_token, self.hardcover_language
     local completed, id, found_title, found_author, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverFindBook(token, title, author)
+        return doHardcoverFindBook(token, title, author, lang)
     end, _("Searching Hardcover..."))
     if not completed then return nil, nil, nil, _("Cancelled.") end
     return id, found_title, found_author, err
@@ -8406,7 +8449,7 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         debugLog("[hc] confirm: no prefetch, searching Hardcover for " .. tostring(rec.title))
         local completed, _err
         completed, book_id, ft, fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
-            return doHardcoverFindBook(token, rec.title or "", rec.author)
+            return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language)
         end, {})  -- {} = non-dismissable (see the note on the silent push above)
         if not completed then debugLog("[hc] confirm: search cancelled"); self._hc_confirm_open = nil; return end
     end
@@ -8751,13 +8794,13 @@ function Shelfmark:prefetchHardcoverMatch()
     local props = (ui.document.getProps and ui.document:getProps()) or {}
     local title, author = props.title, props.authors
     if not title or title == "" then debugLog("[hc] prefetch: no title, skipping"); return end
-    local token = self.hardcover_token
+    local token, lang = self.hardcover_token, self.hardcover_language
     debugLog("[hc] prefetch: looking up " .. tostring(title))
     local Trapper = require("ui/trapper")
     self._hc_prefetch_inflight[md5] = true
     Trapper:wrap(function()
         local completed, book_id, ft, fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
-            return doHardcoverFindBook(token, title, author)
+            return doHardcoverFindBook(token, title, author, lang)
         end, {})   -- invisible and non-dismissable; see the note in processHardcoverPending
         self._hc_prefetch_inflight[md5] = nil
         if not completed then debugLog("[hc] prefetch: interrupted"); return end

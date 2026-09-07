@@ -39,9 +39,22 @@ package.path = KDIR.."/frontend/?.lua;"..KDIR.."/common/?.lua;"..package.path
 package.cpath = KDIR.."/common/?.so;"..KDIR.."/libs/?.so;"..package.cpath
 local JSON = require("rapidjson")
 _ = function(s) return s end
+debugLog = function() end
 
 local FIXTURE
-doHardcoverGraphQL = function(_t, query)
+-- The language check is the one extra query allowed (and only when a
+-- preference is passed); LANG_HAS says which ids have an edition in it.
+LANG_HAS = nil
+LANG_QUERIES = 0
+doHardcoverGraphQL = function(_t, query, vars)
+    if query:find("editions(where", 1, true) then
+        LANG_QUERIES = LANG_QUERIES + 1
+        local books = {}
+        for _, id in ipairs(vars.ids) do
+            books[#books + 1] = { id = id, editions = (LANG_HAS and LANG_HAS[id]) and { { id = 1 } } or {} }
+        end
+        return { books = books }, nil
+    end
     if query:find("books_by_pk", 1, true) or query:find("books(where", 1, true) then
         error("made a SECOND round trip -- the search must answer in one")
     end
@@ -82,6 +95,21 @@ local _i, _t, _a, _e, ranked = fn("tok", "Run", "Blake Crouch")
 if type(ranked) == "table" and #ranked == 5 and ranked[1].id == 444340 and ranked[2].id == 427957 and ranked[2].author == "Blake Crouch" then
     pass = pass + 1; print("PASS  ranked candidates returned in search order (5, with authors)")
 else fail = fail + 1; print("FAIL  ranked candidates: " .. tostring(ranked and #ranked)) end
+
+-- language preference: drops candidates without an edition in it...
+load_fix("run"); LANG_HAS = { [427957] = true, [375036] = true }; LANG_QUERIES = 0
+local lid, _lt, la = fn("tok", "Run", nil, "en")
+ck_simple = function(c, m) if c then pass = pass + 1; print("PASS  " .. m) else fail = fail + 1; print("FAIL  " .. m) end end
+ck_simple(LANG_QUERIES == 1, "a language preference costs exactly one extra batched query")
+ck_simple(lid == 427957 and la == "Blake Crouch", "top hit without an English edition is dropped; next English one wins")
+-- ...but never all of them
+load_fix("run"); LANG_HAS = {}; LANG_QUERIES = 0
+local lid2 = fn("tok", "Run", nil, "en")
+ck_simple(lid2 == 444340, "no candidate in the language -> keep them all, top hit stands")
+-- ...and no preference means no extra query at all
+load_fix("run"); LANG_QUERIES = 0
+fn("tok", "Run", nil, "")
+ck_simple(LANG_QUERIES == 0, "blank preference -> search stays one round trip")
 
 load_fix("run")
 local id = fn("tok", "Run", nil)
