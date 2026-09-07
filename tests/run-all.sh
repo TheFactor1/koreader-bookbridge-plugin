@@ -53,6 +53,12 @@ python3 tests/check-manifest.py || fail=1
 section "Trapper audits"
 python3 tests/audit-trapper.py || fail=1
 
+section "Hardcover matching (offline, real captured API responses)"
+out=$(bash tests/hardcover-match/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') cases, and the search is still ONE round trip"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-match (no local KOReader)"; skipped="${skipped:+$skipped, }hardcover-match"
+else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
+
 # Prefers a local KOReader Linux install (identical frontend and luajit, no
 # device needed), then the Kindle over ssh, then SKIPPED.
 section "update-check suite (needs KOReader's luajit: local install or the Kindle)"

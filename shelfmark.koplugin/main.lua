@@ -1849,80 +1849,112 @@ end
 -- to 5 and checking each candidate's actual contributors against the
 -- given author closes that gap; falls back to the plain #1 result when no
 -- author is available or none of the candidates match it.
+-- ONE round trip. Hardcover's search returns the full Typesense documents
+-- inline (id, title, author_names) next to the plain id list, so the five
+-- follow-up books_by_pk queries this used to make -- six sequential TLS
+-- round trips from a Kindle, and the whole reason the progress-sync confirm
+-- took several seconds to appear -- collapse into this single request.
+--
+-- `results.hits` arrives in relevance order (same order as `ids`). Don't
+-- reorder it: hits[1] is the fallback pick when no author matches.
 local function doHardcoverFindBook(token, title, author)
-    local search_data, err = doHardcoverGraphQL(token, [[
+    local data, err = doHardcoverGraphQL(token, [[
         query Search($q: String!) {
-            search(query: $q, query_type: "Book", per_page: 5) { ids }
+            search(query: $q, query_type: "Book", per_page: 5) { ids results }
         }
     ]], { q = title })
-    if not search_data then return nil, nil, nil, err end
-    local ids = search_data.search and search_data.search.ids
-    if not ids or not ids[1] then
+    if not data then return nil, nil, nil, err end
+    local search = data.search
+    local ids = search and search.ids
+
+    -- Normalized candidate: { id = number, title = string, names = {string,...} }
+    local candidates = {}
+    local hits = search and search.results and search.results.hits
+    if type(hits) == "table" then
+        for i = 1, math.min(#hits, 5) do
+            local doc = hits[i] and hits[i].document
+            -- document.id is a STRING ("427473") in the search index; every
+            -- mutation downstream takes an Int.
+            local id = doc and tonumber(doc.id)
+            if id and doc.title then
+                local names = {}
+                for _, n in ipairs(doc.author_names or {}) do
+                    if type(n) == "string" then names[#names + 1] = n end
+                end
+                candidates[#candidates + 1] = { id = id, title = doc.title, names = names }
+            end
+        end
+    end
+
+    -- Fallback if the search index ever stops returning usable documents:
+    -- one batched query for every id, not the old one-at-a-time loop.
+    if #candidates == 0 and ids and ids[1] then
+        local want = {}
+        for i = 1, math.min(#ids, 5) do want[i] = ids[i] end
+        local bd = doHardcoverGraphQL(token, [[
+            query Books($ids: [Int!]!) {
+                books(where: { id: { _in: $ids } }) {
+                    id title contributions { contribution author { name } }
+                }
+            }
+        ]], { ids = want })
+        local by_id = {}
+        for _, b in ipairs((bd and bd.books) or {}) do by_id[b.id] = b end
+        -- books() comes back ordered by id, NOT by relevance -- walk `want`
+        -- so the search's own ranking survives.
+        for i = 1, #want do
+            local b = by_id[want[i]]
+            if b then
+                local names = {}
+                for _, c in ipairs(b.contributions or {}) do
+                    -- Contributors tagged "Author" go first: this same "Run"
+                    -- audiobook lists its narrator (Phil Gigante) among the
+                    -- contributions, so taking the listed order as-is would
+                    -- report the wrong author. Untyped entries count as
+                    -- authors, matching entries that were never tagged.
+                    if c.author and c.author.name then
+                        if c.contribution == nil or c.contribution == "Author" then
+                            table.insert(names, 1, c.author.name)
+                        else
+                            names[#names + 1] = c.author.name
+                        end
+                    end
+                end
+                candidates[#candidates + 1] = { id = b.id, title = b.title, names = names }
+            end
+        end
+    end
+
+    if #candidates == 0 then
         return nil, nil, nil, _("No matching book found on Hardcover.")
     end
 
-    local candidates = {}
-    for i = 1, math.min(#ids, 5) do
-        local book_data = doHardcoverGraphQL(token, [[
-            query BookById($id: Int!) {
-                books_by_pk(id: $id) {
-                    title
-                    contributions { contribution author { name } }
-                }
-            }
-        ]], { id = ids[i] })
-        if book_data and book_data.books_by_pk then
-            table.insert(candidates, { id = ids[i], data = book_data.books_by_pk })
-        end
-    end
-    if #candidates == 0 then
-        return nil, nil, nil, _("Found a match but couldn't fetch its details.")
-    end
-
-    -- Prefer a contributor explicitly tagged "Author" over the first
-    -- contribution listed -- confirmed live, this same "Run" audiobook
-    -- edition lists its narrator (Phil Gigante) ahead of Blake Crouch,
-    -- so contributions[1] alone would report the wrong "found author"
-    -- even once the right *book* is chosen. Untyped contributions (nil
-    -- role) are accepted too, matching entries that never got tagged.
-    local function primaryAuthorName(book)
-        for _, c in ipairs(book.contributions or {}) do
-            if c.author and (c.contribution == nil or c.contribution == "Author") then
-                return c.author.name
-            end
-        end
-        local contributions = book.contributions
-        return contributions and contributions[1] and contributions[1].author
-            and contributions[1].author.name or nil
-    end
-
-    local chosen = candidates[1]
+    -- Pick on author surname when we have one, else keep the top hit. The
+    -- search document flattens every contributor into author_names, so this
+    -- checks all of them exactly like the old per-contribution loop did.
+    local chosen, chosen_name = candidates[1], nil
     if author and author ~= "" then
-        -- Surname only, matching releaseRelevanceScore's own convention
-        -- elsewhere in this file -- robust to "Blake Crouch" vs.
-        -- "Crouch, Blake" ordering differences between an EPUB's embedded
-        -- metadata and Hardcover's own contributor names.
+        -- Surname only, matching releaseRelevanceScore's convention elsewhere
+        -- in this file -- robust to "Blake Crouch" vs "Crouch, Blake" ordering
+        -- differences between embedded metadata and Hardcover's own names.
         local surname = author:match("(%S+)%s*$")
         if surname and #surname > 1 then
             surname = surname:lower()
             for _, c in ipairs(candidates) do
-                local matched = false
-                for _, contribution in ipairs(c.data.contributions or {}) do
-                    if contribution.author and contribution.author.name
-                            and contribution.author.name:lower():find(surname, 1, true) then
-                        matched = true
+                for _, n in ipairs(c.names) do
+                    if n:lower():find(surname, 1, true) then
+                        chosen, chosen_name = c, n
                         break
                     end
                 end
-                if matched then
-                    chosen = c
-                    break
-                end
+                if chosen_name then break end
             end
         end
     end
 
-    return chosen.id, chosen.data.title, primaryAuthorName(chosen.data)
+    -- Report the contributor actually matched on; otherwise the first, which
+    -- the search index already orders author-first.
+    return chosen.id, chosen.title, chosen_name or chosen.names[1]
 end
 
 local function doHardcoverFindAuthor(token, name)
@@ -8129,6 +8161,8 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     local map = loadHardcoverMap()
     if not book_id then
         UIManager:show(ConfirmBox:new{
+            dismissable = false,        -- a tap must not answer this for you
+            flush_events_on_show = true, -- drop taps queued during the search
             text = T(_("No Hardcover match for \"%1\".\n\nStop trying to sync its progress?"), rec.title or _("this book")),
             ok_text = _("Stop"),
             ok_callback = function()
@@ -8142,6 +8176,12 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     end
     local desc = (fa and fa ~= "") and T(_("%1 by %2"), ft, fa) or ft
     UIManager:show(ConfirmBox:new{
+        -- Not dismissable, and queued input is flushed first. Before this, a
+        -- tap anywhere fired cancel_callback -- which records decision="skip"
+        -- -- so one mistimed tap permanently stopped that book from ever
+        -- syncing, with no way back short of editing the map file.
+        dismissable = false,
+        flush_events_on_show = true,
         text = T(_("Sync reading progress for\n\"%1\"\nto this Hardcover book?\n\n%2"), rec.title or _("this book"), desc),
         ok_text = _("Yes, sync"),
         ok_callback = function()
@@ -8170,7 +8210,9 @@ end
 function Shelfmark:onCloseDocument()
     self:captureReadingProgress()
     if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then
-        UIManager:scheduleIn(1, function()
+        -- Just long enough for the FileManager to finish painting; the dialog
+        -- no longer cares about stray input, so this needn't be generous.
+        UIManager:scheduleIn(0.4, function()
             local Trapper = require("ui/trapper")
             Trapper:wrap(function() self:processHardcoverPending() end)
         end)
