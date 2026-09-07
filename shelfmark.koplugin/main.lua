@@ -8357,13 +8357,26 @@ function Shelfmark:captureReadingProgress()
     if not ui or not ui.document or not ui.doc_settings then debugLog("[hc] capture: not in reader (no document)"); return end
     local md5 = ui.doc_settings:readSetting("partial_md5_checksum")
     if not md5 or md5 == "" then debugLog("[hc] capture: no partial_md5"); return end
-    local percent
+    -- The number the footer shows is the one to record: ReaderFooter's
+    -- percent_finished is page/pages for the book EXCLUDING hidden flows
+    -- (front/back matter some EPUBs mark non-linear), it is what gets saved
+    -- to the sidecar and what the home screen shows. The raw page ratio can
+    -- read higher on such books. Fall back to the ratio when there is no
+    -- footer value, and log whenever the two disagree.
+    local ratio
     if ui.document.info and ui.document.info.has_pages then
-        percent = ui.paging and ui.paging:getLastPercent()
+        ratio = ui.paging and ui.paging:getLastPercent()
     else
-        percent = ui.rolling and ui.rolling:getLastPercent()
+        ratio = ui.rolling and ui.rolling:getLastPercent()
     end
+    local footer = ui.view and ui.view.footer
+    local shown = footer and footer.percent_finished
+    local percent = (type(shown) == "number" and shown > 0) and shown or ratio
     if type(percent) ~= "number" then debugLog("[hc] capture: no percent"); return end
+    if type(shown) == "number" and type(ratio) == "number" and math.abs(shown - ratio) >= 0.005 then
+        debugLog(string.format("[hc] capture: footer shows %.1f%%, raw page ratio %.1f%% -- recording the footer's",
+            shown * 100, ratio * 100))
+    end
     local props = (ui.document.getProps and ui.document:getProps()) or {}
     local pending = loadHardcoverPending()
     pending[md5] = { title = props.title, author = props.authors, percent = percent, at = os.time() }

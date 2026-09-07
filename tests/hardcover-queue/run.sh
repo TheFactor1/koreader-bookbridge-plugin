@@ -22,6 +22,7 @@ M="$REPO/shelfmark.koplugin/main.lua"
 awk '/^function Shelfmark:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit}' "$M" >  "$W/fns.lua"
 awk '/^function Shelfmark:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Shelfmark:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Shelfmark:captureReadingProgress/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -q "processHardcoverPending" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
 grep -q "onNetworkConnected"      "$W/fns.lua" || { echo "FAIL  onNetworkConnected not extracted"; exit 1; }
 
@@ -126,6 +127,24 @@ Shelfmark.onNetworkConnected({ hardcover_progress_sync=false, hardcover_token="t
 ck(#scheduled == 0, "progress sync off -> network events ignored")
 Shelfmark.onNetworkConnected({ hardcover_progress_sync=true, hardcover_token="" })
 ck(#scheduled == 0, "no token -> network events ignored")
+
+-- capture records what the footer shows, not the raw page ratio
+local LOGS = {}
+debugLog = function(m) LOGS[#LOGS+1] = m end
+PENDING = {}
+local ui = {
+    document = { info = { has_pages = false }, getProps = function() return { title = "T", authors = "A" } end },
+    doc_settings = { readSetting = function(_s, k) if k == "partial_md5_checksum" then return "cap1" end end },
+    rolling = { getLastPercent = function() return 0.40 end },
+    view = { footer = { percent_finished = 0.42 } },
+}
+Shelfmark.captureReadingProgress({ hardcover_progress_sync = true, hardcover_token = "t", ui = ui })
+ck(PENDING.cap1 and math.abs(PENDING.cap1.percent - 0.42) < 1e-9, "capture records the footer's 42%, not the raw 40%")
+local noted = false; for _, m in ipairs(LOGS) do if m:find("footer shows 42.0%", 1, true) then noted = true end end
+ck(noted, "...and logs that the two disagreed")
+ui.view = nil; PENDING = {}
+Shelfmark.captureReadingProgress({ hardcover_progress_sync = true, hardcover_token = "t", ui = ui })
+ck(PENDING.cap1 and math.abs(PENDING.cap1.percent - 0.40) < 1e-9, "no footer value -> falls back to the raw ratio")
 
 print(pass.." passed, "..fail.." failed")
 os.exit(fail==0 and 0 or 1)
