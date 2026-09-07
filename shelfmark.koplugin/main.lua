@@ -8492,6 +8492,41 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             debugLog("[hc] dialog re-posted" .. windowState())
             UIManager:setDirty(dialog, "ui")
         end)
+        -- The phone's log showed this dialog painted into KOReader's buffer
+        -- and still not on screen until a tap. So probe the last step: for
+        -- the next few seconds count every blit into the native window
+        -- (framebuffer_android:_updateWindow), with the window state at
+        -- each. A refresh that never reaches it is a queue problem; one that
+        -- does and still isn't visible is the post not being presented.
+        local Screen = Device.screen
+        -- Device.screen is an instance whose metatable is the framebuffer
+        -- class (fb:new -> extend: __index = class), and the class holds
+        -- _updateWindow. Resolve the class method once; if the shape is
+        -- ever different, no probe rather than a Lua error mid-refresh.
+        local mt = Screen and getmetatable(Screen)
+        local orig = mt and type(mt.__index) == "table" and rawget(mt.__index, "_updateWindow")
+        if type(orig) == "function" and rawget(Screen, "_updateWindow") == nil then
+            local n = 0
+            rawset(Screen, "_updateWindow", function(scr, ...)
+                n = n + 1
+                debugLog("[hc] blit #" .. n .. windowState())
+                return orig(scr, ...)
+            end)
+            UIManager:scheduleIn(4, function()
+                rawset(Screen, "_updateWindow", nil)   -- back to the class method
+                debugLog("[hc] blit probe off after " .. n .. " blit(s)")
+            end)
+        end
+        -- And two explicit whole-buffer posts, bypassing the refresh queue
+        -- entirely. If these make the dialog visible, this is also the fix.
+        for _unused, delay in ipairs({ 0.7, 2.0 }) do
+            UIManager:scheduleIn(delay, function()
+                if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
+                debugLog("[hc] explicit post at +" .. tostring(delay) .. "s" .. windowState())
+                local ok_p, perr = pcall(function() Screen:_updateWindow() end)
+                if not ok_p then debugLog("[hc] explicit post failed: " .. tostring(perr)) end
+            end)
+        end
     end
 end
 
