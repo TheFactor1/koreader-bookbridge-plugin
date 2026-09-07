@@ -123,8 +123,19 @@ do
         setDirty = function(_s, w, m) if w == "all" and m == "ui" then dirty = dirty + 1 end end }
     package.loaded["device"] = { isDesktop = function() return false end, isAndroid = function() return true end,
         screen = { _updateWindow = function() posts = posts + 1 end, refreshWaitForLast = function() end } }
-    android = { getScreenBrightness = function() return 48 end, setScreenBrightness = function(v) if v == 48 then nudges = nudges + 1 end end }
+    -- Android with the launcher's toast: the OS draws it; nothing in-app at all
+    local toasts, shown_msgs = {}, 0
+    UIManager.show = function() shown_msgs = shown_msgs + 1 end
+    android = { notification = function(t, long) toasts[#toasts+1] = { t = t, long = long } end,
+        getScreenBrightness = function() return 48 end, setScreenBrightness = function(v) if v == 48 then nudges = nudges + 1 end end }
     Shelfmark.showAfterCloseNotice({}, "hi")
+    ck(#toasts == 1 and toasts[1].t == "hi" and toasts[1].long == true, "Android: the notice is a long system toast")
+    ck(shown_msgs == 0 and #timers == 0 and nudges == 0, "Android toast: no InfoMessage, no timers, no nudge")
+    ck(logs[#logs] == "[hc] notice: system toast", "...and it is logged")
+    -- Android without a toast (older launcher): the in-app path with the nudge
+    android.notification = nil; logs = {}
+    Shelfmark.showAfterCloseNotice({}, "hi")
+    ck(shown_msgs == 1 and logs[1]:find("system toast failed"), "no toast -> falls back to the in-app notice, logged")
     table.sort(timers, function(a, b) return a.d < b.d end)
     for _, t in ipairs(timers) do t.f() end
     ck(nudges == 2, "Android: brightness re-applied twice (window nudge) -- got " .. nudges)
@@ -132,7 +143,7 @@ do
     ck(dirty == 2, "whole-stack repaint twice -- got " .. dirty)
     local order = {}; for _, t in ipairs(timers) do order[#order+1] = t.d end
     ck(order[1] == 0.3 and order[2] == 0.7 and order[3] == 1, "nudge (0.3s) lands before the post (0.7s) and the repaint (1s)")
-    ck(logs[1] and logs[1]:find("window nudge at %+0.3s ok %(48%)"), "the nudge is logged with the brightness it re-applied")
+    ck(logs[2] and logs[2]:find("window nudge at %+0.3s ok %(48%)"), "the nudge is logged with the brightness it re-applied")
     -- Kindle: no nudge, no explicit post, just the repaints
     timers, nudges, posts, dirty = {}, 0, 0, 0
     package.loaded["device"].isAndroid = function() return false end

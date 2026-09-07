@@ -8480,9 +8480,25 @@ end
 -- painted on top and refreshed alone did not reach either device's panel,
 -- while a repaint from the home screen up always did.
 function Shelfmark:showAfterCloseNotice(text)
+    local ok_dev, Device = pcall(require, "device")
+    -- Android: the OS's own toast. It is drawn by Android's window manager on
+    -- top of every app surface, so it is on screen the moment it is posted --
+    -- unlike anything painted into KOReader's framebuffer after a close,
+    -- which the phone kept holding back until a touch no matter how it was
+    -- refreshed. A long toast is ~3.5 s; falls through to the in-app notice
+    -- if the launcher has no toast.
+    if ok_dev and Device and Device.isAndroid and Device:isAndroid() then
+        local ok_t, terr = pcall(function()
+            local ok_a, android = pcall(require, "android")
+            if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
+            assert(type(android.notification) == "function", "no android.notification")
+            android.notification(text, true)
+        end)
+        if ok_t then debugLog("[hc] notice: system toast"); return end
+        debugLog("[hc] notice: system toast failed (" .. tostring(terr) .. "); in-app notice instead")
+    end
     local msg = InfoMessage:new{ text = text, timeout = 6 }
     UIManager:show(msg, "ui")
-    local ok_dev, Device = pcall(require, "device")
     if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
     local function still_up()
         return type(UIManager.isWidgetShown) ~= "function" or UIManager:isWidgetShown(msg)
