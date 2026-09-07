@@ -8753,6 +8753,26 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
                 debugLog("[hc] blit probe off after " .. n .. " blit(s)")
             end)
         end
+        -- Android is compositing frames after the close (a system screenshot
+        -- shows the freshly drawn shelf) but not the frame carrying this
+        -- dialog, posted straight after it -- until a touch or a window event
+        -- (an app switch re-presents everything). So give it a window event
+        -- that changes nothing visible: re-applying the current screen
+        -- brightness goes through the Java window attributes and forces a
+        -- relayout and recomposition. Logged either way.
+        for _unused, delay in ipairs({ 0.3, 2.0 }) do
+            UIManager:scheduleIn(delay, function()
+                if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
+                local ok_n, nerr = pcall(function()
+                    local ok_a, android = pcall(require, "android")
+                    if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
+                    local cur = android.getScreenBrightness()
+                    android.setScreenBrightness(cur)
+                    return cur
+                end)
+                debugLog("[hc] window nudge at +" .. tostring(delay) .. "s: " .. (ok_n and ("brightness re-applied (" .. tostring(nerr) .. ")") or ("failed: " .. tostring(nerr))))
+            end)
+        end
         -- And two explicit whole-buffer posts, bypassing the refresh queue
         -- entirely. If these make the dialog visible, this is also the fix.
         for _unused, delay in ipairs({ 0.7, 2.0 }) do
