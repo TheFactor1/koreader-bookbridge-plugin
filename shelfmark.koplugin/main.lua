@@ -8652,10 +8652,57 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         local orig = mt and type(mt.__index) == "table" and rawget(mt.__index, "_updateWindow")
         if type(orig) == "function" and rawget(Screen, "_updateWindow") == nil then
             local n = 0
+            -- A faithful copy of framebuffer_android:_updateWindow that also
+            -- reports what the original swallows: the ANativeWindow_lock
+            -- return code, and the window buffer's format/size/stride against
+            -- Screen.bb. Every earlier probe showed the blit being *called*
+            -- with a window present and the dialog still not on screen until
+            -- a touch; a failing lock is the one step that would explain it.
+            -- After a successful lock this always unlocks, so it cannot wedge
+            -- the surface; on any other trouble it defers to the original.
+            local function probedBlit(scr)
+                local ffi = require("ffi")
+                local BB = require("ffi/blitbuffer")
+                local ok_a, android = pcall(require, "android")
+                if not ok_a or type(android) ~= "table" then android = rawget(_G, "android") end
+                if not android or android.app == nil or android.app.window == nil then return nil, "window=nil" end
+                local C = ffi.C
+                local buffer = ffi.new("ANativeWindow_Buffer[1]")
+                local rc = android.lib.ANativeWindow_lock(android.app.window, buffer, nil)
+                if rc < 0 then return nil, "lock FAILED rc=" .. tostring(rc) .. " win=" .. tostring(android.app.window) end
+                local b = buffer[0]
+                local desc = string.format("lock ok fmt=%s %sx%s stride=%s | bb %sx%s rot=%s inv=%s | win=%s",
+                    tostring(tonumber(b.format)), tostring(tonumber(b.width)), tostring(tonumber(b.height)),
+                    tostring(tonumber(b.stride)), tostring(scr.bb:getWidth()), tostring(scr.bb:getHeight()),
+                    tostring(scr.bb:getRotation()), tostring(scr.bb:getInverse()), tostring(android.app.window))
+                local ok_blit, berr = pcall(function()
+                    local bb
+                    if b.format == C.WINDOW_FORMAT_RGBA_8888 or b.format == C.WINDOW_FORMAT_RGBX_8888 then
+                        bb = BB.new(b.width, b.height, BB.TYPE_BBRGB32, b.bits, b.stride * 4, b.stride)
+                    elseif b.format == C.WINDOW_FORMAT_RGB_565 then
+                        bb = BB.new(b.width, b.height, BB.TYPE_BBRGB16, b.bits, b.stride * 2, b.stride)
+                    else
+                        error("unsupported window format " .. tostring(tonumber(b.format)))
+                    end
+                    local ext_bb = scr.full_bb or scr.bb
+                    bb:setInverse(ext_bb:getInverse())
+                    bb:setRotation(ext_bb:getRotation())
+                    if bb:getInverse() == 1 and BB:getUseCBB() then
+                        if bb:getType() == ext_bb:getType() then bb:invertblitFrom(ext_bb)
+                        else bb:blitFrom(ext_bb); bb:invertRect(0, 0, bb:getWidth(), bb:getHeight()) end
+                    else
+                        bb:blitFrom(ext_bb)
+                    end
+                end)
+                android.lib.ANativeWindow_unlockAndPost(android.app.window)
+                return true, desc .. (ok_blit and "" or (" blit error: " .. tostring(berr)))
+            end
             rawset(Screen, "_updateWindow", function(scr, ...)
                 n = n + 1
-                debugLog("[hc] blit #" .. n .. windowState())
-                return orig(scr, ...)
+                local ok_p, posted, info = pcall(probedBlit, scr)
+                debugLog("[hc] blit #" .. n .. " " .. (ok_p and tostring(info) or ("probe error: " .. tostring(posted))))
+                if ok_p and posted then return end   -- we locked, blitted and posted; don't post twice
+                return orig(scr, ...)                -- lock failed / no window / probe error: let the original try
             end)
             UIManager:scheduleIn(4, function()
                 rawset(Screen, "_updateWindow", nil)   -- back to the class method
