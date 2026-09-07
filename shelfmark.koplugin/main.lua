@@ -8190,11 +8190,22 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
     self._hc_confirm_open = true
-    debugLog("[hc] confirm: searching Hardcover for " .. tostring(rec.title))
-    local completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverFindBook(token, rec.title or "", rec.author)
-    end, {})  -- {} = non-dismissable (see the note on the silent push above)
-    if not completed then debugLog("[hc] confirm: search cancelled"); self._hc_confirm_open = nil; return end
+    local book_id, ft, fa
+    local warm = self._hc_prefetch and self._hc_prefetch[md5]
+    if warm then
+        -- Looked up when the book was opened: the dialog can go straight up.
+        book_id, ft, fa = warm.book_id, warm.title, warm.author
+        debugLog("[hc] confirm: using the match prefetched at open")
+    else
+        -- No prefetch (progress sync switched on mid-book, or the plugin
+        -- restarted since this book was opened): fall back to searching now.
+        debugLog("[hc] confirm: no prefetch, searching Hardcover for " .. tostring(rec.title))
+        local completed
+        completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
+            return doHardcoverFindBook(token, rec.title or "", rec.author)
+        end, {})  -- {} = non-dismissable (see the note on the silent push above)
+        if not completed then debugLog("[hc] confirm: search cancelled"); self._hc_confirm_open = nil; return end
+    end
     debugLog("[hc] confirm: match = " .. tostring(book_id) .. " (" .. tostring(ft) .. ")")
     local ConfirmBox = require("ui/widget/confirmbox")
     local map = loadHardcoverMap()
@@ -8213,7 +8224,13 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         })
         return
     end
-    local desc = (fa and fa ~= "") and T(_("%1 by %2"), ft, fa) or ft
+    -- Both sides shown, not just Hardcover's: a wrong match almost always
+    -- traces back to the book's own title/author, so the pairing is what gets
+    -- approved here.
+    local mine = (rec.author and rec.author ~= "")
+        and T(_("%1\nby %2"), rec.title or _("this book"), rec.author)
+        or (rec.title or _("this book"))
+    local theirs = (fa and fa ~= "") and T(_("%1\nby %2"), ft, fa) or ft
     UIManager:show(ConfirmBox:new{
         -- Not dismissable, and queued input is flushed first. Before this, a
         -- tap anywhere fired cancel_callback -- which records decision="skip"
@@ -8221,7 +8238,7 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         -- syncing, with no way back short of editing the map file.
         dismissable = false,
         flush_events_on_show = true,
-        text = T(_("Sync reading progress for\n\"%1\"\nto this Hardcover book?\n\n%2"), rec.title or _("this book"), desc),
+        text = T(_("This book:\n%1\n\nHardcover match:\n%2\n\nSync reading progress to it?"), mine, theirs),
         ok_text = _("Yes, sync"),
         ok_callback = function()
             self._hc_confirm_open = nil
@@ -8242,6 +8259,56 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
         end,
     })
+end
+
+-- Looks this book up on Hardcover while it is being OPENED, and keeps the
+-- answer in memory for the close-time confirm.
+--
+-- The confirm dialog used to run the search itself, so it could not appear
+-- until a network round trip finished -- at the exact moment the reader is
+-- tearing down and (on a Kindle) the radio may still be waking. Doing it here
+-- instead costs the same one request, but spends it while the book is opening,
+-- the network is already up, and nobody is waiting on a dialog.
+--
+-- In-memory on purpose: a book is always opened before it is closed in the
+-- same session, and nothing here is worth persisting or going stale.
+function Shelfmark:prefetchHardcoverMatch()
+    if not self.hardcover_progress_sync then return end
+    if not self.hardcover_token or self.hardcover_token == "" then return end
+    local ui = self.ui
+    if not ui or not ui.document or not ui.doc_settings then return end
+    local md5 = ui.doc_settings:readSetting("partial_md5_checksum")
+    if not md5 or md5 == "" then return end
+
+    self._hc_prefetch = self._hc_prefetch or {}
+    if self._hc_prefetch[md5] then return end          -- already looked up this session
+    local entry = loadHardcoverMap()[md5]
+    if entry and entry.decision then return end        -- already decided; nothing to ask
+
+    local props = (ui.document.getProps and ui.document:getProps()) or {}
+    local title, author = props.title, props.authors
+    if not title or title == "" then debugLog("[hc] prefetch: no title, skipping"); return end
+    local token = self.hardcover_token
+    debugLog("[hc] prefetch: looking up " .. tostring(title))
+    local Trapper = require("ui/trapper")
+    Trapper:wrap(function()
+        local completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
+            return doHardcoverFindBook(token, title, author)
+        end, {})   -- invisible and non-dismissable; see the note in processHardcoverPending
+        if not completed then debugLog("[hc] prefetch: interrupted"); return end
+        -- A miss is cached too, so the close-time dialog is instant either way.
+        self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa }
+        debugLog("[hc] prefetch: " .. (book_id
+            and ("matched " .. tostring(ft) .. " by " .. tostring(fa))
+            or "no match"))
+    end)
+end
+
+-- Book opened: warm the Hardcover match in the background. Delayed so it never
+-- competes with rendering the first page.
+function Shelfmark:onReaderReady()
+    if not self.hardcover_progress_sync then return end
+    UIManager:scheduleIn(3, function() self:prefetchHardcoverMatch() end)
 end
 
 -- Fires in the reader when a document closes: capture, then push a moment
