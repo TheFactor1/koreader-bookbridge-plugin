@@ -76,6 +76,13 @@ check("Upgrade / Blake Crouch",               "upgrade", "Upgrade", "Blake Crouc
 check("Upgrade: unknown author -> top hit",   "upgrade", "Upgrade", "Nobody Here",  480253, "Blake Crouch")
 check("Hunger Games / Suzanne Collins",       "hunger", "The Hunger Games", "Suzanne Collins", 88639, "Suzanne Collins")
 
+-- the ranked alternatives ride along as a fifth value, in search order
+load_fix("run")
+local _i, _t, _a, _e, ranked = fn("tok", "Run", "Blake Crouch")
+if type(ranked) == "table" and #ranked == 5 and ranked[1].id == 444340 and ranked[2].id == 427957 and ranked[2].author == "Blake Crouch" then
+    pass = pass + 1; print("PASS  ranked candidates returned in search order (5, with authors)")
+else fail = fail + 1; print("FAIL  ranked candidates: " .. tostring(ranked and #ranked)) end
+
 load_fix("run")
 local id = fn("tok", "Run", nil)
 if id == 444340 then pass = pass + 1; print("PASS  no author -> top search hit")

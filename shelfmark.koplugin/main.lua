@@ -1961,8 +1961,12 @@ local function doHardcoverFindBook(token, title, author)
     end
 
     -- Report the contributor actually matched on; otherwise the first, which
-    -- the search index already orders author-first.
-    return chosen.id, chosen.title, chosen_name or chosen.names[1]
+    -- the search index already orders author-first. The full ranked list
+    -- travels along as a fifth value so a "not this book" answer can offer
+    -- the alternatives instead of giving up.
+    local ranked = {}
+    for i, c in ipairs(candidates) do ranked[i] = { id = c.id, title = c.title, author = c.names[1] } end
+    return chosen.id, chosen.title, chosen_name or chosen.names[1], nil, ranked
 end
 
 local function doHardcoverFindAuthor(token, name)
@@ -8337,6 +8341,52 @@ function Shelfmark:processHardcoverPending()
     end
 end
 
+-- The alternatives after "Not this book": one button per remaining
+-- candidate, then "None of these". Only the last option records a skip;
+-- choosing a book records it as the match and pushes progress at once.
+-- Must run in the UI loop (it is called from a button callback).
+function Shelfmark:pickHardcoverCandidate(md5, rec, others, token)
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local map = loadHardcoverMap()
+    local dialog
+    local rows = {}
+    for i = 1, math.min(#others, 5) do
+        local c = others[i]
+        rows[#rows + 1] = {{
+            text = (c.author and c.author ~= "") and T(_("%1 by %2"), c.title, c.author) or c.title,
+            callback = function()
+                UIManager:close(dialog)
+                self._hc_confirm_open = nil
+                debugLog("[hc] picked alternative " .. tostring(c.id) .. " (" .. tostring(c.title) .. ")")
+                map[md5] = { book_id = c.id, title = c.title, decision = "sync" }; saveHardcoverMap(map)
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function()
+                    Trapper:dismissableRunInSubprocess(function()
+                        return doHardcoverPushProgress(token, c.id, rec.percent)
+                    end, {})
+                    self:clearHardcoverPending(md5)
+                    UIManager:scheduleIn(1, function() Trapper:wrap(function() self:processHardcoverPending() end) end)
+                end)
+            end,
+        }}
+    end
+    rows[#rows + 1] = {{
+        text = _("None of these -- don't sync this book"),
+        callback = function()
+            UIManager:close(dialog)
+            self._hc_confirm_open = nil
+            map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
+        end,
+    }}
+    dialog = ButtonDialog:new{
+        title = T(_("Which Hardcover book is\n%1?"), rec.title or _("this book")),
+        title_align = "left",
+        dismissable = false,
+        buttons = rows,
+    }
+    UIManager:show(dialog, "flashui")
+end
+
 -- One-time match+confirm for a book not yet mapped. Reuses the same Hardcover
 -- search the "Mark as read" flow uses, shows what it found, and remembers the
 -- decision (sync or skip) so it never asks again. Must run inside a wrap.
@@ -8344,18 +8394,18 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
     self._hc_confirm_open = true
-    local book_id, ft, fa
+    local book_id, ft, fa, ranked
     local warm = self._hc_prefetch and self._hc_prefetch[md5]
     if warm then
         -- Looked up when the book was opened: the dialog can go straight up.
-        book_id, ft, fa = warm.book_id, warm.title, warm.author
+        book_id, ft, fa, ranked = warm.book_id, warm.title, warm.author, warm.ranked
         debugLog("[hc] confirm: using the match prefetched at open")
     else
         -- No prefetch (progress sync switched on mid-book, or the plugin
         -- restarted since this book was opened): fall back to searching now.
         debugLog("[hc] confirm: no prefetch, searching Hardcover for " .. tostring(rec.title))
-        local completed
-        completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
+        local completed, _err
+        completed, book_id, ft, fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
             return doHardcoverFindBook(token, rec.title or "", rec.author)
         end, {})  -- {} = non-dismissable (see the note on the silent push above)
         if not completed then debugLog("[hc] confirm: search cancelled"); self._hc_confirm_open = nil; return end
@@ -8427,8 +8477,20 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
                 callback = function()
                     debugLog("[hc] dialog answered: no, " .. tostring(os.time() - (dialog._hc_shown_at or os.time())) .. "s after showing")
                     UIManager:close(dialog)
-                    self._hc_confirm_open = nil
-                    map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
+                    -- Hardcover usually returned more than one plausible book
+                    -- (an omnibus and the novel it contains, say). Offer those
+                    -- before giving up on the book for good.
+                    local others = {}
+                    for _unused, c in ipairs(ranked or {}) do
+                        if c.id ~= book_id then others[#others + 1] = c end
+                    end
+                    if #others == 0 then
+                        self._hc_confirm_open = nil
+                        map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
+                        return
+                    end
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function() self:pickHardcoverCandidate(md5, rec, others, token) end)
                 end,
             },
         }},
@@ -8647,13 +8709,13 @@ function Shelfmark:prefetchHardcoverMatch()
     local Trapper = require("ui/trapper")
     self._hc_prefetch_inflight[md5] = true
     Trapper:wrap(function()
-        local completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
+        local completed, book_id, ft, fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
             return doHardcoverFindBook(token, title, author)
         end, {})   -- invisible and non-dismissable; see the note in processHardcoverPending
         self._hc_prefetch_inflight[md5] = nil
         if not completed then debugLog("[hc] prefetch: interrupted"); return end
         -- A miss is cached too, so the close-time dialog is instant either way.
-        self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa }
+        self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa, ranked = ranked }
         debugLog("[hc] prefetch: " .. (book_id
             and ("matched " .. tostring(ft) .. " by " .. tostring(fa))
             or "no match"))

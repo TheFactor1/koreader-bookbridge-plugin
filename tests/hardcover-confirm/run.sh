@@ -25,6 +25,8 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 # Extracted by name so it cannot drift from the real implementation.
 awk '/^function Shelfmark:confirmHardcoverMatchForProgress/{f=1} f{print} f&&/^end$/{exit}' \
     "$REPO/shelfmark.koplugin/main.lua" > "$W/confirm.lua"
+awk '/^function Shelfmark:pickHardcoverCandidate/{f=1} f{print} f&&/^end$/{exit}' \
+    "$REPO/shelfmark.koplugin/main.lua" >> "$W/confirm.lua"
 grep -q "confirmHardcoverMatchForProgress" "$W/confirm.lua" || { echo "FAIL  could not extract the confirm method"; exit 1; }
 
 cd "$KDIR" || exit 1
@@ -89,7 +91,26 @@ ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==1, "tapping Yes records d
 shown = {}; MAP = {}
 Shelfmark.confirmHardcoverMatchForProgress(st, "m", { title="T", author="A", percent=0.1 })
 shown[1].buttons[1][2].callback()      -- "Not this book"
-ck(MAP.m and MAP.m.decision=="skip", "tapping Not this book records decision=skip")
+ck(MAP.m and MAP.m.decision=="skip", "Not this book with no alternatives records decision=skip")
+
+-- With alternatives, "Not this book" opens a picker instead of skipping
+shown = {}; MAP = {}
+local st2 = { hardcover_token="t", clearHardcoverPending=function() end,
+    _hc_prefetch = { m = { book_id=1, title="Omnibus", author="A",
+        ranked = { {id=1,title="Omnibus",author="A"}, {id=2,title="The Novel",author="A"}, {id=3,title="Other",author="B"} } } } }
+st2.pickHardcoverCandidate = Shelfmark.pickHardcoverCandidate
+Shelfmark.confirmHardcoverMatchForProgress(st2, "m", { title="T", author="A", percent=0.1 })
+shown[1].buttons[1][2].callback()      -- "Not this book"
+ck(next(MAP) == nil, "Not this book with alternatives records NOTHING yet")
+local picker = shown[2]
+ck(picker and picker.dismissable == false and #picker.buttons == 3, "opens a picker: 2 alternatives + None of these")
+ck(picker and picker.buttons[1][1].text:find("The Novel", 1, true) ~= nil, "alternatives exclude the rejected match")
+picker.buttons[1][1].callback()        -- choose "The Novel"
+ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==2, "choosing an alternative records it as the match")
+shown = {}; MAP = {}
+Shelfmark.confirmHardcoverMatchForProgress(st2, "m", { title="T", author="A", percent=0.1 })
+shown[1].buttons[1][2].callback(); shown[2].buttons[3][1].callback()   -- None of these
+ck(MAP.m and MAP.m.decision=="skip", "None of these records decision=skip")
 
 -- Teardown regression: build the dialog, touch no button, and the map must
 -- stay empty. This is the bug that silently condemned a book on Android
