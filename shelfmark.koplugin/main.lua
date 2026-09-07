@@ -8084,9 +8084,16 @@ function Shelfmark:processHardcoverPending()
         if entry and entry.decision == "skip" then
             pending[md5] = nil
         elseif entry and entry.decision == "sync" and entry.book_id then
+            -- {} trap, not false/a string: a TrapWidget (visible or invisible)
+            -- is dismissed by ANY queued gesture/keypress, and the reader ->
+            -- FileManager close transition delivers exactly that -- which
+            -- cancelled the call every time (see the debug log). A bare table
+            -- is used as an already-shown trap that is never shown and never
+            -- dismissed, so the subprocess runs to completion, non-blocking,
+            -- with no widget to cancel.
             local completed, ok, a, b = Trapper:dismissableRunInSubprocess(function()
                 return doHardcoverPushProgress(token, entry.book_id, rec.percent)
-            end, false)  -- silent; a failure just stays pending to retry
+            end, {})
             if completed and ok then
                 pending[md5] = nil
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
@@ -8098,7 +8105,11 @@ function Shelfmark:processHardcoverPending()
         end
     end
     saveHardcoverPending(pending)
-    if unmapped then self:confirmHardcoverMatchForProgress(unmapped.md5, unmapped.rec) end
+    -- One confirm at a time: rapid closes each schedule a process pass, and
+    -- without this two passes could stack two dialogs for the same book.
+    if unmapped and not self._hc_confirm_open then
+        self:confirmHardcoverMatchForProgress(unmapped.md5, unmapped.rec)
+    end
 end
 
 -- One-time match+confirm for a book not yet mapped. Reuses the same Hardcover
@@ -8107,11 +8118,12 @@ end
 function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
+    self._hc_confirm_open = true
     debugLog("[hc] confirm: searching Hardcover for " .. tostring(rec.title))
     local completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
         return doHardcoverFindBook(token, rec.title or "", rec.author)
-    end, _("Finding on Hardcover..."))
-    if not completed then debugLog("[hc] confirm: search cancelled"); return end
+    end, {})  -- {} = non-dismissable (see the note on the silent push above)
+    if not completed then debugLog("[hc] confirm: search cancelled"); self._hc_confirm_open = nil; return end
     debugLog("[hc] confirm: match = " .. tostring(book_id) .. " (" .. tostring(ft) .. ")")
     local ConfirmBox = require("ui/widget/confirmbox")
     local map = loadHardcoverMap()
@@ -8120,8 +8132,10 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             text = T(_("No Hardcover match for \"%1\".\n\nStop trying to sync its progress?"), rec.title or _("this book")),
             ok_text = _("Stop"),
             ok_callback = function()
+                self._hc_confirm_open = nil
                 map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
             end,
+            cancel_callback = function() self._hc_confirm_open = nil end,
             cancel_text = _("Keep trying"),
         })
         return
@@ -8131,12 +8145,13 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         text = T(_("Sync reading progress for\n\"%1\"\nto this Hardcover book?\n\n%2"), rec.title or _("this book"), desc),
         ok_text = _("Yes, sync"),
         ok_callback = function()
+            self._hc_confirm_open = nil
             map[md5] = { book_id = book_id, title = ft, decision = "sync" }; saveHardcoverMap(map)
             local Trapper = require("ui/trapper")
             Trapper:wrap(function()
                 Trapper:dismissableRunInSubprocess(function()
                     return doHardcoverPushProgress(token, book_id, rec.percent)
-                end, _("Updating Hardcover..."))
+                end, {})
                 self:clearHardcoverPending(md5)
                 -- continue with any other pending books
                 UIManager:scheduleIn(1, function() Trapper:wrap(function() self:processHardcoverPending() end) end)
@@ -8144,6 +8159,7 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         end,
         cancel_text = _("No"),
         cancel_callback = function()
+            self._hc_confirm_open = nil
             map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
         end,
     })
