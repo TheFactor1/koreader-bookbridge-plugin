@@ -8797,9 +8797,70 @@ end
 
 -- Fires in the reader when a document closes: capture, then push a moment
 -- later (network off the teardown path, in FileManager context).
+-- Ten seconds of close-time diagnostics on real devices: every
+-- Screen:setRotationMode call (Bookshelf restores a stashed rotation on the
+-- way back from a book -- on Android that reaches Java's
+-- setRequestedOrientation, an OS relayout request, right before our dialog)
+-- and every native app command KOReader receives, decoded by name. Installed
+-- here because both happen BEFORE the dialog exists.
+function Shelfmark:installCloseProbes()
+    local ok_dev, Device = pcall(require, "device")
+    if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
+    local Screen = Device.screen
+    local restores = {}
+    -- rotation calls
+    if Screen and rawget(Screen, "setRotationMode") == nil then
+        local mt = getmetatable(Screen)
+        local cls = mt and type(mt.__index) == "table" and mt.__index
+        local orig = cls and cls.setRotationMode
+        if type(orig) == "function" then
+            rawset(Screen, "setRotationMode", function(scr, mode, ...)
+                local ok_c, cur = pcall(function() return scr:getRotationMode() end)
+                debugLog("[hc] setRotationMode(" .. tostring(mode) .. ") current=" .. tostring(ok_c and cur or "?"))
+                return orig(scr, mode, ...)
+            end)
+            restores[#restores + 1] = function() rawset(Screen, "setRotationMode", nil) end
+        end
+    end
+    -- native app commands (Android: APP_CMD_*; elsewhere EV_MSC codes, rare)
+    local input = Device.input
+    if type(input) == "table" and type(input.handleMiscEv) == "function" and not input._hc_misc_probe then
+        local was_raw = rawget(input, "handleMiscEv") ~= nil
+        local iorig = input.handleMiscEv
+        local names = {}
+        local ok_ffi, ffi = pcall(require, "ffi")
+        if ok_ffi then
+            for _unused, n in ipairs({ "INPUT_CHANGED", "INIT_WINDOW", "TERM_WINDOW", "WINDOW_RESIZED",
+                    "WINDOW_REDRAW_NEEDED", "CONTENT_RECT_CHANGED", "GAINED_FOCUS", "LOST_FOCUS",
+                    "CONFIG_CHANGED", "LOW_MEMORY", "START", "RESUME", "SAVE_STATE", "PAUSE", "STOP", "DESTROY" }) do
+                local ok_k, v = pcall(function() return ffi.C["APP_CMD_" .. n] end)
+                if ok_k and v ~= nil then names[tonumber(v)] = n end
+            end
+        end
+        input.handleMiscEv = function(this, ev, ...)
+            local code = ev and tonumber(ev.code)
+            debugLog("[hc] app cmd " .. tostring(code and names[code] or "?") .. "(" .. tostring(code) .. ")")
+            return iorig(this, ev, ...)
+        end
+        input._hc_misc_probe = true
+        restores[#restores + 1] = function()
+            if was_raw then input.handleMiscEv = iorig else rawset(input, "handleMiscEv", nil) end
+            input._hc_misc_probe = nil
+        end
+    end
+    if #restores > 0 then
+        debugLog("[hc] close probes on")
+        UIManager:scheduleIn(10, function()
+            for _unused, f in ipairs(restores) do pcall(f) end
+            debugLog("[hc] close probes off")
+        end)
+    end
+end
+
 function Shelfmark:onCloseDocument()
     self:captureReadingProgress()
     if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then
+        pcall(function() self:installCloseProbes() end)
         -- Just long enough for the FileManager to finish painting; the dialog
         -- no longer cares about stray input, so this needn't be generous.
         UIManager:scheduleIn(0.4, function()
