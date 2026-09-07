@@ -184,6 +184,13 @@ function Shelfmark:editServerSettings()
                 text = self.socks5_proxy,
                 hint = _("SOCKS5 proxy host:port (optional, e.g. 127.0.0.1:1055 for Tailscale userspace mode)"),
             },
+            {
+                -- Used by device pairing and "Send debug log to server". Was
+                -- only ever set by a one-time prompt, so a wrong value had no
+                -- way back.
+                text = self.pairing_relay_url,
+                hint = _("Pairing relay URL (optional, e.g. http://homeserver:8086 -- pairing and debug-log upload)"),
+            },
         },
         buttons = {
             {
@@ -202,6 +209,7 @@ function Shelfmark:editServerSettings()
                         self.username = fields[2]
                         self.password = fields[3]
                         self.socks5_proxy = fields[4] ~= "" and fields[4] or nil
+                        self.pairing_relay_url = fields[5] ~= "" and fields[5]:gsub("/*$", "") or nil
                         UIManager:close(self.settings_dialog)
                         self:saveAllSettings(_("Saved. You'll be logged in on your next search or request."))
                     end,
@@ -3023,7 +3031,7 @@ local function doDebugLogUpload(relay_url, text, socks5_proxy)
     socketutil:reset_timeout()
     if not ok then
         debugLog("[log] <- connection error: " .. tostring(code))
-        return nil, nil, _("Couldn't reach the server -- check the pairing relay URL under Settings > Connections.")
+        return nil, nil, _("Couldn't reach the server -- check the pairing relay URL under Settings > Connections > Server settings.")
     end
     local content = table.concat(sink_table)
     debugLog("[log] <- HTTP " .. tostring(code))
@@ -6411,9 +6419,14 @@ end
 -- dismissable progress box, so a slow link never freezes the UI.
 function Shelfmark:sendDebugLog()
     if not self.pairing_relay_url or self.pairing_relay_url == "" then
-        UIManager:show(InfoMessage:new{
-            text = _("Set the pairing relay URL first (Settings > Connections > Server settings)."),
-        })
+        -- The relay URL is only ever asked for on first use of pairing, so a
+        -- device that never paired has none. Ask with the same prompt, then
+        -- come back here -- inside a fresh wrap, since the prompt's button
+        -- callback runs outside this one.
+        self:promptPairingRelayUrl(function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:sendDebugLog() end)
+        end)
         return
     end
     -- A header the reader of the file will want before anything else: what
