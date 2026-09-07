@@ -6210,6 +6210,56 @@ function Shelfmark:addToMainMenu(menu_items)
                             Trapper:wrap(function() self:browseHardcoverLists() end)
                         end,
                     },
+                    {
+                        text = _("Hardcover settings"),
+                        keep_menu_open = true,
+                        callback = function() self:editHardcoverSettings() end,
+                    },
+                    {
+                        text = _("Sync reading progress to Hardcover"),
+                        keep_menu_open = true,
+                        checked_func = function() return self.hardcover_progress_sync == true end,
+                        callback = function()
+                            self.hardcover_progress_sync = not self.hardcover_progress_sync
+                            self:saveAllSettings(self.hardcover_progress_sync
+                                and _("On. As you read, progress will sync to Hardcover when you close a book or the device sleeps.")
+                                or _("Off."))
+                        end,
+                    },
+                    {
+                        -- Answering "No" -- or, before build 9b45e72, a stray
+                        -- tap that dismissed the dialog and fired its cancel
+                        -- callback -- records a book as never-sync for good.
+                        -- Without this there is no way back short of deleting
+                        -- the map file by hand over USB.
+                        text_func = function()
+                            local n = 0
+                            for _unused in pairs(loadHardcoverMap()) do n = n + 1 end
+                            return n > 0 and T(_("Forget Hardcover book choices (%1)"), n)
+                                or _("Forget Hardcover book choices")
+                        end,
+                        keep_menu_open = true,
+                        enabled_func = function() return next(loadHardcoverMap()) ~= nil end,
+                        callback = function()
+                            local ConfirmBox = require("ui/widget/confirmbox")
+                            local skipped, synced = 0, 0
+                            for _unused, e in pairs(loadHardcoverMap()) do
+                                if e.decision == "skip" then skipped = skipped + 1
+                                elseif e.decision == "sync" then synced = synced + 1 end
+                            end
+                            UIManager:show(ConfirmBox:new{
+                                text = T(_("Forget every remembered Hardcover choice?\n\n%1 set to never sync\n%2 matched to a book\n\nEach book asks again the next time you close it."),
+                                    skipped, synced),
+                                ok_text = _("Forget"),
+                                ok_callback = function()
+                                    saveHardcoverMap({})
+                                    UIManager:show(InfoMessage:new{
+                                        text = _("Hardcover choices cleared. Close a book to be asked again."),
+                                    })
+                                end,
+                            })
+                        end,
+                    },
                 },
             },
             -- Everything below is either one-time setup or rarely touched
@@ -6247,61 +6297,6 @@ function Shelfmark:addToMainMenu(menu_items)
                                 callback = function()
                                     local Trapper = require("ui/trapper")
                                     Trapper:wrap(function() self:showConnectionStatus() end)
-                                end,
-                            },
-                        },
-                    },
-                    {
-                        text = _("Hardcover sync"),
-                        sub_item_table = {
-                            {
-                                text = _("Hardcover settings"),
-                                keep_menu_open = true,
-                                callback = function() self:editHardcoverSettings() end,
-                            },
-                            {
-                                text = _("Sync reading progress to Hardcover"),
-                                keep_menu_open = true,
-                                checked_func = function() return self.hardcover_progress_sync == true end,
-                                callback = function()
-                                    self.hardcover_progress_sync = not self.hardcover_progress_sync
-                                    self:saveAllSettings(self.hardcover_progress_sync
-                                        and _("On. As you read, progress will sync to Hardcover when you close a book or the device sleeps.")
-                                        or _("Off."))
-                                end,
-                            },
-                            {
-                                -- Answering "No" -- or, before build 9b45e72, a stray
-                                -- tap that dismissed the dialog and fired its cancel
-                                -- callback -- records a book as never-sync for good.
-                                -- Without this there is no way back short of deleting
-                                -- the map file by hand over USB.
-                                text_func = function()
-                                    local n = 0
-                                    for _unused in pairs(loadHardcoverMap()) do n = n + 1 end
-                                    return n > 0 and T(_("Forget Hardcover book choices (%1)"), n)
-                                        or _("Forget Hardcover book choices")
-                                end,
-                                keep_menu_open = true,
-                                enabled_func = function() return next(loadHardcoverMap()) ~= nil end,
-                                callback = function()
-                                    local ConfirmBox = require("ui/widget/confirmbox")
-                                    local skipped, synced = 0, 0
-                                    for _unused, e in pairs(loadHardcoverMap()) do
-                                        if e.decision == "skip" then skipped = skipped + 1
-                                        elseif e.decision == "sync" then synced = synced + 1 end
-                                    end
-                                    UIManager:show(ConfirmBox:new{
-                                        text = T(_("Forget every remembered Hardcover choice?\n\n%1 set to never sync\n%2 matched to a book\n\nEach book asks again the next time you close it."),
-                                            skipped, synced),
-                                        ok_text = _("Forget"),
-                                        ok_callback = function()
-                                            saveHardcoverMap({})
-                                            UIManager:show(InfoMessage:new{
-                                                text = _("Hardcover choices cleared. Close a book to be asked again."),
-                                            })
-                                        end,
-                                    })
                                 end,
                             },
                         },
@@ -8153,7 +8148,10 @@ end
 function Shelfmark:processHardcoverPending()
     if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
     local pending = loadHardcoverPending()
-    if next(pending) == nil then debugLog("[hc] process: nothing pending"); return end
+    if next(pending) == nil then
+        self._hc_wait_tries = nil   -- queue drained; don't carry a count into the next book
+        debugLog("[hc] process: nothing pending"); return
+    end
     local map = loadHardcoverMap()
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
@@ -8194,6 +8192,26 @@ function Shelfmark:processHardcoverPending()
     -- One confirm at a time: rapid closes each schedule a process pass, and
     -- without this two passes could stack two dialogs for the same book.
     if unmapped and not self._hc_confirm_open then
+        -- If the open-time lookup for this book is STILL running, wait for it
+        -- instead of starting a competing second search. Hardcover throttles
+        -- rapid requests by hanging the connection rather than answering 429
+        -- (measured: two quick queries answer in ~0.2s, a third can hang past
+        -- 30s), so racing ourselves is the slowest possible thing to do -- and
+        -- it was: closing a book before the prefetch landed put two queries in
+        -- flight and the dialog then took tens of seconds to appear.
+        if self._hc_prefetch_inflight and self._hc_prefetch_inflight[unmapped.md5] then
+            self._hc_wait_tries = (self._hc_wait_tries or 0) + 1
+            if self._hc_wait_tries <= 20 then
+                debugLog("[hc] process: open-time lookup still running, waiting for it")
+                UIManager:scheduleIn(1, function()
+                    local Trapper2 = require("ui/trapper")
+                    Trapper2:wrap(function() self:processHardcoverPending() end)
+                end)
+                return
+            end
+            debugLog("[hc] process: lookup never landed; searching now")
+        end
+        self._hc_wait_tries = nil
         self:confirmHardcoverMatchForProgress(unmapped.md5, unmapped.rec)
     end
 end
@@ -8236,7 +8254,7 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             end,
             cancel_callback = function() self._hc_confirm_open = nil end,
             cancel_text = _("Keep trying"),
-        })
+        }, "flashui")   -- same reason as the match dialog below
         return
     end
     -- Both sides shown, not just Hardcover's: a wrong match almost always
@@ -8292,7 +8310,14 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             },
         }},
     }
-    UIManager:show(dialog)
+    -- "flashui", not the default: this appears moments after the reader tore
+    -- down and the file browser painted itself, and on e-ink a partial refresh
+    -- landing in the middle of that transition can leave the dialog sitting in
+    -- the framebuffer without the panel actually being updated -- it then only
+    -- becomes visible when something else forces a redraw, such as opening a
+    -- menu. UIManager coalesces this with the widget's own setDirty into a
+    -- single refresh pass, so it costs one flash, not two.
+    UIManager:show(dialog, "flashui")
     -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
     -- discard input queued while the book was closing, which would otherwise
     -- land straight on a button.
@@ -8322,7 +8347,9 @@ function Shelfmark:prefetchHardcoverMatch()
     if not md5 or md5 == "" then return end
 
     self._hc_prefetch = self._hc_prefetch or {}
+    self._hc_prefetch_inflight = self._hc_prefetch_inflight or {}
     if self._hc_prefetch[md5] then return end          -- already looked up this session
+    if self._hc_prefetch_inflight[md5] then return end -- already looking
     local entry = loadHardcoverMap()[md5]
     if entry and entry.decision then return end        -- already decided; nothing to ask
 
@@ -8332,16 +8359,37 @@ function Shelfmark:prefetchHardcoverMatch()
     local token = self.hardcover_token
     debugLog("[hc] prefetch: looking up " .. tostring(title))
     local Trapper = require("ui/trapper")
+    self._hc_prefetch_inflight[md5] = true
     Trapper:wrap(function()
         local completed, book_id, ft, fa = Trapper:dismissableRunInSubprocess(function()
             return doHardcoverFindBook(token, title, author)
         end, {})   -- invisible and non-dismissable; see the note in processHardcoverPending
+        self._hc_prefetch_inflight[md5] = nil
         if not completed then debugLog("[hc] prefetch: interrupted"); return end
         -- A miss is cached too, so the close-time dialog is instant either way.
         self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa }
         debugLog("[hc] prefetch: " .. (book_id
             and ("matched " .. tostring(ft) .. " by " .. tostring(fa))
             or "no match"))
+    end)
+end
+
+-- Wi-Fi came back: push anything that piled up while offline.
+--
+-- The queue itself already exists and needs no network: closing a book writes
+-- the percentage to the pending file locally, and a push that fails leaves the
+-- record in place to retry. What was missing was a trigger -- until now
+-- pending work only moved on the next close or resume, so progress read on a
+-- plane sat there until you happened to close another book.
+function Shelfmark:onNetworkConnected()
+    if not self.hardcover_progress_sync then return end
+    if not self.hardcover_token or self.hardcover_token == "" then return end
+    if next(loadHardcoverPending()) == nil then return end
+    debugLog("[hc] network back: flushing queued reading progress")
+    -- A moment for the connection to actually settle before using it.
+    UIManager:scheduleIn(2, function()
+        local Trapper = require("ui/trapper")
+        Trapper:wrap(function() self:processHardcoverPending() end)
     end)
 end
 

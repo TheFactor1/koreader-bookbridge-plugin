@@ -59,6 +59,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') cases, and t
 elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-match (no local KOReader)"; skipped="${skipped:+$skipped, }hardcover-match"
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
+section "Hardcover queue (no self-racing, flushes on reconnect)"
+out=$(bash tests/hardcover-queue/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-queue (no local KOReader)"; skipped="${skipped:+$skipped, }hardcover-queue"
+else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
+
 section "Hardcover confirm dialog (instant, and tap-proof)"
 out=$(bash tests/hardcover-confirm/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, prefetched match costs no network"
