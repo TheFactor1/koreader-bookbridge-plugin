@@ -8576,10 +8576,21 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
                 end)
             end)
         end
-        UIManager:scheduleIn(1, function()
-            if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
-            UIManager:setDirty("all", "ui")
-        end)
+        -- Twice, and only after the panel is idle: on the Kindle the dialog's
+        -- own full-screen flash takes most of a second, and a partial refresh
+        -- landing while it is still in flight is a collision the EPDC can
+        -- drop -- seen as one close answered 2 s after showing and the next
+        -- 15 s after, on the same build. refreshWaitForLast blocks until the
+        -- in-flight update is done (a no-op on LCD/OLED); the repeat at +3 s
+        -- is insurance that costs nothing visible, since a partial refresh
+        -- of unchanged pixels does not show on e-ink.
+        for _unused, delay in ipairs({ 1, 3 }) do
+            UIManager:scheduleIn(delay, function()
+                if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
+                pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
+                UIManager:setDirty("all", "ui")
+            end)
+        end
     end
 end
 
