@@ -8608,6 +8608,19 @@ function Shelfmark:prefetchHardcoverMatch()
         debugLog("[hc] prefetch: " .. (book_id
             and ((confident and "confident match " or "uncertain match ") .. tostring(ft) .. " by " .. tostring(fa))
             or "no match"))
+        -- Say what will happen, once, the first time this book is opened --
+        -- here in the reader, where a message shows reliably, rather than at
+        -- the close, which stays silent. Auto-dismisses; no buttons.
+        local msg
+        if book_id and confident then
+            msg = (fa and fa ~= "") and T(_("Hardcover: progress will sync as \"%1\" by %2."), ft, fa)
+                or T(_("Hardcover: progress will sync as \"%1\"."), ft)
+        elseif book_id then
+            msg = T(_("Hardcover isn't sure this is \"%1\" -- it will wait under Hardcover > Review matches."), ft)
+        else
+            msg = _("Hardcover has no match for this book -- it will wait under Hardcover > Review matches.")
+        end
+        UIManager:show(InfoMessage:new{ text = msg, timeout = 6 })
     end)
 end
 
