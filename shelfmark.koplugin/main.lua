@@ -8664,6 +8664,23 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
             end
         end)
     end
+    -- On both devices the dialog's own refresh reaches the driver and does
+    -- not take effect, while the next unrelated refresh does: on the Kindle
+    -- a Bookshelf poll timer supplies one 10-15 s later and the dialog
+    -- appears with no input; on the phone nothing does until a touch. What
+    -- those later refreshes have that this dialog's did not is a repaint of
+    -- the WHOLE stack from the home screen up, not the dialog alone. So do
+    -- that on purpose, one second in. Real devices only; logged.
+    do
+        local ok_d, Dev = pcall(require, "device")
+        if ok_d and Dev and not (Dev.isDesktop and Dev:isDesktop()) then
+            UIManager:scheduleIn(1, function()
+                if type(UIManager.isWidgetShown) == "function" and not UIManager:isWidgetShown(dialog) then return end
+                debugLog("[hc] full-stack repaint at +1s")
+                UIManager:setDirty("all", "ui")
+            end)
+        end
+    end
     -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
     -- discard input queued while the book was closing, which would otherwise
     -- land straight on a button.
