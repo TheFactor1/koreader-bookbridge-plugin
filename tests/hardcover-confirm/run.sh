@@ -41,6 +41,9 @@ saveHardcoverMap = function(t) MAP = t end
 debugLog = function() end
 UIManager = { show = function(_s,w) shown[#shown+1] = w end, scheduleIn = function() end }
 package.loaded["ui/widget/confirmbox"] = { new = function(_s,t) return t end }
+package.loaded["ui/widget/buttondialog"] = { new = function(_s,t) return t end }
+package.loaded["device"] = { input = { inhibitInputUntil = function() end } }
+UIManager.close = function() end
 package.loaded["ui/trapper"] = {
     wrap = function(_s,f) return f() end,
     dismissableRunInSubprocess = function(_s,f) return true, f() end,
@@ -60,10 +63,15 @@ Shelfmark.confirmHardcoverMatchForProgress(warm, "md5a", { title="Red Rising", a
 ck(SEARCHES == 0, "prefetched match -> ZERO searches, dialog is instant")
 local box = shown[1]
 ck(box ~= nil, "dialog is shown")
-ck(box and box.text:find("This book:",1,true) and box.text:find("Hardcover match:",1,true),
+ck(box and box.title:find("This book:",1,true) and box.title:find("Hardcover match:",1,true),
    "shows the book's own metadata next to Hardcover's, for approval")
 ck(box and box.dismissable == false, "not dismissable (a stray tap cannot answer it)")
-ck(box and box.flush_events_on_show == true, "input queued during the close is flushed")
+-- The important one: a ConfirmBox calls cancel_callback from onClose, so the
+-- dialog merely going away recorded decision="skip" permanently. ButtonDialog
+-- only calls tap_close_callback, and none is set.
+ck(box and box.tap_close_callback == nil,
+   "no close callback: the dialog going away records NOTHING")
+ck(box and box.buttons and box.buttons[1] and #box.buttons[1] == 2, "offers exactly two buttons")
 
 shown = {}
 Shelfmark.confirmHardcoverMatchForProgress({ hardcover_token="t" }, "md5b",
@@ -75,13 +83,20 @@ shown = {}; MAP = {}
 local st = { hardcover_token="t", _hc_prefetch={ m={book_id=1,title="T",author="A"} },
              clearHardcoverPending=function() end }
 Shelfmark.confirmHardcoverMatchForProgress(st, "m", { title="T", author="A", percent=0.1 })
-shown[1].ok_callback()
-ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==1, "approving records decision=sync")
+shown[1].buttons[1][1].callback()      -- "Yes, sync"
+ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==1, "tapping Yes records decision=sync")
 
 shown = {}; MAP = {}
 Shelfmark.confirmHardcoverMatchForProgress(st, "m", { title="T", author="A", percent=0.1 })
-shown[1].cancel_callback()
-ck(MAP.m and MAP.m.decision=="skip", "declining records decision=skip")
+shown[1].buttons[1][2].callback()      -- "Not this book"
+ck(MAP.m and MAP.m.decision=="skip", "tapping Not this book records decision=skip")
+
+-- Teardown regression: build the dialog, touch no button, and the map must
+-- stay empty. This is the bug that silently condemned a book on Android
+-- whenever the OS reclaimed a backgrounded KOReader.
+shown = {}; MAP = {}
+Shelfmark.confirmHardcoverMatchForProgress(st, "m", { title="T", author="A", percent=0.1 })
+ck(next(MAP) == nil, "dialog dismissed without an answer records nothing")
 
 print(pass.." passed, "..fail.." failed")
 os.exit(fail==0 and 0 or 1)

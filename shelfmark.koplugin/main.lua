@@ -6219,82 +6219,113 @@ function Shelfmark:addToMainMenu(menu_items)
                 text = _("Settings"),
                 sub_item_table = {
                     {
-                        text = _("Server settings"),
-                        keep_menu_open = true,
-                        callback = function() self:editServerSettings() end,
+                        text = _("Connections"),
+                        sub_item_table = {
+                            {
+                                text = _("Server settings"),
+                                keep_menu_open = true,
+                                callback = function() self:editServerSettings() end,
+                            },
+                            {
+                                text = _("CWA settings"),
+                                keep_menu_open = true,
+                                callback = function() self:editCwaSettings() end,
+                            },
+                            {
+                                text = _("Anna's Archive settings"),
+                                keep_menu_open = true,
+                                callback = function() self:editAnnasSettings() end,
+                            },
+                            {
+                                text = _("Match suggestions (AI)"),
+                                keep_menu_open = true,
+                                callback = function() self:editAiSettings() end,
+                            },
+                            {
+                                text = _("Connection status"),
+                                keep_menu_open = true,
+                                callback = function()
+                                    local Trapper = require("ui/trapper")
+                                    Trapper:wrap(function() self:showConnectionStatus() end)
+                                end,
+                            },
+                        },
                     },
                     {
-                        text = _("CWA settings"),
-                        keep_menu_open = true,
-                        callback = function() self:editCwaSettings() end,
-                    },
-                    {
-                        text = _("Anna's Archive settings"),
-                        keep_menu_open = true,
-                        callback = function() self:editAnnasSettings() end,
-                    },
-                    {
-                        text = _("Hardcover settings"),
-                        keep_menu_open = true,
-                        callback = function() self:editHardcoverSettings() end,
-                    },
-                    {
-                        text = _("Sync reading progress to Hardcover"),
-                        keep_menu_open = true,
-                        checked_func = function() return self.hardcover_progress_sync == true end,
-                        callback = function()
-                            self.hardcover_progress_sync = not self.hardcover_progress_sync
-                            self:saveAllSettings(self.hardcover_progress_sync
-                                and _("On. As you read, progress will sync to Hardcover when you close a book or the device sleeps.")
-                                or _("Off."))
-                        end,
-                    },
-                    {
-                        -- Answering "No" -- or, before build 9b45e72, a stray
-                        -- tap that dismissed the dialog and fired its cancel
-                        -- callback -- records a book as never-sync for good.
-                        -- Without this there is no way back short of deleting
-                        -- the map file by hand over USB.
-                        text_func = function()
-                            local n = 0
-                            for _unused in pairs(loadHardcoverMap()) do n = n + 1 end
-                            return n > 0 and T(_("Forget Hardcover book choices (%1)"), n)
-                                or _("Forget Hardcover book choices")
-                        end,
-                        keep_menu_open = true,
-                        enabled_func = function() return next(loadHardcoverMap()) ~= nil end,
-                        callback = function()
-                            local ConfirmBox = require("ui/widget/confirmbox")
-                            local skipped, synced = 0, 0
-                            for _unused, e in pairs(loadHardcoverMap()) do
-                                if e.decision == "skip" then skipped = skipped + 1
-                                elseif e.decision == "sync" then synced = synced + 1 end
-                            end
-                            UIManager:show(ConfirmBox:new{
-                                text = T(_("Forget every remembered Hardcover choice?\n\n%1 set to never sync\n%2 matched to a book\n\nEach book asks again the next time you close it."),
-                                    skipped, synced),
-                                ok_text = _("Forget"),
-                                ok_callback = function()
-                                    saveHardcoverMap({})
-                                    UIManager:show(InfoMessage:new{
-                                        text = _("Hardcover choices cleared. Close a book to be asked again."),
+                        text = _("Hardcover sync"),
+                        sub_item_table = {
+                            {
+                                text = _("Hardcover settings"),
+                                keep_menu_open = true,
+                                callback = function() self:editHardcoverSettings() end,
+                            },
+                            {
+                                text = _("Sync reading progress to Hardcover"),
+                                keep_menu_open = true,
+                                checked_func = function() return self.hardcover_progress_sync == true end,
+                                callback = function()
+                                    self.hardcover_progress_sync = not self.hardcover_progress_sync
+                                    self:saveAllSettings(self.hardcover_progress_sync
+                                        and _("On. As you read, progress will sync to Hardcover when you close a book or the device sleeps.")
+                                        or _("Off."))
+                                end,
+                            },
+                            {
+                                -- Answering "No" -- or, before build 9b45e72, a stray
+                                -- tap that dismissed the dialog and fired its cancel
+                                -- callback -- records a book as never-sync for good.
+                                -- Without this there is no way back short of deleting
+                                -- the map file by hand over USB.
+                                text_func = function()
+                                    local n = 0
+                                    for _unused in pairs(loadHardcoverMap()) do n = n + 1 end
+                                    return n > 0 and T(_("Forget Hardcover book choices (%1)"), n)
+                                        or _("Forget Hardcover book choices")
+                                end,
+                                keep_menu_open = true,
+                                enabled_func = function() return next(loadHardcoverMap()) ~= nil end,
+                                callback = function()
+                                    local ConfirmBox = require("ui/widget/confirmbox")
+                                    local skipped, synced = 0, 0
+                                    for _unused, e in pairs(loadHardcoverMap()) do
+                                        if e.decision == "skip" then skipped = skipped + 1
+                                        elseif e.decision == "sync" then synced = synced + 1 end
+                                    end
+                                    UIManager:show(ConfirmBox:new{
+                                        text = T(_("Forget every remembered Hardcover choice?\n\n%1 set to never sync\n%2 matched to a book\n\nEach book asks again the next time you close it."),
+                                            skipped, synced),
+                                        ok_text = _("Forget"),
+                                        ok_callback = function()
+                                            saveHardcoverMap({})
+                                            UIManager:show(InfoMessage:new{
+                                                text = _("Hardcover choices cleared. Close a book to be asked again."),
+                                            })
+                                        end,
                                     })
                                 end,
-                            })
-                        end,
+                            },
+                        },
                     },
                     {
-                        text = _("Match suggestions (AI)"),
-                        keep_menu_open = true,
-                        callback = function() self:editAiSettings() end,
-                    },
-                    {
-                        text_func = function()
-                            return T(_("Update source: %1"),
-                                (self.update_url and self.update_url ~= "") and _("self-hosted") or _("GitHub"))
-                        end,
-                        keep_menu_open = true,
-                        callback = function() self:editUpdateSettings() end,
+                        text = _("Set up another device"),
+                        separator = true,
+                        sub_item_table = {
+                            {
+                                text = _("Show setup QR code"),
+                                keep_menu_open = true,
+                                callback = function() self:showSetupQrCode() end,
+                            },
+                            {
+                                text = _("Import settings from text"),
+                                keep_menu_open = true,
+                                                        callback = function() self:importSettingsFromText() end,
+                            },
+                            {
+                                text = _("Import from server"),
+                                keep_menu_open = true,
+                                callback = function() self:importFromServer() end,
+                            },
+                        },
                     },
                     {
                         text_func = function()
@@ -6304,28 +6335,12 @@ function Shelfmark:addToMainMenu(menu_items)
                         callback = function() self:chooseDownloadDir() end,
                     },
                     {
-                        text = _("Show setup QR code"),
-                        keep_menu_open = true,
-                        callback = function() self:showSetupQrCode() end,
-                    },
-                    {
-                        text = _("Import settings from text"),
-                        keep_menu_open = true,
-                                                callback = function() self:importSettingsFromText() end,
-                    },
-                    {
-                        text = _("Import from server"),
-                        keep_menu_open = true,
-                        callback = function() self:importFromServer() end,
-                    },
-                    {
-                        text = _("Connection status"),
-                        keep_menu_open = true,
-                        separator = true,
-                        callback = function()
-                            local Trapper = require("ui/trapper")
-                            Trapper:wrap(function() self:showConnectionStatus() end)
+                        text_func = function()
+                            return T(_("Update source: %1"),
+                                (self.update_url and self.update_url ~= "") and _("self-hosted") or _("GitHub"))
                         end,
+                        keep_menu_open = true,
+                        callback = function() self:editUpdateSettings() end,
                     },
                     {
                         text_func = function()
@@ -8231,34 +8246,60 @@ function Shelfmark:confirmHardcoverMatchForProgress(md5, rec)
         and T(_("%1\nby %2"), rec.title or _("this book"), rec.author)
         or (rec.title or _("this book"))
     local theirs = (fa and fa ~= "") and T(_("%1\nby %2"), ft, fa) or ft
-    UIManager:show(ConfirmBox:new{
-        -- Not dismissable, and queued input is flushed first. Before this, a
-        -- tap anywhere fired cancel_callback -- which records decision="skip"
-        -- -- so one mistimed tap permanently stopped that book from ever
-        -- syncing, with no way back short of editing the map file.
-        dismissable = false,
-        flush_events_on_show = true,
-        text = T(_("This book:\n%1\n\nHardcover match:\n%2\n\nSync reading progress to it?"), mine, theirs),
-        ok_text = _("Yes, sync"),
-        ok_callback = function()
-            self._hc_confirm_open = nil
-            map[md5] = { book_id = book_id, title = ft, decision = "sync" }; saveHardcoverMap(map)
-            local Trapper = require("ui/trapper")
-            Trapper:wrap(function()
-                Trapper:dismissableRunInSubprocess(function()
-                    return doHardcoverPushProgress(token, book_id, rec.percent)
-                end, {})
-                self:clearHardcoverPending(md5)
-                -- continue with any other pending books
-                UIManager:scheduleIn(1, function() Trapper:wrap(function() self:processHardcoverPending() end) end)
-            end)
-        end,
-        cancel_text = _("No"),
-        cancel_callback = function()
-            self._hc_confirm_open = nil
-            map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
-        end,
-    })
+    -- ButtonDialog, deliberately not ConfirmBox. A ConfirmBox calls its
+    -- cancel_callback from onClose as well as from the Cancel button, so the
+    -- dialog merely going away counted as "No" -- and this cancel path records
+    -- decision="skip", which is permanent. Tearing KOReader down with the
+    -- dialog on screen (Android reclaiming a backgrounded app does exactly
+    -- this) therefore condemned the book with nobody having answered, and no
+    -- dialog ever appeared for it again. Verified on desktop KOReader: kill it
+    -- with the dialog up and a "skip" lands in the map.
+    --
+    -- ButtonDialog:onClose only calls tap_close_callback, and none is set
+    -- here, so if this closes without a button being tapped NOTHING is
+    -- recorded: the book stays pending and is asked about again next time.
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local dialog
+    dialog = ButtonDialog:new{
+        title = T(_("This book:\n%1\n\nHardcover match:\n%2\n\nSync reading progress to it?"), mine, theirs),
+        title_align = "left",
+        dismissable = false,   -- a tap outside must not answer for you
+        buttons = {{
+            {
+                text = _("Yes, sync"),
+                callback = function()
+                    UIManager:close(dialog)
+                    self._hc_confirm_open = nil
+                    map[md5] = { book_id = book_id, title = ft, decision = "sync" }; saveHardcoverMap(map)
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        Trapper:dismissableRunInSubprocess(function()
+                            return doHardcoverPushProgress(token, book_id, rec.percent)
+                        end, {})
+                        self:clearHardcoverPending(md5)
+                        -- continue with any other pending books
+                        UIManager:scheduleIn(1, function() Trapper:wrap(function() self:processHardcoverPending() end) end)
+                    end)
+                end,
+            },
+            {
+                text = _("Not this book"),
+                callback = function()
+                    UIManager:close(dialog)
+                    self._hc_confirm_open = nil
+                    map[md5] = { decision = "skip", title = rec.title }; saveHardcoverMap(map); self:clearHardcoverPending(md5)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    -- ButtonDialog has no flush_events_on_show, so do what ConfirmBox's does:
+    -- discard input queued while the book was closing, which would otherwise
+    -- land straight on a button.
+    local ok_dev, Device = pcall(require, "device")
+    if ok_dev and Device and Device.input and Device.input.inhibitInputUntil then
+        Device.input:inhibitInputUntil(true)
+    end
 end
 
 -- Looks this book up on Hardcover while it is being OPENED, and keeps the
