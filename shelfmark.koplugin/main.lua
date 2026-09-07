@@ -6250,6 +6250,40 @@ function Shelfmark:addToMainMenu(menu_items)
                         end,
                     },
                     {
+                        -- Answering "No" -- or, before build 9b45e72, a stray
+                        -- tap that dismissed the dialog and fired its cancel
+                        -- callback -- records a book as never-sync for good.
+                        -- Without this there is no way back short of deleting
+                        -- the map file by hand over USB.
+                        text_func = function()
+                            local n = 0
+                            for _unused in pairs(loadHardcoverMap()) do n = n + 1 end
+                            return n > 0 and T(_("Forget Hardcover book choices (%1)"), n)
+                                or _("Forget Hardcover book choices")
+                        end,
+                        keep_menu_open = true,
+                        enabled_func = function() return next(loadHardcoverMap()) ~= nil end,
+                        callback = function()
+                            local ConfirmBox = require("ui/widget/confirmbox")
+                            local skipped, synced = 0, 0
+                            for _unused, e in pairs(loadHardcoverMap()) do
+                                if e.decision == "skip" then skipped = skipped + 1
+                                elseif e.decision == "sync" then synced = synced + 1 end
+                            end
+                            UIManager:show(ConfirmBox:new{
+                                text = T(_("Forget every remembered Hardcover choice?\n\n%1 set to never sync\n%2 matched to a book\n\nEach book asks again the next time you close it."),
+                                    skipped, synced),
+                                ok_text = _("Forget"),
+                                ok_callback = function()
+                                    saveHardcoverMap({})
+                                    UIManager:show(InfoMessage:new{
+                                        text = _("Hardcover choices cleared. Close a book to be asked again."),
+                                    })
+                                end,
+                            })
+                        end,
+                    },
+                    {
                         text = _("Match suggestions (AI)"),
                         keep_menu_open = true,
                         callback = function() self:editAiSettings() end,
@@ -8114,6 +8148,11 @@ function Shelfmark:processHardcoverPending()
     for md5, rec in pairs(pending) do
         local entry = map[md5]
         if entry and entry.decision == "skip" then
+            -- Dropping it silently is how "nothing happens, no dialog, no log"
+            -- looked on-device: say which book, and how to undo it.
+            debugLog(string.format(
+                "[hc] skip: %s is marked never-sync; dropping. Undo with Shelfmark > Forget Hardcover book choices.",
+                tostring(entry.title or rec.title)))
             pending[md5] = nil
         elseif entry and entry.decision == "sync" and entry.book_id then
             -- {} trap, not false/a string: a TrapWidget (visible or invisible)
