@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-09-07 — build b56bbc6
+## 2026-09-07 — build 969f16f
 
 ### New: reading progress syncs to Hardcover
 
