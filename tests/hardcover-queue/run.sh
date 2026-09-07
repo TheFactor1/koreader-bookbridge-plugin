@@ -36,6 +36,7 @@ local PENDING, MAP, scheduled = {}, {}, {}
 loadHardcoverPending = function() local c={} for k,v in pairs(PENDING) do c[k]=v end return c end
 saveHardcoverPending = function(t) PENDING=t end
 loadHardcoverMap = function() return MAP end
+saveHardcoverMap = function(t) MAP = t end
 debugLog = function() end
 UIManager = { scheduleIn = function(_s,d,f) scheduled[#scheduled+1]={delay=d,fn=f} end, show=function() end }
 package.loaded["ui/trapper"] = {
@@ -92,6 +93,16 @@ PUSHES = 0
 Shelfmark.processHardcoverPending(s3)
 ck(PUSHES == 1 and confirms3 == 0, "already-matched book pushes silently, no dialog")
 ck(next(PENDING) == nil, "a successful push clears the queue entry")
+ck(MAP.m.last_percent == 0.2, "...and remembers the position it pushed")
+
+-- same position again (suspend/resume re-capture) -> no push, entry cleared
+PENDING = { m = { title="X", percent=0.2 } }; PUSHES = 0
+Shelfmark.processHardcoverPending(s3)
+ck(PUSHES == 0 and next(PENDING) == nil, "unchanged position -> no push, queue entry cleared")
+-- a new position pushes again
+PENDING = { m = { title="X", percent=0.25 } }; PUSHES = 0
+Shelfmark.processHardcoverPending(s3)
+ck(PUSHES == 1 and MAP.m.last_percent == 0.25, "changed position -> pushed, position updated")
 
 -- 4. Wi-Fi back -> flush, but only when there is something queued
 local s4 = { hardcover_progress_sync=true, hardcover_token="t" }

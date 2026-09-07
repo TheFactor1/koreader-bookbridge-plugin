@@ -2134,7 +2134,16 @@ local function doHardcoverPushProgress(token, book_id, percent)
     if not ub or (ub.status_id ~= 2 and ub.status_id ~= 3) then
         local ok, serr = doHardcoverSetStatus(token, book_id, 2)  -- 2 = currently reading
         if not ok then return false, serr end
-        ub = doHardcoverGetUserBook(token, book_id)
+        -- Hardcover's read-after-write lags: on the phone the re-read 300 ms
+        -- after a successful insert still came back empty and the push was
+        -- retried 40 s later. Give it a moment, twice, before giving up.
+        -- Only ever runs on a book's first sync.
+        local util = require("ffi/util")
+        for attempt = 1, 3 do
+            ub = doHardcoverGetUserBook(token, book_id)
+            if ub then break end
+            if attempt < 3 then util.sleep(1) end
+        end
         if not ub then return false, _("Couldn't mark the book currently reading on Hardcover.") end
     end
     local edition = ub.edition
@@ -8395,6 +8404,12 @@ function Shelfmark:processHardcoverPending()
         elseif entry and entry.decision == "review" then
             -- Waiting in Hardcover > Review matches: never pushed, never
             -- prompted, and the record keeps its progress for later.
+        elseif entry and entry.decision == "sync" and entry.book_id
+                and entry.last_percent and rec.percent and math.abs(entry.last_percent - rec.percent) < 0.0005 then
+            -- Same position as the last successful push: a suspend/resume or
+            -- a second close re-captured it. Nothing to tell Hardcover; the
+            -- phone log showed every book pushed twice at the same page.
+            pending[md5] = nil
         elseif entry and entry.decision == "sync" and entry.book_id then
             -- {} trap, not false/a string: a TrapWidget (visible or invisible)
             -- is dismissed by ANY queued gesture/keypress, and the reader ->
@@ -8408,6 +8423,7 @@ function Shelfmark:processHardcoverPending()
             end, {})
             if completed and ok then
                 pending[md5] = nil
+                entry.last_percent = rec.percent; map[md5] = entry; saveHardcoverMap(map)
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
             else
                 debugLog("[hc] push failed for " .. tostring(entry.title) .. ": " .. tostring(a))
@@ -8470,6 +8486,7 @@ function Shelfmark:resolveHardcoverMatch(md5, rec)
         end, {})
         if completed and ok then
             self:clearHardcoverPending(md5)
+            map[md5].last_percent = rec.percent; saveHardcoverMap(map)
             debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(ft), tostring(a), tostring(b)))
         else
             debugLog("[hc] push failed for " .. tostring(ft) .. ": " .. tostring(a))   -- stays pending; retried later
