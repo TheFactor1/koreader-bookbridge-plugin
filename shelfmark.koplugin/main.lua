@@ -6118,9 +6118,16 @@ function Shelfmark:applyUpdate(target)
         UIManager:show(InfoMessage:new{ text = err or _("Update failed.") })
         return
     end
-    UIManager:show(InfoMessage:new{
-        text = _("Updated. Restart KOReader for the new version to take effect."),
-        timeout = 6,
+    -- Offer the restart right here: UIManager:restartKOReader() exits with
+    -- code 85, which koreader.sh treats as "start again" on every platform.
+    -- A clean quit, so settings and the reading position are saved first.
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Updated to %1. The new version takes effect when KOReader restarts.\n\nRestart now?"),
+            "v" .. tostring(target.version) .. (target.build and (" build " .. target.build) or "")),
+        ok_text = _("Restart now"),
+        cancel_text = _("Later"),
+        ok_callback = function() UIManager:restartKOReader() end,
     })
 end
 
