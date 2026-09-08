@@ -4,6 +4,20 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build f808bd4
+
+### Matching: identifiers first, Open Library as a second opinion
+
+- **Books with an ISBN, ASIN or Hardcover id in their metadata match
+  exactly** — one query, no guessing — and progress is recorded against
+  that very edition's page count. About two thirds of a typical sideloaded
+  library carries one.
+- **When the title search isn't sure, Open Library is asked** for the work
+  by title and author and its ISBNs settle the match on Hardcover. Ambiguous
+  classics, translations and omnibus editions that used to land in the
+  review list now resolve on their own.
+- Nothing changes for books that already matched confidently.
+
 ## 2026-09-08 — build a86ccdb
 
 - **Fixed: a book closed while offline landed in "Review Hardcover matches"
