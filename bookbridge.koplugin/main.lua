@@ -6576,6 +6576,33 @@ dump() { grep -v "No Input Parameters" /tmp/ace.out 2>/dev/null | grep -v "^\s*$
 keep() { ( sleep ${1:-600}; [ -p /tmp/ace.in ] && echo "exit" > /tmp/ace.in; sleep 2; rm -f /tmp/ace.in ) </dev/null >/dev/null 2>&1 & }
 inputs() { say "--- input devices"; awk '/^N:/{n=$0} /^H:/{print n " | " $0}' /proc/bus/input/devices >> "$OUT" 2>/dev/null; }
 bonded_since() { showlog 2>/dev/null | awk -v t="$1" '$1 >= t' | grep -q "bondState:2"; }
+# radio state via the daemon log ("Get RadioState status: 0 state: N"), ~1 s;
+# "enable" on a radio that is already on waits 10 s for nothing, so ask first.
+radio_on() {
+  local t=$(stamp); w radiostate
+  for i in 1 2 3 4 5 6; do sleep 1
+    local st=$(showlog 2>/dev/null | awk -v t="$t" '$1 >= t' | grep -oE "Get RadioState status: 0 state: [0-9]" | tail -1 | grep -oE "[0-9]$")
+    [ -n "$st" ] && { [ "$st" = "1" ] && return 0 || return 1; }
+  done
+  return 1
+}
+ensure_radio() {
+  if radio_on; then say "radio already on"; return 0; fi
+  local t=$(stamp); w enable
+  for i in $(seq 1 15); do sleep 1; showlog 2>/dev/null | awk -v t="$t" '$1 >= t' | grep -q "Get RadioState status: 0 state: 1\|STATE_ENABLED\|adapter state.*1" && break; done
+  say "radio switched on"
+}
+# keep the Kindle connectable (not discoverable) for as long as the session
+# lives, renewing well inside the mode's own timeout; ends when the FIFO goes.
+keepalive() {
+  ( end=$(( $(cut -d. -f1 /proc/uptime) + ${1:-21600} ))
+    while [ -p /tmp/ace.in ] && [ "$(cut -d. -f1 /proc/uptime)" -lt "$end" ]; do
+      echo "classic discoverable n 600" > /tmp/ace.in 2>/dev/null; sleep 300
+    done
+    [ -p /tmp/ace.in ] && echo "exit" > /tmp/ace.in; sleep 2; rm -f /tmp/ace.in ) </dev/null >/dev/null 2>&1 &
+  echo $! > "$D/keepalive.pid"
+}
+listening() { [ -p /tmp/ace.in ] && [ -f "$D/keepalive.pid" ] && kill -0 "$(cat "$D/keepalive.pid")" 2>/dev/null; }
 say "Bookbridge Bluetooth: $STEP $A  $(date '+%F %T')"
 case "$STEP" in
 install)
@@ -6620,7 +6647,7 @@ pair)
   # connected phone stalled the CLI outright, so it is never done to a good bond.
   # "enable" makes the CLI wait ~10 s for the enable event before it reads
   # anything else, so the answer is polled for rather than expected at once.
-  session_start; w enable; sleep 2
+  session_start; ensure_radio
   T0=$(stamp); w "bondstate $A"; bs=""
   for i in $(seq 1 25); do
     sleep 1
@@ -6629,8 +6656,8 @@ pair)
   done
   say "bond state before: ${bs:-?}"
   if [ "$bs" = "2" ] && [ -z "$FRESH" ]; then
-    w "classic registerhid"; sleep 1; w "classic discoverable y 600"; sleep 1
-    dump; say "BONDED $A (already paired)"; keep 600; exit 0
+    w "classic registerhid"; sleep 1; w "classic discoverable n 600"; sleep 1
+    dump; say "BONDED $A (already paired)"; keepalive; exit 0
   fi
   w "classic discoverable y 120"; sleep 1
   if [ "$bs" = "1" ] || [ "$bs" = "2" ]; then
@@ -6646,8 +6673,8 @@ pair)
     if bonded_since "$T"; then bonded=1; break; fi
   done
   if [ $bonded = 1 ]; then
-    w "classic registerhid"; sleep 1; w "classic discoverable y 600"; sleep 1
-    dump; say "BONDED $A"; keep 600
+    w "classic registerhid"; sleep 1; w "classic discoverable n 600"; sleep 1
+    dump; say "BONDED $A"; keepalive
   else
     w "bondstate $A"; sleep 2; dump
     say "--- daemon"; showlog 2>/dev/null | awk -v t="$T" '$1 >= t' | grep -iE "ssp|bond|auth" | tail -6 | cut -c1-160 >> "$OUT"
@@ -6655,9 +6682,10 @@ pair)
   fi
   ;;
 ready)
-  session_start; w enable; sleep 3; w "classic registerhid"; sleep 1; w "classic discoverable y 600"; sleep 1
-  [ -n "$A" ] && { w "bondstate $A"; sleep 2; }
-  dump; say "READY"; keep 600
+  if listening; then say "READY (already listening)"; exit 0; fi
+  session_start; ensure_radio
+  w "classic registerhid"; sleep 1; w "classic discoverable n 600"; sleep 1
+  dump; say "READY"; keepalive
   ;;
 status)
   # its own short session: must not end a "ready" session that is listening
@@ -6669,7 +6697,7 @@ status)
   say "listening session: $([ -p /tmp/ace.in ] && echo open || echo none)"
   inputs
   ;;
-off) session_start; w disable; sleep 2; dump; say "OFF"; session_end ;;
+off) session_start; w disable; sleep 2; dump; say "OFF"; session_end; rm -f "$D/keepalive.pid" ;;
 unpair) [ -n "$A" ] || { say "no address"; exit 1; }; session_start; w enable; sleep 2; w "unpair $A"; sleep 2; dump; say "UNPAIRED $A"; session_end ;;
 *) say "unknown step $STEP"; exit 1 ;;
 esac
@@ -6772,6 +6800,7 @@ function Bookbridge:btPair(fresh)
     local function pair(addr)
         self:btRun("pair", addr .. (fresh and " fresh" or ""), _("Pairing... when the phone shows \"Pair with Kindle?\", tap Pair.\n\nThis finishes by itself, usually within 15 seconds."), function(text, finished)
             if text:find("BONDED " .. addr, 1, true) then
+                self:btWatchLink(180)
                 local already = text:find("already paired", 1, true) ~= nil
                 if already then
                     -- The Kindle holds a bond; if the phone no longer lists
@@ -6816,12 +6845,38 @@ function Bookbridge:btPair(fresh)
     if self.bt_keyboard_addr then with_rule(self.bt_keyboard_addr) else self:btAskAddress(with_rule) end
 end
 
+-- After a ready/pair: say so the moment the keyboard link comes up (the
+-- phone appears as a new /dev/input/eventN), once per link.
+function Bookbridge:btWatchLink(seconds)
+    local deadline = os.time() + (seconds or 120)
+    local function present()
+        local f = io.open("/proc/bus/input/devices", "r")
+        if not f then return false end
+        local t = f:read("*a"); f:close()
+        return t:find("event[2-9]") ~= nil
+    end
+    if present() then self._bt_link_seen = true; return end
+    self._bt_link_seen = false
+    local function poll()
+        if self._bt_link_seen then return end
+        if present() then
+            self._bt_link_seen = true
+            debugLog("[bt] keyboard link up")
+            UIManager:show(InfoMessage:new{ text = _("Keyboard connected."), timeout = 3 })
+            return
+        end
+        if os.time() < deadline then UIManager:scheduleIn(2, poll) end
+    end
+    UIManager:scheduleIn(2, poll)
+end
+
 function Bookbridge:btReady(silent)
     if not self.bt_keyboard_addr and not silent then self:btAskAddress(function() self:btReady() end); return end
-    self:btRun("ready", self.bt_keyboard_addr, (not silent) and _("Turning Bluetooth on and listening for the keyboard...") or nil, function(text)
+    self:btRun("ready", self.bt_keyboard_addr, (not silent) and _("Getting ready for the keyboard...") or nil, function(text)
+        if text:find("READY", 1, true) then self:btWatchLink(180) end
         if silent then return end
         if text:find("READY", 1, true) then
-            UIManager:show(InfoMessage:new{ text = _("Listening for 10 minutes. Connect from the phone's keyboard app (choose \"Kindle\")."), timeout = 6 })
+            UIManager:show(InfoMessage:new{ text = _("Listening. Choose \"Kindle\" in the phone's keyboard app -- the Kindle stays connectable while it's awake."), timeout = 5 })
         else
             local TextViewer = require("ui/widget/textviewer")
             UIManager:show(TextViewer:new{ title = _("Bluetooth"), text = text, justified = false })
@@ -6840,13 +6895,13 @@ function Bookbridge:btMenuEntry()
             },
             {
                 text = _("Ready for keyboard now"),
-                help_text = _("Radio on and listening for 10 minutes. Then connect from the phone's keyboard app -- the phone starts the link; the Kindle only listens."),
+                help_text = _("Radio on and connectable for as long as the Kindle is awake (about 2 seconds when the radio is already on). Then choose Kindle in the phone's keyboard app -- the phone starts the link; the Kindle only listens."),
                 enabled_func = function() return btRuleInstalled() end,
                 callback = function() self:btReady(false) end,
             },
             {
                 text = _("Keep Bluetooth ready when the Kindle wakes"),
-                help_text = _("Turns the radio on and listens every time KOReader wakes, so reconnecting is just choosing Kindle in the phone's app. Costs a little battery while awake."),
+                help_text = _("Radio on and connectable whenever KOReader is awake, off again when it sleeps -- reconnecting is just choosing Kindle in the phone's app. Costs a little battery while awake."),
                 checked_func = function() return self.bt_ready_on_wake == true end,
                 enabled_func = function() return btRuleInstalled() and self.bt_keyboard_addr ~= nil end,
                 callback = function()
@@ -9520,6 +9575,9 @@ end
 -- Device sleeping: capture now, push on the next resume (a scheduled push
 -- wouldn't survive the sleep). No-op in FileManager (no document).
 function Bookbridge:onSuspend()
+    if self.bt_ready_on_wake and self.bt_keyboard_addr and btOnKindle() and not self._bt_running then
+        self:btRun("off", nil, nil, nil)
+    end
     self:captureReadingProgress()
 end
 
