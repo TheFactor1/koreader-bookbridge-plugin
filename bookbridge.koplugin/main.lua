@@ -6733,16 +6733,27 @@ end
 -- Runs one engine step detached and polls for its ".done" marker once a
 -- second; on_done(text, finished) gets the step's result file. Never blocks
 -- KOReader: nothing here is a fork of it, and nothing waits on a pipe.
-function Bookbridge:btRun(step, arg, wait_text, on_done)
+function Bookbridge:btRun(step, arg, wait_text, on_done, opts)
+    opts = opts or {}
     if self._bt_running then
-        UIManager:show(InfoMessage:new{ text = _("A Bluetooth step is still running; wait for it to finish."), timeout = 3 })
-        return
+        -- A step left over from before a sleep is finished by now (its
+        -- poll never ran while KOReader slept): let a wake-time step through.
+        local f = io.open(BT_DIR .. "/" .. self._bt_running .. ".done", "r")
+        if f then f:close(); self._bt_running = nil
+        elseif opts.silent then
+            -- a wake-time step arriving while the sleep-time one is still
+            -- finishing (a quick sleep/wake): try again in a moment, a few times
+            opts.retries = (opts.retries or 0) + 1
+            if opts.retries <= 10 then UIManager:scheduleIn(3, function() self:btRun(step, arg, wait_text, on_done, opts) end) end
+            return
+        else UIManager:show(InfoMessage:new{ text = _("A Bluetooth step is still running; wait for it to finish."), timeout = 3 }); return end
     end
     local script = btEnginePath()
     if not script then UIManager:show(InfoMessage:new{ text = _("Couldn't write the Bluetooth helper script.") }); return end
     local done = BT_DIR .. "/" .. step .. ".done"
     os.remove(done)
     os.execute(string.format("BOOKBRIDGE_BT_DIR='%s' setsid sh '%s' %s %s </dev/null >/dev/null 2>&1 &", BT_DIR, script, step, arg or ""))
+    if opts.fire_and_forget then debugLog("[bt] step " .. step .. " started (not tracked)"); return end
     self._bt_running = step
     debugLog("[bt] step " .. step .. (arg and (" " .. arg) or "") .. " started")
     local msg = wait_text and InfoMessage:new{ text = wait_text } or nil
@@ -6881,7 +6892,7 @@ function Bookbridge:btReady(silent)
             local TextViewer = require("ui/widget/textviewer")
             UIManager:show(TextViewer:new{ title = _("Bluetooth"), text = text, justified = false })
         end
-    end)
+    end, { silent = silent })
 end
 
 function Bookbridge:btMenuEntry()
@@ -6902,6 +6913,7 @@ function Bookbridge:btMenuEntry()
             {
                 text = _("Keep Bluetooth ready when the Kindle wakes"),
                 help_text = _("Radio on and connectable whenever KOReader is awake, off again when it sleeps -- reconnecting is just choosing Kindle in the phone's app. Costs a little battery while awake."),
+                keep_menu_open = true,   -- the check mark flips in place, like the Hardcover sync toggle
                 checked_func = function() return self.bt_ready_on_wake == true end,
                 enabled_func = function() return btRuleInstalled() and self.bt_keyboard_addr ~= nil end,
                 callback = function()
@@ -9575,8 +9587,9 @@ end
 -- Device sleeping: capture now, push on the next resume (a scheduled push
 -- wouldn't survive the sleep). No-op in FileManager (no document).
 function Bookbridge:onSuspend()
-    if self.bt_ready_on_wake and self.bt_keyboard_addr and btOnKindle() and not self._bt_running then
-        self:btRun("off", nil, nil, nil)
+    if self.bt_ready_on_wake and self.bt_keyboard_addr and btOnKindle() then
+        -- radio off for the sleep; not tracked, so the wake-time "ready" is never blocked by it
+        self:btRun("off", nil, nil, nil, { fire_and_forget = true })
     end
     self:captureReadingProgress()
 end
