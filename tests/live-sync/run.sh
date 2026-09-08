@@ -127,6 +127,10 @@ cwa=$(curl -s --max-time 5 -u admin:admin123 http://127.0.0.1:$CWA_PORT/opds/new
 after=$(awk '/POST .*\/upload/{n=NR} END{print n+0}' "$SET/shelfmark-debug.log")
 searches=$(awk -v n="$after" 'NR>n && /-> GET .*\/opds\/search\//' "$SET/shelfmark-debug.log" | wc -l)
 [ "$after" -gt 0 ] && [ "$searches" -gt 0 ] && say PASS "post-upload pass re-asked CWA ($searches search request(s) after the last upload)" || { say FAIL "no search request after the last upload -- the import wait is answering from cache"; fail=1; }
+# the report is logged by the parent after the fork returns it -- a moment after the registry/CWA state the checks above waited on
+for i in $(seq 1 40); do grep -q "\[sync\] summary" "$SET/shelfmark-debug.log" && break; sleep 0.5; done
+summary=$(grep "\[sync\] summary" "$SET/shelfmark-debug.log" | tail -1)
+echo "$summary" | grep -q "uploaded=2" && say PASS "debug log carries the sync summary line ($(echo "$summary" | sed 's/.*summary //'))" || { say FAIL "no [sync] summary with uploaded=2 in the debug log (got: $summary)"; fail=1; }
 grep -qE "ERROR|Traceback|attempt to" "$W/koreader.log" && { say FAIL "KOReader logged an error:"; grep -E "ERROR|Traceback|attempt to" "$W/koreader.log" | head -3; fail=1; } || say PASS "no KOReader errors"
 [ $fail -eq 0 ] && echo "=== LIVE SYNC PASS" || echo "=== LIVE SYNC FAIL"
 exit $fail

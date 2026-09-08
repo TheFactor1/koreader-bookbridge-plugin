@@ -93,3 +93,31 @@ then on. Configure the servers under **Shelfmark → Settings → Connections**.
 - `tools/make-manifest.sh` regenerates `manifest.json`; the gate fails on a
   stale one.
 - `CHANGELOG.md` has plain-language notes per build.
+
+## Credits
+
+This plugin stands on other people's work:
+
+- [KOReader](https://github.com/koreader/koreader) — the reader and its plugin
+  API. Its own `wallabag.koplugin` and `opds.koplugin` were the reference for
+  how a plugin should talk HTTP, and `externalkeyboard.koplugin` and the
+  Trapper/UIManager code were read closely for the parts that matter here.
+- [Shelfmark](https://github.com/calibrain/shelfmark) by calibrain — the
+  request server this plugin exists to talk to.
+- [Calibre-Web-Automated](https://github.com/crocodilestick/Calibre-Web-Automated)
+  — the library it syncs with (via OPDS and the upload endpoint).
+- [Hardcover](https://hardcover.app) and its public GraphQL API — reading
+  progress, lists, author follows.
+- [bookshelf.koplugin](https://github.com/AndyHazz/bookshelf.koplugin) by
+  AndyHazz — the home screen this plugin has to coexist with; its hot-parking
+  behaviour shaped how "closing a book" is detected here.
+- [Anna's Archive](https://annas-archive.org) — the search the `annas`
+  features use.
+
+## Authorship
+
+**All of the code, tests and documentation in this repository were written by
+an AI** (Claude, by Anthropic). Matt directed the work, tested every build on
+his own Kindle, Android phone and desktop KOReader, reported what he saw, and
+decided what to build and what to drop. No line here was hand-written by a
+person; treat it accordingly and read before you trust.

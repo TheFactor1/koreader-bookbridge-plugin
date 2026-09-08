@@ -5335,6 +5335,29 @@ end
 -- since it can involve several network round-trips in sequence (OPDS
 -- searches, a login, one or more uploads, then a check per tracked book),
 -- same reasoning as every other network entry point in this file.
+-- The sync report is only ever shown on screen, which made auditing what a
+-- device's sync actually did (from the uploaded debug log) a matter of
+-- inferring it from HTTP lines. Write the report into the log too, plus one
+-- summary line with counts derived from the report's own lines.
+local function logSyncReport(label, report, unmatched)
+    if type(report) ~= "table" then return end
+    local c = { found = "?", tracked = "?", matched = 0, uploaded = 0, importing = 0,
+                failed = 0, ambiguous = 0, redownloaded = 0, unmatched = type(unmatched) == "table" and #unmatched or 0 }
+    for _unused, line in ipairs(report) do
+        debugLog("[sync] " .. tostring(line))
+        local f, t = tostring(line):match("Found (%d+) book%(s%) locally, (%d+) already tracked")
+        if f then c.found, c.tracked = f, t end
+        if line:find("] matched existing CWA book", 1, true) or line:find("] matches already%-tracked") then c.matched = c.matched + 1 end
+        if line:find("] uploaded.", 1, true) then c.uploaded = c.uploaded + 1 end
+        if line:find("hadn't imported it yet", 1, true) then c.importing = c.importing + 1 end
+        if line:find("upload failed", 1, true) or line:find("couldn't", 1, true) then c.failed = c.failed + 1 end
+        if line:find("ambiguous", 1, true) then c.ambiguous = c.ambiguous + 1 end
+        if line:find("re%-downloaded") then c.redownloaded = c.redownloaded + 1 end
+    end
+    debugLog(string.format("[sync] summary (%s): found=%s tracked=%s matched=%d uploaded=%d importing=%d unmatched=%d ambiguous=%d redownloaded=%d failed=%d",
+        label, tostring(c.found), tostring(c.tracked), c.matched, c.uploaded, c.importing, c.unmatched, c.ambiguous, c.redownloaded, c.failed))
+end
+
 function Shelfmark:syncLibrary()
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
@@ -5346,6 +5369,7 @@ function Shelfmark:syncLibrary()
         { cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, nil })
 
     if not completed then return end
+    logSyncReport("library sync", report, unmatched)
 
     -- Back on the main process now that the fork has exited -- the only
     -- safe place to touch KOReader's own cache DB. See
@@ -5445,6 +5469,7 @@ function Shelfmark:sendBookToCwa(file)
         { cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, file })
 
     if not completed then return end
+    logSyncReport("send to CWA", report, nil)
 
     if type(replaced_paths) == "table" and #replaced_paths > 0 then
         for i = 1, #replaced_paths do
