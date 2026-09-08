@@ -28,7 +28,7 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 # Pull the live function out of main.lua so the test can never drift from it.
-awk '/^-- ONE round trip\./{f=1} f{print} f&&/^end$/{exit}' \
+awk '/^-- HARDCOVER MATCH BLOCK/{f=1} f{print} /^-- END HARDCOVER MATCH BLOCK/{exit}' \
     "$REPO/shelfmark.koplugin/main.lua" > "$W/fn.lua"
 [ -s "$W/fn.lua" ] || { echo "FAIL  could not extract doHardcoverFindBook from main.lua"; exit 1; }
 grep -q "^local function doHardcoverFindBook" "$W/fn.lua" || { echo "FAIL  extracted block is not doHardcoverFindBook"; exit 1; }
@@ -46,7 +46,15 @@ local FIXTURE
 -- preference is passed); LANG_HAS says which ids have an edition in it.
 LANG_HAS = nil
 LANG_QUERIES = 0
+-- Identifier lookups answer from IDENT_RESULT (nil = nothing on Hardcover);
+-- Open Library answers from OL_RESULT. Both count their calls.
+IDENT_RESULT, IDENT_QUERIES, OL_RESULT, OL_CALLS = nil, 0, nil, 0
+fetchJsonUrl = function() OL_CALLS = OL_CALLS + 1; return OL_RESULT end
 doHardcoverGraphQL = function(_t, query, vars)
+    if query:find("ByIdentifiers", 1, true) then
+        IDENT_QUERIES = IDENT_QUERIES + 1
+        return IDENT_RESULT or { editions = {} }, nil
+    end
     if query:find("editions(where", 1, true) then
         LANG_QUERIES = LANG_QUERIES + 1
         local books = {}
@@ -61,7 +69,7 @@ doHardcoverGraphQL = function(_t, query, vars)
     return FIXTURE.data, nil
 end
 local src = io.open(LUA_FN):read("*a")
-local fn = assert(load("local doHardcoverGraphQL = doHardcoverGraphQL\n"..src.."\nreturn doHardcoverFindBook"))()
+local fn = assert(load("local doHardcoverGraphQL, fetchJsonUrl = doHardcoverGraphQL, fetchJsonUrl\n"..src.."\nreturn doHardcoverFindBook"))()
 
 local pass, fail = 0, 0
 local function load_fix(n)
@@ -152,6 +160,48 @@ cid, c = conf("summerfrost", "Summer Frost (Forward collection)", "Blake Crouch"
 ck_simple(cid == 427934 and c == true, "Summer Frost (Forward collection): parenthetical tag ignored -> confident")
 cid, c = conf("run", "Run", "Nobody Here")
 ck_simple(c == false, "author that matches nothing -> not confident")
+
+
+-- identifiers: an ISBN in the file is an exact answer -- no title search at all
+do
+    IDENT_RESULT = { editions = { { id = 2670216, book_id = 208339, pages = 399, title = "The Three-Body Problem", language = { code2 = "en" },
+        book = { id = 208339, title = "The Three-Body Problem", users_count = 9892, contributions = { { contribution = "Author", author = { name = "Cixin Liu" } } } } } } }
+    IDENT_QUERIES = 0; FIXTURE = { data = { search = { ids = {}, results = { hits = {} } } } }
+    local id, ft, fa, _e, ranked, c, _u, ed = fn("tok", "Three Body Problem (Z-Library)", "Liu", "en", "isbn:9780765382030\ncalibre:12")
+    ck_simple(id == 208339 and c == true and fa == "Cixin Liu", "ISBN in the file -> confident match, whatever the title looks like")
+    ck_simple(IDENT_QUERIES == 1 and ed and ed.id == 2670216 and ed.pages == 399, "  ...one identifier query; the file's own edition (399 pages) comes back")
+    -- ASIN and hardcover-id parse too; hyphenated ISBN; garbage ignored
+    local id2 = fn("tok", "Whatever", nil, "en", "mobi-asin:B00GUU9262 hardcover-id:669164 978-0-7653-8203-0")
+    ck_simple(id2 == 208339 and IDENT_QUERIES == 2, "ASIN / hardcover-id / hyphenated ISBN all reach the identifier query")
+    -- identifiers Hardcover doesn't know fall through to the normal title search
+    IDENT_RESULT = nil; load_fix("upgrade")
+    local id3, _t3, _a3, _e3, _r3, c3 = fn("tok", "Upgrade", "Blake Crouch", nil, "isbn:9999999999999")
+    ck_simple(id3 == 480253 and c3 == true, "unknown ISBN -> falls back to the title search (still confident)")
+end
+
+-- Open Library second opinion: an unsure title search becomes exact via ISBN
+do
+    IDENT_RESULT = nil; OL_RESULT = nil; OL_CALLS = 0
+    load_fix("hitchhiker")
+    local _i, _t, _a, _e, _r, c = fn("tok", "The Ultimate Hitchhiker's Guide to the Galaxy", "Douglas Adams")
+    ck_simple(c == false and OL_CALLS == 1, "not confident -> Open Library is asked once")
+    OL_RESULT = { docs = { { title = "The Ultimate Hitchhiker's Guide to the Galaxy", author_name = { "Douglas Adams" }, isbn = { "9780345453747", "0345453743" } } } }
+    IDENT_RESULT = { editions = { { id = 5, book_id = 427798, pages = 815, title = "The Ultimate Hitchhiker's Guide to the Galaxy", language = { code2 = "en" },
+        book = { id = 427798, title = "The Ultimate Hitchhiker's Guide to the Galaxy", users_count = 3000, contributions = { { contribution = "Author", author = { name = "Douglas Adams" } } } } } } }
+    IDENT_QUERIES = 0; OL_CALLS = 0; load_fix("hitchhiker")
+    local id, _t2, fa, _e2, _r2, c2, _u, ed = fn("tok", "The Ultimate Hitchhiker's Guide to the Galaxy", "Douglas Adams")
+    ck_simple(id == 427798 and c2 == true and fa == "Douglas Adams", "Open Library's ISBNs settle it on Hardcover -> confident")
+    ck_simple(OL_CALLS == 1 and IDENT_QUERIES == 1 and ed and ed.pages == 815, "  ...one Open Library call, one identifier query, the edition's pages")
+    -- a wrong Open Library hit (different author) is ignored
+    OL_RESULT = { docs = { { title = "The Ultimate Hitchhiker's Guide to the Galaxy", author_name = { "Someone Else" }, isbn = { "9780000000000" } } } }
+    IDENT_QUERIES = 0; load_fix("hitchhiker")
+    local _i3, _t3, _a3, _e3, _r3, c3 = fn("tok", "The Ultimate Hitchhiker's Guide to the Galaxy", "Douglas Adams")
+    ck_simple(c3 == false and IDENT_QUERIES == 0, "Open Library hit by another author is ignored -> stays review")
+    -- confident title matches never consult Open Library
+    OL_CALLS = 0; load_fix("red_rising"); fn("tok", "Red Rising", "Pierce Brown")
+    ck_simple(OL_CALLS == 0, "a confident title match asks nobody else")
+    OL_RESULT = nil; IDENT_RESULT = nil
+end
 
 print(pass.." passed, "..fail.." failed")
 os.exit(fail == 0 and 0 or 1)

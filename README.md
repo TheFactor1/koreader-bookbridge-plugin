@@ -49,13 +49,20 @@ the Bookshelf home screen, which parks the reader rather than closing it.
 
 1. The plugin records the percentage the footer shows (the same value the
    home screen shows; it excludes front/back matter marked non-linear).
-2. It looks the book up on Hardcover once — one round trip — and scores the
-   candidates: author surname, normalised title, not an omnibus unless the
-   file says so, an edition in your preferred language, popularity as the
-   tie-break. A confident match syncs silently. Anything less is parked
-   under **Review Hardcover matches**, where you pick the right book (or
-   "None of these" to never sync it); its progress is kept and pushed once
-   picked.
+2. It identifies the book, cheapest and most certain first:
+   - **the file's own identifiers** (ISBN-13/10, ASIN, or a `hardcover-id`
+     written by Calibre's Hardcover plugin) — one exact query, no guessing,
+     and the edition it names is your file's, so its page count is used;
+   - otherwise **a title search on Hardcover**, one round trip, scored on
+     author surname, normalised title, not an omnibus unless the file says
+     so, an edition in your preferred language, popularity as tie-break;
+   - if that isn't sure, **Open Library** is asked for the work by title and
+     author and its ISBNs are put to Hardcover, which turns most ambiguous
+     classics and translations into an exact hit.
+   A confident match syncs silently. Anything less is parked under
+   **Review Hardcover matches**, where you pick the right book (or "None of
+   these" to never sync it); its progress is kept and pushed once picked.
+   Opening a review entry that has no candidates asks Hardcover again first.
 3. The position goes to Hardcover as *page X of Y* for the matched edition,
    and the book is marked *Currently Reading* if it wasn't. A position
    Hardcover already has is not sent again.
@@ -113,6 +120,8 @@ This plugin stands on other people's work:
   behaviour shaped how "closing a book" is detected here.
 - [Anna's Archive](https://annas-archive.org) — the search the `annas`
   features use.
+- [Open Library](https://openlibrary.org) (Internet Archive) — its open
+  search API is the second opinion that resolves ambiguous titles to ISBNs.
 
 ## Authorship
 

@@ -1849,6 +1849,39 @@ local function doHardcoverGraphQL(token, query, variables)
     return decoded.data
 end
 
+-- Plain JSON GET with the same timeouts and sink as the Hardcover call.
+-- Used for the Open Library second opinion; returns a table, or nil + why.
+local function fetchJsonUrl(url, log_prefix, attempt)
+    log_prefix = log_prefix or "[http]"
+    attempt = attempt or 1
+    socketutil:set_timeout(10, 20)
+    local sink, sink_table = socketutil.table_sink()
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request{
+            method = "GET", url = url, sink = sink,
+            headers = { ["User-Agent"] = "KOReader shelfmark.koplugin (https://github.com/TheFactor1/koreader-shelfmark-plugin)",
+                        ["Accept"] = "application/json" },
+        })
+    end)
+    socketutil:reset_timeout()
+    debugLog(log_prefix .. " GET " .. (url:gsub("%?.*$", "?...")) .. " -> " .. tostring(ok and code or ("error: " .. tostring(code))))
+    -- Open Library resets connections now and then; one retry, once.
+    if (not ok or code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE) and attempt == 1 then
+        require("ffi/util").sleep(1)
+        return fetchJsonUrl(url, log_prefix, 2)
+    end
+    if not ok then return nil, "unreachable" end
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then return nil, "timeout" end
+    if code ~= 200 then return nil, "HTTP " .. tostring(code) end
+    local dok, obj = pcall(JSON.decode, table.concat(sink_table))
+    if not dok or type(obj) ~= "table" then
+        -- an empty 200 body is another of Open Library's moods
+        if attempt == 1 then require("ffi/util").sleep(1); return fetchJsonUrl(url, log_prefix, 2) end
+        return nil, "unreadable response"
+    end
+    return stripJsonNull(obj)
+end
+
 -- Searches by title (query_type "Book"), takes the top-ranked id from the
 -- plain `ids` array, then a separate simple lookup for a clean title/author
 -- to show in the confirmation dialog -- see the section note above for why
@@ -1876,7 +1909,112 @@ end
 --
 -- `results.hits` arrives in relevance order (same order as `ids`). Don't
 -- reorder it: hits[1] is the fallback pick when no author matches.
-local function doHardcoverFindBook(token, title, author, lang)
+-- HARDCOVER MATCH BLOCK -- tests/hardcover-match extracts from here to END.
+-- Identifiers the file carries, in the newline-separated "scheme:value"
+-- form KOReader hands over (getProps().identifiers): ISBN-13, labelled
+-- ISBN-10, ASIN, and a hardcover-id written by Calibre's Hardcover plugin.
+local function parseBookIdentifiers(text)
+    local ids = { isbn13 = {}, isbn10 = {}, asin = {}, hardcover_id = nil }
+    if type(text) ~= "string" or text == "" then return ids end
+    local seen = {}
+    local function add(list, v) if v and not seen[v] then seen[v] = true; list[#list + 1] = v end end
+    ids.hardcover_id = tonumber(text:match("[Hh]ardcover%-?[Ii][Dd]%s*[:=]%s*(%d+)"))
+    local flat = text:gsub("%-", "")                    -- 978-0-7653-8203-0 -> 9780765382030
+    for v in flat:gmatch("97[89]%d%d%d%d%d%d%d%d%d%d") do add(ids.isbn13, v) end
+    for v in flat:gmatch("[Ii][Ss][Bb][Nn][^%d]*(%d%d%d%d%d%d%d%d%d[%dXx])%f[^%dXx]") do
+        if not v:match("^97[89]") then add(ids.isbn10, v:upper()) end
+    end
+    for v in text:gmatch("%f[%w](B0[0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z])%f[^%w]") do add(ids.asin, v) end
+    return ids
+end
+
+-- Authors from a book's contributions, "Author" entries first (an
+-- audiobook's narrator is listed among them too).
+local function contributionNames(contribs)
+    local names = {}
+    for _, c in ipairs(contribs or {}) do
+        if c.author and c.author.name then
+            if c.contribution == nil or c.contribution == "Author" then table.insert(names, 1, c.author.name)
+            else names[#names + 1] = c.author.name end
+        end
+    end
+    return names
+end
+
+-- Exact lookups: one query carrying every identifier the file has. An
+-- identifier hit is certain by construction, so it never goes through the
+-- title scoring, and the edition it names is the file's own -- its page
+-- count is what progress is recorded against.
+-- Returns book_id, title, author, err, ranked, confident, unreachable, edition{id,pages}
+local function doHardcoverFindByIdentifiers(token, ids, lang)
+    if not (ids.hardcover_id or ids.isbn13[1] or ids.isbn10[1] or ids.asin[1]) then return nil end
+    -- Only the identifier kinds actually present go into the query: the JSON
+    -- encoder turns an empty Lua table into {} (an object), which Hardcover
+    -- rejects where a string list is expected -- seen live.
+    local decls, clauses, vars = {}, {}, {}
+    if ids.isbn13[1] then decls[#decls + 1] = "$isbn13: [String!]!"; clauses[#clauses + 1] = "{ isbn_13: { _in: $isbn13 } }"; vars.isbn13 = ids.isbn13 end
+    if ids.isbn10[1] then decls[#decls + 1] = "$isbn10: [String!]!"; clauses[#clauses + 1] = "{ isbn_10: { _in: $isbn10 } }"; vars.isbn10 = ids.isbn10 end
+    if ids.asin[1] then decls[#decls + 1] = "$asin: [String!]!"; clauses[#clauses + 1] = "{ asin: { _in: $asin } }"; vars.asin = ids.asin end
+    local parts = {}
+    if #clauses > 0 then
+        parts[#parts + 1] = "editions(where: { _or: [ " .. table.concat(clauses, ", ") .. " ] }, limit: 10) { id book_id pages title language { code2 } book { id title users_count contributions { contribution author { name } } } }"
+    end
+    if ids.hardcover_id then
+        decls[#decls + 1] = "$hcid: Int!"; vars.hcid = ids.hardcover_id
+        parts[#parts + 1] = "books_by_pk(id: $hcid) { id title users_count contributions { contribution author { name } } }"
+    end
+    local query = "query ByIdentifiers(" .. table.concat(decls, ", ") .. ") { " .. table.concat(parts, " ") .. " }"
+    local data, err = doHardcoverGraphQL(token, query, vars)
+    if not data then return nil, nil, nil, err, nil, false, true end
+    local best
+    for _, e in ipairs(data.editions or {}) do
+        if e.book_id and e.book then
+            local score = math.log10((tonumber(e.book.users_count) or 0) + 1)
+            if lang and lang ~= "" and e.language and e.language.code2 == lang then score = score + 10 end
+            if tonumber(e.pages) and tonumber(e.pages) > 0 then score = score + 1 end
+            if not best or score > best.score then best = { score = score, e = e } end
+        end
+    end
+    if best then
+        local e = best.e
+        local names = contributionNames(e.book.contributions)
+        local edition = { id = e.id, pages = tonumber(e.pages) }
+        return e.book_id, e.book.title or e.title, names[1], nil,
+            { { id = e.book_id, title = e.book.title or e.title, author = names[1] } }, true, false, edition
+    end
+    local b = data.books_by_pk
+    if b and b.id then
+        local names = contributionNames(b.contributions)
+        return b.id, b.title, names[1], nil, { { id = b.id, title = b.title, author = names[1] } }, true, false, nil
+    end
+    return nil
+end
+
+-- Open Library as a second opinion when the title search isn't sure: the
+-- work's ISBN-13s, which Hardcover then answers exactly. No key needed.
+local function doOpenLibraryIsbns(title, author)
+    local function esc(t) return (tostring(t or ""):gsub("[^%w%-%._~ ]", function(c) return string.format("%%%02X", c:byte()) end):gsub(" ", "+")) end
+    local url = "https://openlibrary.org/search.json?title=" .. esc(title)
+        .. ((author and author ~= "") and ("&author=" .. esc(author)) or "")
+        .. "&fields=key,title,author_name,author_alternative_name,isbn,edition_count&limit=3"
+    local data = fetchJsonUrl(url, "[openlibrary]")
+    return data and data.docs or nil
+end
+
+local function doHardcoverFindBook(token, title, author, lang, identifiers)
+    -- 1. The file's own identifiers: an exact answer, no scoring.
+    local ids = parseBookIdentifiers(identifiers)
+    if ids.hardcover_id or ids.isbn13[1] or ids.isbn10[1] or ids.asin[1] then
+        local bid, bt, ba, berr, branked, _bc, bunreach, bed = doHardcoverFindByIdentifiers(token, ids, lang)
+        if bunreach then return nil, nil, nil, berr, nil, false, true end
+        if bid then
+            debugLog(string.format("[hc] identifier match: %s -> %s by %s (edition %s, %s pages)", tostring(title), tostring(bt),
+                tostring(ba), tostring(bed and bed.id), tostring(bed and bed.pages)))
+            return bid, bt, ba, nil, branked, true, false, bed
+        end
+        debugLog("[hc] identifiers not on Hardcover; trying the title search")
+    end
+    -- 2. Title search.
     local data, err = doHardcoverGraphQL(token, [[
         query Search($q: String!) {
             search(query: $q, query_type: "Book", per_page: 5) { ids results }
@@ -2060,8 +2198,41 @@ local function doHardcoverFindBook(token, title, author, lang)
     -- alternatives; confidence is the sixth value.
     local ranked = {}
     for i2, c in ipairs(candidates) do ranked[i2] = { id = c.id, title = c.title, author = c.author_hit or c.names[1] } end
+
+    -- 3. Not sure? Ask Open Library for the work by title+author and let its
+    -- ISBNs settle it on Hardcover. Only its own exact-title, author-matching
+    -- work counts; anything else keeps the review verdict.
+    if not confident then
+        local docs = doOpenLibraryIsbns(title, author)
+        for _, d in ipairs(docs or {}) do
+            local ok_title = want ~= "" and norm(d.title) == want
+            -- Open Library's primary author name may be the native script
+            -- ("Όμηρος"); its alternative names carry the Latin forms ("Homer").
+            local ok_author = (#surnames == 0)
+            local function author_hit(list)
+                for _, n in ipairs(list or {}) do
+                    for _, sn in ipairs(surnames) do if type(n) == "string" and n:lower():find(sn, 1, true) then return true end end
+                end
+                return false
+            end
+            if author_hit(d.author_name) or author_hit(d.author_alternative_name) then ok_author = true end
+            if ok_title and ok_author and type(d.isbn) == "table" then
+                local list = {}
+                for _, v in ipairs(d.isbn) do if #list < 20 and type(v) == "string" and #v == 13 then list[#list + 1] = v end end
+                if #list > 0 then
+                    local bid, bt, ba, _berr, branked, _bc, bunreach, bed = doHardcoverFindByIdentifiers(token, { isbn13 = list, isbn10 = {}, asin = {} }, lang)
+                    if bid and not bunreach then
+                        debugLog(string.format("[hc] Open Library confirmed %s -> %s by %s via ISBN", tostring(title), tostring(bt), tostring(ba)))
+                        return bid, bt, ba, nil, branked, true, false, bed
+                    end
+                end
+                break
+            end
+        end
+    end
     return chosen.id, chosen.title, chosen.author_hit or chosen.names[1], nil, ranked, confident and true or false
 end
+-- END HARDCOVER MATCH BLOCK
 
 local function doHardcoverFindAuthor(token, name)
     local search_data, err = doHardcoverGraphQL(token, [[
@@ -2087,15 +2258,18 @@ local function doHardcoverFindAuthor(token, name)
     return author_id, author_data.authors_by_pk.name
 end
 
-local function doHardcoverSetStatus(token, book_id, status_id)
+local function doHardcoverSetStatus(token, book_id, status_id, edition_id)
+    -- edition_id: the file's own edition when an identifier named it, so the
+    -- page count progress is recorded against is the file's. Only on first
+    -- add -- a book the user already shelved keeps their edition.
     local data, err = doHardcoverGraphQL(token, [[
-        mutation SetStatus($book_id: Int!, $status_id: Int!) {
-            insert_user_book(object: { book_id: $book_id, status_id: $status_id }) {
+        mutation SetStatus($book_id: Int!, $status_id: Int!, $edition_id: Int) {
+            insert_user_book(object: { book_id: $book_id, status_id: $status_id, edition_id: $edition_id }) {
                 id
                 error
             }
         }
-    ]], { book_id = book_id, status_id = status_id })
+    ]], { book_id = book_id, status_id = status_id, edition_id = edition_id })
     if not data then return false, err end
     local result = data.insert_user_book
     if not result or result.error then
@@ -2131,11 +2305,11 @@ end
 -- matter -- 42% of a 352-page edition is recorded as page 148, matching what
 -- Hardcover shows. Auto-marks the book currently-reading if it isn't already,
 -- and never downgrades a book already marked read.
-local function doHardcoverPushProgress(token, book_id, percent)
+local function doHardcoverPushProgress(token, book_id, percent, edition_id)
     local ub, err = doHardcoverGetUserBook(token, book_id)
     if err then return false, err end
     if not ub or (ub.status_id ~= 2 and ub.status_id ~= 3) then
-        local ok, serr = doHardcoverSetStatus(token, book_id, 2)  -- 2 = currently reading
+        local ok, serr = doHardcoverSetStatus(token, book_id, 2, edition_id)  -- 2 = currently reading
         if not ok then return false, serr end
         -- Hardcover's read-after-write lags: on the phone the re-read 300 ms
         -- after a successful insert still came back empty and the push was
@@ -8410,7 +8584,7 @@ function Shelfmark:captureReadingProgress()
     end
     local props = (ui.document.getProps and ui.document:getProps()) or {}
     local pending = loadHardcoverPending()
-    pending[md5] = { title = props.title, author = props.authors, percent = percent, at = os.time() }
+    pending[md5] = { title = props.title, author = props.authors, identifiers = props.identifiers, percent = percent, at = os.time() }
     saveHardcoverPending(pending)
     debugLog(string.format("[hc] captured %d%% for %s", math.floor((percent or 0) * 100 + 0.5), tostring(props.title)))
 end
@@ -8463,7 +8637,7 @@ function Shelfmark:processHardcoverPending()
             -- dismissed, so the subprocess runs to completion, non-blocking,
             -- with no widget to cancel.
             local completed, ok, a, b = Trapper:dismissableRunInSubprocess(function()
-                return doHardcoverPushProgress(token, entry.book_id, rec.percent)
+                return doHardcoverPushProgress(token, entry.book_id, rec.percent, entry.edition_id)
             end, {})
             if completed and ok then
                 pending[md5] = nil
@@ -8583,14 +8757,14 @@ end
 function Shelfmark:resolveHardcoverMatch(md5, rec)
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
-    local book_id, ft, fa, ranked, confident
+    local book_id, ft, fa, ranked, confident, edition
     local warm = self._hc_prefetch and self._hc_prefetch[md5]
     if warm and (warm.book_id or (warm.ranked and #warm.ranked > 0)) then
-        book_id, ft, fa, ranked, confident = warm.book_id, warm.title, warm.author, warm.ranked, warm.confident
+        book_id, ft, fa, ranked, confident, edition = warm.book_id, warm.title, warm.author, warm.ranked, warm.confident, warm.edition
     else
         local completed, _err, unreachable
-        completed, book_id, ft, fa, _err, ranked, confident, unreachable = Trapper:dismissableRunInSubprocess(function()
-            return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language)
+        completed, book_id, ft, fa, _err, ranked, confident, unreachable, edition = Trapper:dismissableRunInSubprocess(function()
+            return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language, rec.identifiers)
         end, {})
         if not completed then return end
         if unreachable then
@@ -8602,10 +8776,11 @@ function Shelfmark:resolveHardcoverMatch(md5, rec)
     end
     local map = loadHardcoverMap()
     if book_id and confident then
-        map[md5] = { book_id = book_id, title = ft, decision = "sync" }; saveHardcoverMap(map)
+        map[md5] = { book_id = book_id, title = ft, decision = "sync", edition_id = edition and edition.id }; saveHardcoverMap(map)
         debugLog(string.format("[hc] auto-matched %s -> %s by %s", tostring(rec.title), tostring(ft), tostring(fa)))
+        local edition_id = edition and edition.id
         local completed, ok, a, b = Trapper:dismissableRunInSubprocess(function()
-            return doHardcoverPushProgress(token, book_id, rec.percent)
+            return doHardcoverPushProgress(token, book_id, rec.percent, edition_id)
         end, {})
         if completed and ok then
             self:clearHardcoverPending(md5)
@@ -8659,7 +8834,7 @@ function Shelfmark:reviewHardcoverMatches()
                         -- offline, or a genuine miss): ask Hardcover again now.
                         local token = self.hardcover_token
                         local completed, _id, _t, _a, err, ranked, _c, unreachable = Trapper:dismissableRunInSubprocess(function()
-                            return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language)
+                            return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language, rec.identifiers)
                         end, _("Asking Hardcover again..."))
                         if not completed then return end
                         if unreachable then
@@ -8761,12 +8936,13 @@ function Shelfmark:prefetchHardcoverMatch()
     local title, author = props.title, props.authors
     if not title or title == "" then debugLog("[hc] prefetch: no title, skipping"); return end
     local token, lang = self.hardcover_token, self.hardcover_language
+    local identifiers = props.identifiers
     debugLog("[hc] prefetch: looking up " .. tostring(title))
     local Trapper = require("ui/trapper")
     self._hc_prefetch_inflight[md5] = true
     Trapper:wrap(function()
-        local completed, book_id, ft, fa, _err, ranked, confident, unreachable = Trapper:dismissableRunInSubprocess(function()
-            return doHardcoverFindBook(token, title, author, lang)
+        local completed, book_id, ft, fa, _err, ranked, confident, unreachable, edition = Trapper:dismissableRunInSubprocess(function()
+            return doHardcoverFindBook(token, title, author, lang, identifiers)
         end, {})   -- invisible and non-dismissable; see the note in processHardcoverPending
         self._hc_prefetch_inflight[md5] = nil
         if not completed then debugLog("[hc] prefetch: interrupted"); return end
@@ -8778,7 +8954,7 @@ function Shelfmark:prefetchHardcoverMatch()
             debugLog("[hc] prefetch: Hardcover unreachable (" .. tostring(_err) .. "); will look up at close")
             return
         end
-        self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa, ranked = ranked, confident = confident }
+        self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa, ranked = ranked, confident = confident, edition = edition }
         debugLog("[hc] prefetch: " .. (book_id
             and ((confident and "confident match " or "uncertain match ") .. tostring(ft) .. " by " .. tostring(fa))
             or "no match"))
