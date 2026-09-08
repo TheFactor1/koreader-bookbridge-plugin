@@ -6611,7 +6611,28 @@ uninstall)
 pair)
   [ -n "$A" ] || { say "no address"; exit 1; }
   [ -f "$RULE" ] || { say "keyboard rule not installed"; exit 1; }
-  session_start; w enable; sleep 3; w "classic discoverable y 120"; sleep 1; w "unpair $A"; sleep 2
+  # Bond state first. Asked in the long session; the answer is read from the
+  # daemon log, where the CLI's own "getBondState ... state: N" line appears
+  # at once (its stdout is block-buffered, and piped commands never make it
+  # exit, so the file can't be trusted mid-session). 2 = bonded: nothing to
+  # pair, just listen. 1 = a stale half-bond: clear it. Unpairing a bonded,
+  # connected phone stalled the CLI outright, so it is never done to a good bond.
+  # "enable" makes the CLI wait ~10 s for the enable event before it reads
+  # anything else, so the answer is polled for rather than expected at once.
+  session_start; w enable; sleep 2
+  T0=$(stamp); w "bondstate $A"; bs=""
+  for i in $(seq 1 25); do
+    sleep 1
+    bs=$(showlog 2>/dev/null | awk -v t="$T0" '$1 >= t' | grep -oE "getBondState status : 0 state: [0-9]" | tail -1 | grep -oE "[0-9]$")
+    [ -n "$bs" ] && break
+  done
+  say "bond state before: ${bs:-?}"
+  if [ "$bs" = "2" ]; then
+    w "classic registerhid"; sleep 1; w "classic discoverable y 600"; sleep 1
+    dump; say "BONDED $A (already paired)"; keep 600; exit 0
+  fi
+  w "classic discoverable y 120"; sleep 1
+  [ "$bs" = "1" ] && { w "unpair $A"; sleep 3; }
   T=$(stamp); w "pair $A"; say "pairing started at $T -- confirm on the phone"
   sleep 4; bonded=0
   for i in $(seq 1 18); do
@@ -6745,7 +6766,9 @@ function Bookbridge:btPair()
     local function pair(addr)
         self:btRun("pair", addr, _("Pairing... when the phone shows \"Pair with Kindle?\", tap Pair.\n\nThis finishes by itself, usually within 15 seconds."), function(text, finished)
             if text:find("BONDED " .. addr, 1, true) then
-                UIManager:show(InfoMessage:new{ text = _("Paired, and the Kindle is listening.\n\nNow open the keyboard app on the phone and choose \"Kindle\". KOReader picks the keyboard up by itself.") })
+                local already = text:find("already paired", 1, true) ~= nil
+                UIManager:show(InfoMessage:new{ text = (already and _("Already paired with this phone, and the Kindle is listening.") or _("Paired, and the Kindle is listening."))
+                    .. "\n\n" .. _("Now open the keyboard app on the phone and choose \"Kindle\". KOReader picks the keyboard up by itself.") })
             else
                 local TextViewer = require("ui/widget/textviewer")
                 UIManager:show(TextViewer:new{ title = _("Pairing did not complete"), text = text, justified = false })
