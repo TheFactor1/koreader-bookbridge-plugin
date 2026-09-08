@@ -55,10 +55,10 @@ local f=assert(io.open(p,'w')) f:write('return '..ser(t)..'\n') f:close()"
 launch() { (cd "$KDIR" && setsid -f ./koreader.sh > "$W/koreader-$1.log" 2>&1); for i in $(seq 1 30); do curl -s -o /dev/null --max-time 2 "$I/" && return 0; sleep 1; done; return 1; }
 # --- first start: running from the OLD folder
 launch 1 || { say FAIL "inspector never answered (first start)"; exit 1; }
-sleep 4
+for i in $(seq 1 20); do [ -f "$P/bookbridge.koplugin/main.lua" ] && break; sleep 1; done
 [ -f "$P/bookbridge.koplugin/main.lua" ] && say PASS "copied itself into plugins/bookbridge.koplugin" || { say FAIL "no bookbridge.koplugin created"; fail=1; }
 cmp -s "$P/bookbridge.koplugin/main.lua" "$REPO/bookbridge.koplugin/main.lua" && say PASS "the copy is byte-identical" || { say FAIL "copied main.lua differs"; fail=1; }
-shown=0; for i in $(seq 1 8); do curl -s --max-time 3 "$I/UIManager/_window_stack/$i/widget/text" 2>/dev/null | grep -q "Bookbridge" && shown=1; done
+shown=0; for t in $(seq 1 10); do for i in $(seq 1 8); do curl -s --max-time 3 "$I/UIManager/_window_stack/$i/widget/text" 2>/dev/null | grep -q "Bookbridge" && shown=1; done; [ $shown = 1 ] && break; sleep 1; done
 [ $shown = 1 ] && say PASS "restart offer on screen ('Shelfmark is now Bookbridge ... Restart now?')" || { say FAIL "no restart confirmation on the window stack"; fail=1; }
 # a clean exit flushes settings
 curl -s --max-time 8 "$I/event/Close" >/dev/null 2>&1; sleep 1; curl -s --max-time 8 "$I/UIManager/quit/" >/dev/null 2>&1; stop_koreader
@@ -67,7 +67,7 @@ grep -q 'plugins_disabled' "$CFG/settings.reader.lua" && "$KDIR/luajit" -e "loca
 grep -E "ERROR|Traceback|attempt to" "$W/koreader-1.log" | grep -v "Font " | grep -q . && { say FAIL "KOReader errors (first start):"; grep -E "ERROR|Traceback|attempt to" "$W/koreader-1.log" | grep -v "Font " | head -3; fail=1; } || say PASS "no KOReader errors on the first start"
 # --- second start: now loads from bookbridge.koplugin (old folder disabled)
 launch 2 || { say FAIL "inspector never answered (second start)"; exit 1; }
-sleep 4
+for i in $(seq 1 20); do [ -d "$P/shelfmark.koplugin" ] || break; sleep 1; done
 [ "$(curl -s --max-time 5 "$I/ui/bookbridge/download_dir" | tr -d '"')" = "$W" ] && say PASS "second start: the plugin answers as 'bookbridge'" || { say FAIL "second start: no bookbridge module (got '$(curl -s --max-time 5 "$I/ui/bookbridge/download_dir")')"; fail=1; }
 [ -d "$P/shelfmark.koplugin" ] && { say FAIL "old shelfmark.koplugin folder still present after the second start"; fail=1; } || say PASS "old shelfmark.koplugin folder removed"
 "$KDIR/luajit" -e "local t=dofile(os.getenv('HOME')..'/.config/koreader/settings.reader.lua'); os.exit((t.plugins_disabled and t.plugins_disabled.shelfmark) and 1 or 0)" 2>/dev/null \

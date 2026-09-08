@@ -6611,6 +6611,7 @@ uninstall)
 pair)
   [ -n "$A" ] || { say "no address"; exit 1; }
   [ -f "$RULE" ] || { say "keyboard rule not installed"; exit 1; }
+  FRESH=${3:-}   # "fresh": the phone forgot the Kindle -- drop our side of the bond and pair anew
   # Bond state first. Asked in the long session; the answer is read from the
   # daemon log, where the CLI's own "getBondState ... state: N" line appears
   # at once (its stdout is block-buffered, and piped commands never make it
@@ -6627,12 +6628,17 @@ pair)
     [ -n "$bs" ] && break
   done
   say "bond state before: ${bs:-?}"
-  if [ "$bs" = "2" ]; then
+  if [ "$bs" = "2" ] && [ -z "$FRESH" ]; then
     w "classic registerhid"; sleep 1; w "classic discoverable y 600"; sleep 1
     dump; say "BONDED $A (already paired)"; keep 600; exit 0
   fi
   w "classic discoverable y 120"; sleep 1
-  [ "$bs" = "1" ] && { w "unpair $A"; sleep 3; }
+  if [ "$bs" = "1" ] || [ "$bs" = "2" ]; then
+    # drop our side and wait for the daemon to say so (bondState:0), capped
+    T1=$(stamp); w "unpair $A"
+    for i in $(seq 1 15); do sleep 1; showlog 2>/dev/null | awk -v t="$T1" '$1 >= t' | grep -q "bondState:0" && break; done
+    say "unpaired (bond state was $bs)"
+  fi
   T=$(stamp); w "pair $A"; say "pairing started at $T -- confirm on the phone"
   sleep 4; bonded=0
   for i in $(seq 1 18); do
@@ -6762,13 +6768,24 @@ end
 -- One tap: rule (installed once, with a confirmation), address (asked once),
 -- then pair; the phone's prompt is confirmed from here; the moment the bond
 -- lands the Kindle is already listening for the keyboard link.
-function Bookbridge:btPair()
+function Bookbridge:btPair(fresh)
     local function pair(addr)
-        self:btRun("pair", addr, _("Pairing... when the phone shows \"Pair with Kindle?\", tap Pair.\n\nThis finishes by itself, usually within 15 seconds."), function(text, finished)
+        self:btRun("pair", addr .. (fresh and " fresh" or ""), _("Pairing... when the phone shows \"Pair with Kindle?\", tap Pair.\n\nThis finishes by itself, usually within 15 seconds."), function(text, finished)
             if text:find("BONDED " .. addr, 1, true) then
                 local already = text:find("already paired", 1, true) ~= nil
-                UIManager:show(InfoMessage:new{ text = (already and _("Already paired with this phone, and the Kindle is listening.") or _("Paired, and the Kindle is listening."))
-                    .. "\n\n" .. _("Now open the keyboard app on the phone and choose \"Kindle\". KOReader picks the keyboard up by itself.") })
+                if already then
+                    -- The Kindle holds a bond; if the phone no longer lists
+                    -- "Kindle", that bond is one-sided and must be redone.
+                    local ConfirmBox = require("ui/widget/confirmbox")
+                    UIManager:show(ConfirmBox:new{
+                        text = _("Already paired with this phone, and the Kindle is listening.\n\nOpen the keyboard app on the phone and choose \"Kindle\".\n\nIf the phone no longer lists Kindle in its Bluetooth settings, pair again from scratch instead."),
+                        ok_text = _("OK"),
+                        cancel_text = _("Pair from scratch"),
+                        cancel_callback = function() self:btPair(true) end,
+                    })
+                else
+                    UIManager:show(InfoMessage:new{ text = _("Paired, and the Kindle is listening.\n\nNow open the keyboard app on the phone and choose \"Kindle\". KOReader picks the keyboard up by itself.") })
+                end
             else
                 local TextViewer = require("ui/widget/textviewer")
                 UIManager:show(TextViewer:new{ title = _("Pairing did not complete"), text = text, justified = false })
@@ -6788,6 +6805,13 @@ function Bookbridge:btPair()
                 end)
             end,
         })
+    end
+    -- Inherit the address the earlier stand-alone plugin kept in a file.
+    if not self.bt_keyboard_addr then
+        local f = io.open(BT_DIR .. "/address.txt", "r")
+        local a = f and (f:read("*a") or ""):match("(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)")
+        if f then f:close() end
+        if a then self.bt_keyboard_addr = a:upper(); self:saveAllSettings(T(_("Using the saved phone address %1."), self.bt_keyboard_addr)) end
     end
     if self.bt_keyboard_addr then with_rule(self.bt_keyboard_addr) else self:btAskAddress(with_rule) end
 end
