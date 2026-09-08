@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-09-08 — build 1aad304
+## 2026-09-08 — build 3d02dd3
 
 - **Bluetooth keyboard: "ready" in a few seconds after waking**, not a
   minute. The engine was waiting for a log line the radio never writes and
