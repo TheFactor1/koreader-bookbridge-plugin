@@ -4,6 +4,12 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build 26fa851
+
+- **Bluetooth keyboard: "Pair the phone" on an already-paired phone now just
+  starts listening** (about 20 s) instead of timing out. Open the keyboard
+  app on the phone and choose Kindle.
+
 ## 2026-09-08 — build 8b1bfd8
 
 ### Bluetooth keyboard, now part of Bookbridge (Kindle)
