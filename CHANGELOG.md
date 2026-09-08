@@ -4,6 +4,20 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build 314d83e
+
+### The plugin is now called Bookbridge
+
+- Shelfmark is one of the services it connects to, not the plugin, so the
+  plugin is **Bookbridge** (`bookbridge.koplugin`) and the menu entry says
+  Bookbridge. "Shelfmark" remains the name of the request feature and its
+  server settings.
+- **Nothing to redo on your devices.** Check for updates as usual; the new
+  build moves itself into its own folder and asks to restart once. All your
+  settings, Hardcover matches, CWA registry and logs stay exactly as they
+  are (their files keep their old names on purpose).
+- README carries a plain "written 100% by an AI" disclaimer at the top.
+
 ## 2026-09-08 — build 6f36f79
 
 - **"Restart now" after an update.** When Check for updates installs a new
