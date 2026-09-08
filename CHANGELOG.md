@@ -4,6 +4,12 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build 6dfdfee
+
+- **Bluetooth keyboard: keep-ready now survives a quick sleep/wake** (the
+  wake-time step waits for the sleep-time radio-off to finish instead of
+  giving up), and the keep-ready switch flips in place with a check mark.
+
 ## 2026-09-08 — build ddfec2a
 
 ### Bluetooth keyboard: smoother
