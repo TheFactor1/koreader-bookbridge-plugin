@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build 4e9a426
+
+- **Bluetooth keyboard: "Pair from scratch"** when the phone has forgotten
+  the Kindle (the Kindle still remembered it and said "already paired").
+  The saved phone address from the earlier Bluetooth plugin is picked up
+  automatically.
+
 ## 2026-09-08 — build 26fa851
 
 - **Bluetooth keyboard: "Pair the phone" on an already-paired phone now just
