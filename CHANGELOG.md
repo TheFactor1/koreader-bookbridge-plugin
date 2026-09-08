@@ -4,6 +4,18 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build ddfec2a
+
+### Bluetooth keyboard: smoother
+
+- **Ready in about two seconds** when the radio is already on (it used to
+  wait 15–20 s), and instant if the Kindle is already listening.
+- **The Kindle stays connectable the whole time it's awake**, not just for
+  10 minutes — and with *Keep Bluetooth ready when the Kindle wakes* on,
+  the radio goes off when it sleeps and comes back when it wakes, so
+  reconnecting is just choosing Kindle in the phone's app.
+- **"Keyboard connected"** appears the moment the link comes up.
+
 ## 2026-09-08 — build 4e9a426
 
 - **Bluetooth keyboard: "Pair from scratch"** when the phone has forgotten
