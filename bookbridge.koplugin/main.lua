@@ -6575,13 +6575,26 @@ w() { echo "$1" > /tmp/ace.in; }
 dump() { grep -v "No Input Parameters" /tmp/ace.out 2>/dev/null | grep -v "^\s*$\|^p_data\|^ *[0-9A-F][0-9A-F] " >> "$OUT"; }
 keep() { ( sleep ${1:-600}; [ -p /tmp/ace.in ] && echo "exit" > /tmp/ace.in; sleep 2; rm -f /tmp/ace.in ) </dev/null >/dev/null 2>&1 & }
 inputs() { say "--- input devices"; awk '/^N:/{n=$0} /^H:/{print n " | " $0}' /proc/bus/input/devices >> "$OUT" 2>/dev/null; }
-bonded_since() { showlog 2>/dev/null | awk -v t="$1" '$1 >= t' | grep -q "bondState:2"; }
+LOG=/var/log/messages; LOGDIR=/var/local/log
+# Daemon log lines stamped at or after $1 (yymmdd:HHMMSS). Reads the live
+# syslog file (a few KB) instead of `showlog`, which gunzips every archived
+# log (~250k lines: a second per call when idle, several on a busy wake).
+# If tinyrot rotated the file inside the window, the youngest archive is
+# included so nothing is missed.
+logsince() {
+  { first=$(head -n1 "$LOG" 2>/dev/null | cut -d' ' -f1)
+    if [ -n "$first" ] && [ "${first%%:*}${first#*:}" -gt "${1%%:*}${1#*:}" ] 2>/dev/null; then
+      zcat "$LOGDIR/messages_$(cat "$LOGDIR/messages_youngest" 2>/dev/null)_"*.gz 2>/dev/null
+    fi
+    cat "$LOG" 2>/dev/null; } | awk -v t="$1" '$1 >= t'
+}
+bonded_since() { logsince "$1" | grep -q "bondState:2"; }
 # radio state via the daemon log ("Get RadioState status: 0 state: N"), ~1 s;
 # "enable" on a radio that is already on waits 10 s for nothing, so ask first.
 radio_on() {
   local t=$(stamp); w radiostate
   for i in 1 2 3 4 5 6; do sleep 1
-    local st=$(showlog 2>/dev/null | awk -v t="$t" '$1 >= t' | grep -oE "Get RadioState status: 0 state: [0-9]" | tail -1 | grep -oE "[0-9]$")
+    local st=$(logsince "$t" | grep -oE "Get RadioState status: 0 state: [0-9]" | tail -1 | grep -oE "[0-9]$")
     [ -n "$st" ] && { [ "$st" = "1" ] && return 0 || return 1; }
   done
   return 1
@@ -6589,7 +6602,7 @@ radio_on() {
 ensure_radio() {
   if radio_on; then say "radio already on"; return 0; fi
   local t=$(stamp); w enable
-  for i in $(seq 1 15); do sleep 1; showlog 2>/dev/null | awk -v t="$t" '$1 >= t' | grep -q "Get RadioState status: 0 state: 1\|STATE_ENABLED\|adapter state.*1" && break; done
+  for i in $(seq 1 15); do sleep 1; logsince "$t" | grep -qi "ADAPTER_STATE_CHANGED state:1\|Adapter state changing to 1\|Get RadioState status: 0 state: 1" && break; done
   say "radio switched on"
 }
 # keep the Kindle connectable (not discoverable) for as long as the session
@@ -6651,7 +6664,7 @@ pair)
   T0=$(stamp); w "bondstate $A"; bs=""
   for i in $(seq 1 25); do
     sleep 1
-    bs=$(showlog 2>/dev/null | awk -v t="$T0" '$1 >= t' | grep -oE "getBondState status : 0 state: [0-9]" | tail -1 | grep -oE "[0-9]$")
+    bs=$(logsince "$T0" | grep -oE "getBondState status : 0 state: [0-9]" | tail -1 | grep -oE "[0-9]$")
     [ -n "$bs" ] && break
   done
   say "bond state before: ${bs:-?}"
@@ -6663,7 +6676,7 @@ pair)
   if [ "$bs" = "1" ] || [ "$bs" = "2" ]; then
     # drop our side and wait for the daemon to say so (bondState:0), capped
     T1=$(stamp); w "unpair $A"
-    for i in $(seq 1 15); do sleep 1; showlog 2>/dev/null | awk -v t="$T1" '$1 >= t' | grep -q "bondState:0" && break; done
+    for i in $(seq 1 15); do sleep 1; logsince "$T1" | grep -q "bondState:0" && break; done
     say "unpaired (bond state was $bs)"
   fi
   T=$(stamp); w "pair $A"; say "pairing started at $T -- confirm on the phone"
@@ -6677,7 +6690,7 @@ pair)
     dump; say "BONDED $A"; keepalive
   else
     w "bondstate $A"; sleep 2; dump
-    say "--- daemon"; showlog 2>/dev/null | awk -v t="$T" '$1 >= t' | grep -iE "ssp|bond|auth" | tail -6 | cut -c1-160 >> "$OUT"
+    say "--- daemon"; logsince "$T" | grep -iE "ssp|bond|auth" | tail -6 | cut -c1-160 >> "$OUT"
     say "NOT BONDED"; session_end
   fi
   ;;
