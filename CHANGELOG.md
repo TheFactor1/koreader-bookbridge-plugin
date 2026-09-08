@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-07 — build e70c72e
+
+- **The library sync now writes its report to the debug log** (each line as
+  `[sync] …`) followed by one summary line with counts: found, tracked,
+  matched, uploaded, importing, unmatched, ambiguous, re-downloaded, failed.
+  Same for "Send to CWA". Nothing on screen changes; it makes "what did the
+  sync do on that device" answerable from a sent log.
+- README gained Credits and Authorship sections.
+
 ## 2026-09-07 — build 969f16f
 
 ### New: reading progress syncs to Hardcover
