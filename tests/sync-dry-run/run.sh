@@ -26,7 +26,7 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT; mkdir -p "$W/cache"
-bash "$HERE/build-harness.sh" "$REPO/shelfmark.koplugin/main.lua" "$W/dryrun.lua"
+bash "$HERE/build-harness.sh" "$REPO/bookbridge.koplugin/main.lua" "$W/dryrun.lua"
 python3 "$HERE/scenarios.py" "$W"
 cd /home/matthew/Desktop/homeserver-configs
 set -a; eval "$(sops -d --input-type dotenv --output-type dotenv scripts/shelfmark-kindle-sync/.env.sops)"; set +a

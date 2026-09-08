@@ -64,7 +64,7 @@ local f=assert(io.open(p,'w')) f:write('return '..ser(t)..'\n') f:close()"
 (cd "$KDIR" && setsid -f ./koreader.sh > "$W/koreader.log" 2>&1)
 for i in $(seq 1 30); do curl -s -o /dev/null --max-time 2 "$I/" && break; sleep 1; done
 curl -s -o /dev/null --max-time 2 "$I/" || { say FAIL "inspector never answered"; exit 1; }
-[ "$(curl -s --max-time 5 "$I/ui/shelfmark/download_dir" | tr -d '"')" = "$BOOKS" ] && say PASS "driving the KOReader this run launched" || { say FAIL "wrong KOReader"; exit 1; }
+[ "$(curl -s --max-time 5 "$I/ui/bookbridge/download_dir" | tr -d '"')" = "$BOOKS" ] && say PASS "driving the KOReader this run launched" || { say FAIL "wrong KOReader"; exit 1; }
 # 1. shelf up
 curl -s --max-time 8 "$I/ui/bookshelf/show/" >/dev/null; sleep 2
 stack() { curl -s --max-time 5 "$I/UIManager/_window_stack/" | tr -d '\n' | cut -c1-600; }
@@ -86,6 +86,6 @@ n_cap=$(grep -c "captured" "$SET/shelfmark-debug.log"); [ "$n_cap" = 1 ] && say 
 grep -q "process: 1 pending" "$SET/shelfmark-debug.log" && say PASS "sync ran right after the park" || { say FAIL "no sync after park"; fail=1; }
 [ "$(curl -s --max-time 3 "$I/ui/document/file" | tr -d '"')" = "$BOOK" ] && say PASS "reader still alive underneath (parked, not closed)" || say INFO "reader gone (real close happened)"
 echo "stack after Home: $(stack)"
-grep -E "ERROR|Traceback|attempt to" "$W/koreader.log" | grep -qv "Font " && { say FAIL "KOReader logged an error:"; grep -E "ERROR|Traceback|attempt to" "$W/koreader.log" | grep -v "Font " | head -3; fail=1; } || say PASS "no KOReader errors (font warning aside)"
+grep -E "ERROR|Traceback|attempt to" "$W/koreader.log" | grep -v "Font " | grep -q . && { say FAIL "KOReader logged an error:"; grep -E "ERROR|Traceback|attempt to" "$W/koreader.log" | grep -v "Font " | head -3; fail=1; } || say PASS "no KOReader errors (font warning aside)"
 echo "--- debug log:"; grep "\[hc\]" "$SET/shelfmark-debug.log" | cut -c1-150
 [ $fail -eq 0 ] && echo "=== PARK E2E PASS" || echo "=== PARK E2E FAIL"; exit $fail

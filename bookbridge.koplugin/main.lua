@@ -51,8 +51,8 @@ local socketutil = require("socketutil")
 local _ = require("gettext")
 local T = ffiUtil.template
 
-local Shelfmark = WidgetContainer:extend{
-    name = "shelfmark",
+local Bookbridge = WidgetContainer:extend{
+    name = "bookbridge",
     settings_file = DataStorage:getSettingsDir() .. "/shelfmark.lua",
     sm_settings = nil,
     session_cookie = nil,
@@ -65,14 +65,14 @@ local Shelfmark = WidgetContainer:extend{
 
 -- ===== settings =====
 
-function Shelfmark:loadSettings()
-    if not Shelfmark.settings then
-        Shelfmark.settings = LuaSettings:open(self.settings_file)
-        if not next(Shelfmark.settings.data) then
-            Shelfmark.settings.data = { shelfmark = {} }
+function Bookbridge:loadSettings()
+    if not Bookbridge.settings then
+        Bookbridge.settings = LuaSettings:open(self.settings_file)
+        if not next(Bookbridge.settings.data) then
+            Bookbridge.settings.data = { shelfmark = {} }
         end
     end
-    self.sm_settings = Shelfmark.settings
+    self.sm_settings = Bookbridge.settings
     self.server_url = self.sm_settings.data.shelfmark.server_url
     self.username = self.sm_settings.data.shelfmark.username
     self.password = self.sm_settings.data.shelfmark.password
@@ -137,12 +137,13 @@ function Shelfmark:loadSettings()
     self.hardcover_progress_sync = self.sm_settings.data.shelfmark.hardcover_progress_sync
 end
 
-function Shelfmark:defaultDownloadDir()
+function Bookbridge:defaultDownloadDir()
     return DataStorage:getFullDataDir() .. "/shelfmark_downloads"
 end
 
-function Shelfmark:init()
+function Bookbridge:init()
     self:loadSettings()
+    self:migratePluginFolder()
     self.ui.menu:registerToMainMenu(self)
     self:registerFileDialogButtons()
 end
@@ -153,7 +154,7 @@ end
 -- a merge. Splitting one 8-field dialog into two 4-field ones was itself
 -- the fix for the on-screen keyboard covering the lower fields/Apply
 -- button on a Kindle-size screen -- confirmed live via screenshot.
-function Shelfmark:saveAllSettings(msg)
+function Bookbridge:saveAllSettings(msg)
     self.sm_settings:saveSetting("shelfmark", {
         server_url = self.server_url,
         username = self.username,
@@ -179,9 +180,9 @@ function Shelfmark:saveAllSettings(msg)
     UIManager:show(InfoMessage:new{ text = msg, timeout = 2 })
 end
 
-function Shelfmark:editServerSettings()
+function Bookbridge:editServerSettings()
     self.settings_dialog = MultiInputDialog:new{
-        title = _("Shelfmark settings"),
+        title = _("Shelfmark server settings"),
         fields = {
             { text = self.server_url, hint = _("Server URL, e.g. http://shelfmark:8084") },
             { text = self.username, hint = _("Username") },
@@ -227,7 +228,7 @@ function Shelfmark:editServerSettings()
     self.settings_dialog:onShowKeyboard()
 end
 
-function Shelfmark:editCwaSettings()
+function Bookbridge:editCwaSettings()
     self.cwa_settings_dialog = MultiInputDialog:new{
         title = _("CWA settings"),
         fields = {
@@ -268,7 +269,7 @@ end
 -- model credentials (if a remote provider is configured) live on the server,
 -- never on the device, which is the whole reason the relay exists rather
 -- than the plugin calling a model API directly.
-function Shelfmark:editAiSettings()
+function Bookbridge:editAiSettings()
     self.ai_settings_dialog = MultiInputDialog:new{
         title = _("Match suggestions (AI)"),
         fields = {
@@ -301,7 +302,7 @@ function Shelfmark:editAiSettings()
     self.ai_settings_dialog:onShowKeyboard()
 end
 
-function Shelfmark:editUpdateSettings()
+function Bookbridge:editUpdateSettings()
     self.update_settings_dialog = MultiInputDialog:new{
         title = _("Update source"),
         fields = {
@@ -335,7 +336,7 @@ function Shelfmark:editUpdateSettings()
     self.update_settings_dialog:onShowKeyboard()
 end
 
-function Shelfmark:editAnnasSettings()
+function Bookbridge:editAnnasSettings()
     self.annas_settings_dialog = MultiInputDialog:new{
         title = _("Anna's Archive settings"),
         fields = {
@@ -372,7 +373,7 @@ end
 
 -- hardcover.app account token, used to log reading status and follow
 -- authors. Generate one at hardcover.app -> Account Settings -> API Tokens.
-function Shelfmark:editHardcoverSettings()
+function Bookbridge:editHardcoverSettings()
     self.hardcover_settings_dialog = MultiInputDialog:new{
         title = _("Hardcover settings"),
         fields = {
@@ -419,7 +420,7 @@ end
 -- to be "/mnt/us/books", not the "/mnt/us/documents" this plugin guessed
 -- at from what else was sitting there). Browsing and long-pressing the
 -- actual folder sidesteps needing to already know its exact path.
-function Shelfmark:chooseDownloadDir()
+function Bookbridge:chooseDownloadDir()
     local PathChooser = require("ui/widget/pathchooser")
     local start_path = self.download_dir or self:defaultDownloadDir()
     if lfs.attributes(start_path, "mode") ~= "directory" then
@@ -474,11 +475,11 @@ local function extractSessionCookie(headers)
 end
 
 -- Everything from here down to doApiRequest() runs inside a forked
--- subprocess (see Shelfmark:apiRequest below) -- plain functions taking
+-- subprocess (see Bookbridge:apiRequest below) -- plain functions taking
 -- explicit arguments rather than methods, since a fork's child memory is a
 -- copy: mutating `self.session_cookie` inside the child would never be
 -- visible back in the parent. The cookie flows through return values
--- instead, and Shelfmark:apiRequest applies it to `self` once the
+-- instead, and Bookbridge:apiRequest applies it to `self` once the
 -- subprocess has actually returned to the parent.
 
 -- KOReader's JSON library (rapidjson) represents a decoded JSON `null` as
@@ -530,7 +531,7 @@ end
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
 local PLUGIN_VERSION = "0.3.0"
-local UPDATE_REPO = "TheFactor1/koreader-shelfmark-plugin"
+local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
 -- chunk's source rather than hardcoded -- kindle and kindle-pw don't
@@ -541,6 +542,8 @@ local function getPluginDir()
     local src = debug.getinfo(1, "S").source:gsub("^@", "")
     return src:match("^(.*)/[^/]+$") or "."
 end
+
+
 
 local DEBUG_LOG_PATH = DataStorage:getSettingsDir() .. "/shelfmark-debug.log"
 local DEBUG_LOG_PREV_PATH = DEBUG_LOG_PATH .. ".1"
@@ -570,6 +573,58 @@ local function debugLog(msg)
         -- down whatever real operation was only trying to log a line.
         pcall(os.rename, DEBUG_LOG_PATH, DEBUG_LOG_PREV_PATH)
     end
+end
+
+-- Renamed from Shelfmark (September 2026). The updater installs into the
+-- folder the plugin runs from, so the first Bookbridge build lands inside
+-- the old shelfmark.koplugin folder on every device. From there it copies
+-- itself into bookbridge.koplugin, disables the old folder and asks for a
+-- restart; the next start, running from the right folder, removes the old
+-- one. Settings and log files keep their shelfmark* names on purpose --
+-- nothing on the device is migrated by hand.
+function Bookbridge:migratePluginFolder()
+    -- self.path is set by PluginLoader; the debug fallback covers a direct load.
+    local dir = self.path or (debug.getinfo(1, "S").source:gsub("^@", ""):match("^(.*)/[^/]+$"))
+    if not dir then return end
+    local parent, folder = dir:match("^(.*)/([^/]+)$")
+    if not folder then return end
+    local disabled = G_reader_settings:readSetting("plugins_disabled") or {}
+    if folder == "bookbridge.koplugin" then
+        local old = parent .. "/shelfmark.koplugin"
+        if lfs.attributes(old, "mode") == "directory" then
+            os.execute("rm -rf '" .. old:gsub("'", "'\\''") .. "'")
+            disabled.shelfmark = nil
+            G_reader_settings:saveSetting("plugins_disabled", disabled)
+            debugLog("[rename] removed the old shelfmark.koplugin folder")
+        end
+        return
+    end
+    local new_dir = parent .. "/bookbridge.koplugin"
+    lfs.mkdir(new_dir)
+    for _, f in ipairs({ "main.lua", "_meta.lua", "manifest.json", "installed-build" }) do
+        local src = io.open(dir .. "/" .. f, "rb")
+        if src then
+            local data = src:read("*a"); src:close()
+            local dst = io.open(new_dir .. "/" .. f, "wb")
+            if dst then dst:write(data); dst:close() end
+        end
+    end
+    local check = io.open(new_dir .. "/main.lua", "rb")
+    if not check then debugLog("[rename] could not write " .. new_dir); return end
+    check:close()
+    disabled[folder:gsub("%.koplugin$", "")] = true
+    G_reader_settings:saveSetting("plugins_disabled", disabled)
+    G_reader_settings:flush()
+    debugLog("[rename] copied into " .. new_dir .. "; " .. folder .. " disabled; restart pending")
+    UIManager:nextTick(function()
+        local ConfirmBox = require("ui/widget/confirmbox")
+        UIManager:show(ConfirmBox:new{
+            text = _("Shelfmark is now Bookbridge. It has moved into its own folder; the change takes effect when KOReader restarts.\n\nRestart now?"),
+            ok_text = _("Restart now"),
+            cancel_text = _("Later"),
+            ok_callback = function() UIManager:restartKOReader() end,
+        })
+    end)
 end
 
 -- Drops KOReader's own cached metadata/cover row for a book file this
@@ -1007,14 +1062,14 @@ end
 -- from Shelfmark, with its own plain HTTP Basic Auth (no session cookie),
 -- used only so "My requests" can jump straight to a delivered book's OPDS
 -- entry and download it. Shelfmark itself has no record of where a
--- delivered file ends up (see the note on Shelfmark:downloadFromCwa), so
+-- delivered file ends up (see the note on Bookbridge:downloadFromCwa), so
 -- this is the only way to close that loop from inside this plugin.
 
 -- Returns the raw response body (a string; not JSON) plus the HTTP code.
 local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting")
-        return nil, nil, _("CWA URL isn't set -- add it under Shelfmark Settings.")
+        return nil, nil, _("CWA URL isn't set -- add it under Bookbridge > Settings.")
     end
     local headers = {}
     if username and username ~= "" then
@@ -1074,7 +1129,7 @@ end
 local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy, save_path)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting download")
-        return nil, nil, _("CWA URL isn't set -- add it under Shelfmark Settings.")
+        return nil, nil, _("CWA URL isn't set -- add it under Bookbridge > Settings.")
     end
     local headers = {}
     if username and username ~= "" then
@@ -1218,7 +1273,7 @@ local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
 end
 
 -- Called only when a search just failed with err_code "MIRROR_DOWN" (see
--- Shelfmark:annasSearch's caller) -- never on a timer. Asks the backend to
+-- Bookbridge:annasSearch's caller) -- never on a timer. Asks the backend to
 -- check whether its configured Anna's Archive mirror is actually still
 -- Anna's Archive and, if not, switch to another known-alive one.
 local function doAnnasMirrorRefresh(annas_url, socks5_proxy)
@@ -1588,7 +1643,7 @@ end
 -- Deliberately indexed with a plain numeric for loop rather than ipairs:
 -- some books have no cover_url, and a hole in that table would make ipairs
 -- stop early.
-function Shelfmark:prefetchCovers(books)
+function Bookbridge:prefetchCovers(books)
     local server_url, session_cookie = self.server_url, self.session_cookie
     local n = #books
     local urls = {}
@@ -1859,7 +1914,7 @@ local function fetchJsonUrl(url, log_prefix, attempt)
     local ok, code = pcall(function()
         return socket.skip(1, http.request{
             method = "GET", url = url, sink = sink,
-            headers = { ["User-Agent"] = "KOReader shelfmark.koplugin (https://github.com/TheFactor1/koreader-shelfmark-plugin)",
+            headers = { ["User-Agent"] = "KOReader bookbridge.koplugin (https://github.com/TheFactor1/koreader-bookbridge-plugin)",
                         ["Accept"] = "application/json" },
         })
     end)
@@ -2653,7 +2708,7 @@ local function deriveFileDialogMetadata(file, book_props)
     return title, authors
 end
 
-function Shelfmark:registerFileDialogButtons()
+function Bookbridge:registerFileDialogButtons()
     local FileManager = require("apps/filemanager/filemanager")
     local FileManagerHistory = require("apps/filemanager/filemanagerhistory")
     local FileManagerCollection = require("apps/filemanager/filemanagercollection")
@@ -2825,7 +2880,7 @@ local function doHttpGetString(url, socks5_proxy, log_prefix, block_timeout, tot
         method = "GET",
         url = url,
         sink = sink,
-        headers = { ["User-Agent"] = "shelfmark.koplugin" },
+        headers = { ["User-Agent"] = "bookbridge.koplugin" },
     }
     local proxy = proxyForUrl(url, socks5_proxy)
     if proxy then
@@ -2930,7 +2985,7 @@ local function doCheckForUpdate(update_url, socks5_proxy)
             method = "GET",
             url = url,
             headers = {
-                ["User-Agent"] = "shelfmark.koplugin",
+                ["User-Agent"] = "bookbridge.koplugin",
                 ["Accept"] = "application/vnd.github+json",
             },
             sink = sink,
@@ -3012,7 +3067,7 @@ local function doApplyUpdate(target, socks5_proxy)
         base = target.base .. "/"
         label = "v" .. tostring(target.version) .. (target.build and (" build " .. target.build) or "")
     else
-        base = "https://raw.githubusercontent.com/" .. UPDATE_REPO .. "/" .. tostring(target) .. "/shelfmark.koplugin/"
+        base = "https://raw.githubusercontent.com/" .. UPDATE_REPO .. "/" .. tostring(target) .. "/bookbridge.koplugin/"
         label = tostring(target)
     end
     local tmp_paths = {}
@@ -3892,7 +3947,7 @@ end
 -- Checks one already-tracked registry entry against CWA's current
 -- last_modified for its uuid, re-downloading the file if it changed.
 -- Shared by doSyncLibrary's own "already tracked" loop below and
--- Shelfmark:refreshBookMetadata's single-book action, so the (already
+-- Bookbridge:refreshBookMetadata's single-book action, so the (already
 -- fiddly -- see the 404 case) logic for what counts as "changed" vs "gone"
 -- only exists once. Mutates entry.last_modified in place on success but
 -- never touches the registry table itself -- the 404 case in particular
@@ -3944,7 +3999,7 @@ local function checkTrackedBookAgainstCwa(cwa_url, cwa_username, cwa_password, s
     return "unreachable"
 end
 
--- Runs entirely inside a Trapper subprocess (see Shelfmark:syncLibrary
+-- Runs entirely inside a Trapper subprocess (see Bookbridge:syncLibrary
 -- below) -- a real fork, so file writes it makes (downloaded books, the
 -- registry itself) land on the real filesystem same as if done in the
 -- parent; only in-memory Lua state doesn't cross back. Returns a list of
@@ -4007,7 +4062,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     local unmatched = {}
 
     if not cwa_url or cwa_url == "" then
-        return { _("CWA URL isn't set -- add it under Shelfmark Settings.") }
+        return { _("CWA URL isn't set -- add it under Bookbridge > Settings.") }
     end
 
     if lfs.attributes(download_dir, "mode") ~= "directory" then
@@ -5190,12 +5245,12 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
 end
 
 -- Single-book counterpart to doSyncLibrary's "already tracked" loop above,
--- for Shelfmark:refreshBookMetadata -- added because a full syncLibrary()
+-- for Bookbridge:refreshBookMetadata -- added because a full syncLibrary()
 -- run checks every tracked book's last_modified one at a time (one request
 -- per book, plus a full local-folder scan for anything new), which is real
 -- wall-clock cost on a library of any size just to see whether the ONE book
 -- you just edited in CWA changed. Runs inside the same kind of Trapper
--- subprocess as syncLibrary -- see Shelfmark:refreshBookMetadata below --
+-- subprocess as syncLibrary -- see Bookbridge:refreshBookMetadata below --
 -- so file/registry writes land the same way.
 --
 -- Only ever acts on a book this device has already synced at least once:
@@ -5276,7 +5331,7 @@ end
 -- earlier native crashes too, if Android's watchdog decided the
 -- unresponsive app needed to be force-killed. Must be called from within a
 -- Trapper:wrap()'d coroutine (every entry point below is).
-function Shelfmark:apiRequest(method, path, body, progress_text, block_timeout, total_timeout)
+function Bookbridge:apiRequest(method, path, body, progress_text, block_timeout, total_timeout)
     local Trapper = require("ui/trapper")
     local server_url, username, password, cookie, socks5_proxy =
         self.server_url, self.username, self.password, self.session_cookie, self.socks5_proxy
@@ -5304,7 +5359,7 @@ end
 -- Mirrors apiRequest's Trapper-subprocess wrapping above, but for CWA's
 -- simpler basic-auth (there's no session cookie to carry back across the
 -- fork boundary the way Shelfmark's login needs).
-function Shelfmark:cwaRequest(path, progress_text)
+function Bookbridge:cwaRequest(path, progress_text)
     local Trapper = require("ui/trapper")
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
@@ -5317,7 +5372,7 @@ function Shelfmark:cwaRequest(path, progress_text)
     return body, code, err
 end
 
-function Shelfmark:cwaFileDownload(path, save_path, progress_text)
+function Bookbridge:cwaFileDownload(path, save_path, progress_text)
     local Trapper = require("ui/trapper")
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
@@ -5331,7 +5386,7 @@ function Shelfmark:cwaFileDownload(path, save_path, progress_text)
 end
 
 -- Mirrors apiRequest/cwaRequest's Trapper-subprocess wrapping above.
-function Shelfmark:annasSearch(query, progress_text)
+function Bookbridge:annasSearch(query, progress_text)
     local Trapper = require("ui/trapper")
     local annas_url, download_key, tld, socks5_proxy =
         self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
@@ -5345,7 +5400,7 @@ function Shelfmark:annasSearch(query, progress_text)
 end
 
 -- See doAnnasMirrorRefresh above for when this actually gets called.
-function Shelfmark:annasMirrorRefresh()
+function Bookbridge:annasMirrorRefresh()
     local Trapper = require("ui/trapper")
     local annas_url, socks5_proxy = self.annas_url, self.socks5_proxy
 
@@ -5357,7 +5412,7 @@ function Shelfmark:annasMirrorRefresh()
     return result, code, err
 end
 
-function Shelfmark:hardcoverFindBook(title, author)
+function Bookbridge:hardcoverFindBook(title, author)
     local Trapper = require("ui/trapper")
     local token, lang = self.hardcover_token, self.hardcover_language
     local completed, id, found_title, found_author, err = Trapper:dismissableRunInSubprocess(function()
@@ -5367,7 +5422,7 @@ function Shelfmark:hardcoverFindBook(title, author)
     return id, found_title, found_author, err
 end
 
-function Shelfmark:hardcoverSetStatus(book_id, status_id)
+function Bookbridge:hardcoverSetStatus(book_id, status_id)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
@@ -5377,7 +5432,7 @@ function Shelfmark:hardcoverSetStatus(book_id, status_id)
     return ok, err
 end
 
-function Shelfmark:hardcoverFindAuthor(name)
+function Bookbridge:hardcoverFindAuthor(name)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, id, found_name, err = Trapper:dismissableRunInSubprocess(function()
@@ -5387,7 +5442,7 @@ function Shelfmark:hardcoverFindAuthor(name)
     return id, found_name, err
 end
 
-function Shelfmark:hardcoverFollowAuthor(author_id)
+function Bookbridge:hardcoverFollowAuthor(author_id)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
@@ -5397,7 +5452,7 @@ function Shelfmark:hardcoverFollowAuthor(author_id)
     return ok, err
 end
 
-function Shelfmark:hardcoverListFollowedAuthors()
+function Bookbridge:hardcoverListFollowedAuthors()
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, authors, err = Trapper:dismissableRunInSubprocess(function()
@@ -5407,7 +5462,7 @@ function Shelfmark:hardcoverListFollowedAuthors()
     return authors, err
 end
 
-function Shelfmark:hardcoverAuthorBibliography(author_id, limit, offset)
+function Bookbridge:hardcoverAuthorBibliography(author_id, limit, offset)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, books, total, author_name, err = Trapper:dismissableRunInSubprocess(function()
@@ -5417,7 +5472,7 @@ function Shelfmark:hardcoverAuthorBibliography(author_id, limit, offset)
     return books, total, author_name, err
 end
 
-function Shelfmark:hardcoverBestEditions(provider_ids)
+function Bookbridge:hardcoverBestEditions(provider_ids)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, result = Trapper:dismissableRunInSubprocess(function()
@@ -5427,7 +5482,7 @@ function Shelfmark:hardcoverBestEditions(provider_ids)
     return result or {}
 end
 
-function Shelfmark:annasFetchDownloadUrl(md5, progress_text)
+function Bookbridge:annasFetchDownloadUrl(md5, progress_text)
     local Trapper = require("ui/trapper")
     local annas_url, download_key, tld, socks5_proxy =
         self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
@@ -5535,7 +5590,7 @@ local function logSyncReport(label, report, unmatched)
         label, tostring(c.found), tostring(c.tracked), c.matched, c.uploaded, c.importing, c.unmatched, c.ambiguous, c.redownloaded, c.failed))
 end
 
-function Shelfmark:syncLibrary()
+function Bookbridge:syncLibrary()
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
     local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
@@ -5635,7 +5690,7 @@ end
 -- if it genuinely isn't, waits for CWA's import and registers it, and
 -- refuses to upload at all if CWA can't be reached -- just without walking
 -- the rest of the library.
-function Shelfmark:sendBookToCwa(file)
+function Bookbridge:sendBookToCwa(file)
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
     local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
@@ -5673,7 +5728,7 @@ end
 -- whatever it finds to the same suggest-and-confirm flow used by the batch
 -- review -- so a one-off gets identical treatment, including the requirement
 -- that you confirm before anything is written.
-function Shelfmark:suggestMatchForFile(file)
+function Bookbridge:suggestMatchForFile(file)
     local Trapper = require("ui/trapper")
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
@@ -5735,7 +5790,7 @@ end
 -- Deliberately separate from the suggestion step: nothing in the AI path
 -- writes anything until this is called, and this is only ever called from a
 -- confirmation callback.
-function Shelfmark:applyConfirmedMatch(path, uuid, title)
+function Bookbridge:applyConfirmedMatch(path, uuid, title)
     local Trapper = require("ui/trapper")
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
@@ -5797,7 +5852,7 @@ end
 -- shown with the model's own reason and confidence so the decision is yours
 -- on visible evidence, not on trust -- and "No" simply moves on, leaving the
 -- book exactly as the sync left it.
-function Shelfmark:reviewUnmatched(list, index)
+function Bookbridge:reviewUnmatched(list, index)
     if type(list) ~= "table" or index > #list then
         UIManager:show(InfoMessage:new{ text = _("Review finished."), timeout = 2 })
         return
@@ -5876,7 +5931,7 @@ end
 -- request per *other* tracked book too. Hooked up as a per-file long-press
 -- button in registerFileDialogButtons below, so "refresh this book" is
 -- reachable without opening the sync menu at all.
-function Shelfmark:refreshBookMetadata(file)
+function Bookbridge:refreshBookMetadata(file)
     local Trapper = require("ui/trapper")
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
@@ -5916,7 +5971,7 @@ end
 -- Two-field claim of a wizard-staged config (address + code). The counterpart
 -- to the setup wizard's pairing screen: it fetches /claim/<code> and writes
 -- whatever settings the server put there, closing the loop the wizard opens.
-function Shelfmark:importFromServer()
+function Bookbridge:importFromServer()
     local MultiInputDialog = require("ui/widget/multiinputdialog")
     local prefill = self.server_url and self.server_url:match("^(https?://[^:/]+)") or ""
     local dialog
@@ -5949,7 +6004,7 @@ function Shelfmark:importFromServer()
     dialog:onShowKeyboard()
 end
 
-function Shelfmark:applyServerClaim(addr, code)
+function Bookbridge:applyServerClaim(addr, code)
     if not addr or addr:gsub("%s", "") == "" or not code or code:gsub("%s", "") == "" then
         UIManager:show(InfoMessage:new{ text = _("Enter both the address and the code.") })
         return
@@ -5984,7 +6039,7 @@ end
 
 -- One screen: each configured service, whether it answers, and what it
 -- enables. Read-only, run only when opened -- never on a timer (battery).
-function Shelfmark:showConnectionStatus()
+function Bookbridge:showConnectionStatus()
     local socks5_proxy = self.socks5_proxy
     local services = {}
     local function add(url, name, enables)
@@ -6020,7 +6075,7 @@ function Shelfmark:showConnectionStatus()
     })
 end
 
-function Shelfmark:checkForUpdate()
+function Bookbridge:checkForUpdate()
     local Trapper = require("ui/trapper")
     local update_url, socks5_proxy = self.update_url, self.socks5_proxy
     local completed, info, code, err = Trapper:dismissableRunInSubprocess(function()
@@ -6106,7 +6161,7 @@ function Shelfmark:checkForUpdate()
     })
 end
 
-function Shelfmark:applyUpdate(target)
+function Bookbridge:applyUpdate(target)
     local Trapper = require("ui/trapper")
     local socks5_proxy = self.socks5_proxy
     local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
@@ -6136,7 +6191,7 @@ end
 -- Shared by showSetupQrCode/importSettingsFromText -- both need the
 -- relay URL first and do the same "ask once, save it, then continue"
 -- dance if it isn't set yet.
-function Shelfmark:promptPairingRelayUrl(on_success)
+function Bookbridge:promptPairingRelayUrl(on_success)
     local InputDialog = require("ui/widget/inputdialog")
     local dialog
     dialog = InputDialog:new{
@@ -6171,7 +6226,7 @@ function Shelfmark:promptPairingRelayUrl(on_success)
     dialog:onShowKeyboard()
 end
 
-function Shelfmark:showSetupQrCode()
+function Bookbridge:showSetupQrCode()
     if not self.pairing_relay_url or self.pairing_relay_url == "" then
         self:promptPairingRelayUrl(function() self:showSetupQrCode() end)
         return
@@ -6192,7 +6247,7 @@ end
 -- is local/instant and stays on the main thread; only the actual upload
 -- to the pairing relay forks a subprocess, same division as every other
 -- network entry point in this file.
-function Shelfmark:generateAndShowPairingQr()
+function Bookbridge:generateAndShowPairingQr()
     local plaintext = JSON.encode({
         server_url = self.server_url,
         username = self.username,
@@ -6245,7 +6300,7 @@ function Shelfmark:generateAndShowPairingQr()
     })
 end
 
-function Shelfmark:importSettingsFromText()
+function Bookbridge:importSettingsFromText()
     if not self.pairing_relay_url or self.pairing_relay_url == "" then
         self:promptPairingRelayUrl(function() self:importSettingsFromText() end)
         return
@@ -6284,7 +6339,7 @@ function Shelfmark:importSettingsFromText()
     dialog:onShowKeyboard()
 end
 
-function Shelfmark:applyPairingText(pairing_text)
+function Bookbridge:applyPairingText(pairing_text)
     local trimmed = pairing_text:gsub("^%s+", ""):gsub("%s+$", "")
     local pair_code, key_b64 = trimmed:match("^shelfmark%-pair:([0-9a-f]+):(%S+)$")
     if not pair_code then
@@ -6350,7 +6405,7 @@ end
 -- delivery_state "complete") and let you download straight from there.
 -- caller_menu, when given, is closed here rather than by the caller before
 -- invoking this -- see the identical note on doSearch's own caller_menu.
-function Shelfmark:downloadFromCwa(title, caller_menu)
+function Bookbridge:downloadFromCwa(title, caller_menu)
     if caller_menu then UIManager:close(caller_menu) end
 
     if not self.cwa_url or self.cwa_url == "" then
@@ -6407,7 +6462,7 @@ end
 
 -- caller_menu, when given, is closed here rather than by the caller before
 -- invoking this -- see the identical note on doSearch's own caller_menu.
-function Shelfmark:saveCwaEntry(entry, caller_menu)
+function Bookbridge:saveCwaEntry(entry, caller_menu)
     if caller_menu then UIManager:close(caller_menu) end
 
     local dir = (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
@@ -6471,9 +6526,9 @@ end
 
 -- ===== menu =====
 
-function Shelfmark:addToMainMenu(menu_items)
-    menu_items.shelfmark = {
-        text = _("Shelfmark"),
+function Bookbridge:addToMainMenu(menu_items)
+    menu_items.bookbridge = {
+        text = _("Bookbridge"),
         sub_item_table = {
             {
                 text = _("Search & request a book"),
@@ -6651,7 +6706,7 @@ function Shelfmark:addToMainMenu(menu_items)
                         text = _("Connections"),
                         sub_item_table = {
                             {
-                                text = _("Server settings"),
+                                text = _("Shelfmark server settings"),
                                 keep_menu_open = true,
                                 callback = function() self:editServerSettings() end,
                             },
@@ -6748,7 +6803,7 @@ end
 -- "Send debug log to server". Must run inside a Trapper:wrap (the menu
 -- callback provides one): the upload runs in a subprocess behind a
 -- dismissable progress box, so a slow link never freezes the UI.
-function Shelfmark:sendDebugLog()
+function Bookbridge:sendDebugLog()
     if not self.pairing_relay_url or self.pairing_relay_url == "" then
         -- The relay URL is only ever asked for on first use of pairing, so a
         -- device that never paired has none. Ask with the same prompt, then
@@ -6804,7 +6859,7 @@ function Shelfmark:sendDebugLog()
     end
 end
 
-function Shelfmark:showDebugLog()
+function Bookbridge:showDebugLog()
     local TextViewer = require("ui/widget/textviewer")
     -- Reads the rotated .1 ahead of the live file (see debugLog's rotation
     -- note) and concatenates: right after a rotation the live file holds
@@ -6866,7 +6921,7 @@ end
 
 -- ===== search + request flow =====
 
-function Shelfmark:startSearch()
+function Bookbridge:startSearch()
     -- Two fields rather than one free-text box: Hardcover (the configured
     -- metadata provider) exposes a dedicated "author" search field,
     -- separate from its generic title/keyword search -- using it actually
@@ -7034,7 +7089,7 @@ end
 -- be here was removed for the same reason: apiRequest already shows its own
 -- "Talking to Shelfmark..." dialog for this exact wait, so it was a second,
 -- redundant refresh announcing the same thing.
-function Shelfmark:doSearch(params, existing_books, caller_menu)
+function Bookbridge:doSearch(params, existing_books, caller_menu)
     if caller_menu then UIManager:close(caller_menu) end
 
     local qs = { "limit=" .. tostring(params.limit or 100), "sort=popularity", "page=" .. tostring(params.page or 1) }
@@ -7403,7 +7458,7 @@ end
 -- invoking this -- see the identical note on doSearch's own caller_menu.
 -- Only needed on this, the entry point: annasSearch retries below already
 -- run after caller_menu has been closed on the very first call.
-function Shelfmark:browseReleases(book, manual_query, caller_menu)
+function Bookbridge:browseReleases(book, manual_query, caller_menu)
     if caller_menu then UIManager:close(caller_menu) end
 
     -- Anna's Archive as the primary source, Prowlarr/Shelfmark's own
@@ -7469,7 +7524,7 @@ function Shelfmark:browseReleases(book, manual_query, caller_menu)
     self:browseReleasesContinue(book, manual_query, aa_results)
 end
 
-function Shelfmark:browseReleasesContinue(book, manual_query, aa_results)
+function Bookbridge:browseReleasesContinue(book, manual_query, aa_results)
     local releases
     if aa_results and #aa_results > 0 then
         releases = {}
@@ -7837,7 +7892,7 @@ end
 -- Long-press-on-cover entry point (see registerFileDialogButtons below) --
 -- the title is already known from the file itself, so this skips straight
 -- to search+confirm with no typing at all.
-function Shelfmark:promptHardcoverLogBookForFile(title, author, status_id, status_label)
+function Bookbridge:promptHardcoverLogBookForFile(title, author, status_id, status_label)
     if not self.hardcover_token or self.hardcover_token == "" then
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
@@ -7845,7 +7900,7 @@ function Shelfmark:promptHardcoverLogBookForFile(title, author, status_id, statu
     confirmAndLogBookOnHardcover(self, title, author, status_id, status_label)
 end
 
-function Shelfmark:promptHardcoverFollowAuthor()
+function Bookbridge:promptHardcoverFollowAuthor()
     if not self.hardcover_token or self.hardcover_token == "" then
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
@@ -7856,7 +7911,7 @@ function Shelfmark:promptHardcoverFollowAuthor()
 end
 
 -- Long-press-on-cover entry point -- see promptHardcoverLogBookForFile above.
-function Shelfmark:promptHardcoverFollowAuthorForFile(author_name)
+function Bookbridge:promptHardcoverFollowAuthorForFile(author_name)
     if not self.hardcover_token or self.hardcover_token == "" then
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
@@ -7870,7 +7925,7 @@ end
 -- hardcover_token from Settings above, which is a separate, unrelated
 -- credential used only for writing (marking books read, following authors).
 -- Nothing to configure here beyond following lists on hardcover.app itself.
-function Shelfmark:browseHardcoverLists()
+function Bookbridge:browseHardcoverLists()
     local resp, code, err = self:apiRequest("GET", "/api/metadata/field-options?provider=hardcover&field=hardcover_list")
     if err then
         UIManager:show(InfoMessage:new{ text = err })
@@ -7927,7 +7982,7 @@ local HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE = 25
 -- above doHardcoverListFollowedAuthors) -- no local list to keep in sync,
 -- so a follow made here, on hardcover.app's own website, or via the
 -- long-press "Follow Author" action all show up the same way.
-function Shelfmark:browseFollowedAuthors()
+function Bookbridge:browseFollowedAuthors()
     if not self.hardcover_token or self.hardcover_token == "" then
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
@@ -7978,7 +8033,7 @@ end
 -- describeBook/describeMetrics already expect.
 -- caller_menu, when given, is closed here rather than by the caller before
 -- invoking this -- see the identical note on doSearch's own caller_menu.
-function Shelfmark:browseAuthorBibliography(author_id, author_name, offset, existing_books, caller_menu)
+function Bookbridge:browseAuthorBibliography(author_id, author_name, offset, existing_books, caller_menu)
     if caller_menu then UIManager:close(caller_menu) end
 
     local new_books, total, resolved_name, err = self:hardcoverAuthorBibliography(
@@ -8051,7 +8106,7 @@ end
 -- underneath (see onMenuSelect). Cancelling therefore just reveals the list
 -- again, and a submitted query hands it to browseReleases, which closes it
 -- itself -- the same caller_menu contract used throughout this file.
-function Shelfmark:promptCustomReleaseQuery(book, prefill, caller_menu)
+function Bookbridge:promptCustomReleaseQuery(book, prefill, caller_menu)
     local InputDialog = require("ui/widget/inputdialog")
     local default_query = prefill or defaultReleaseQuery(book)
 
@@ -8112,7 +8167,7 @@ end
 -- the same dialog automatically (bounded, so this can't turn into an
 -- endless fight with whatever keeps closing it), and tells the user plainly
 -- if it still loses the race after that.
-function Shelfmark:showResilientConfirmBox(opts)
+function Bookbridge:showResilientConfirmBox(opts)
     local ConfirmBox = require("ui/widget/confirmbox")
     local dismissed = false
     local retries = 0
@@ -8182,7 +8237,7 @@ end
 -- opts.buttons is a list of { text = ..., callback = ... }; each callback is
 -- wrapped to mark the dialog dismissed and close it before running, so a
 -- button never has to remember to do either.
-function Shelfmark:showResilientTextViewer(opts)
+function Bookbridge:showResilientTextViewer(opts)
     local TextViewer = require("ui/widget/textviewer")
     local dismissed = false
     local retries = 0
@@ -8248,7 +8303,7 @@ end
 -- means "Sync library with CWA" picks it up naturally on its next run,
 -- same as any other externally-acquired book (Z-Library, the standalone
 -- plugin, etc).
-function Shelfmark:downloadFromAnnasArchive(release)
+function Bookbridge:downloadFromAnnasArchive(release)
     local dl_url, _code, err = self:annasFetchDownloadUrl(release.md5)
     if err then
         UIManager:show(InfoMessage:new{ text = err })
@@ -8373,7 +8428,7 @@ end
 -- already-fetched covers intact, because nothing re-runs the menu's item
 -- builder. It is closed only on the paths that actually commit (download or
 -- request), which is what preserves the previous end state.
-function Shelfmark:confirmReleaseRequest(book, release, caller_menu)
+function Bookbridge:confirmReleaseRequest(book, release, caller_menu)
     local is_annas = release.source == "annasarchive"
     local buttons = {}
     if caller_menu then
@@ -8404,7 +8459,7 @@ function Shelfmark:confirmReleaseRequest(book, release, caller_menu)
     }
 end
 
-function Shelfmark:confirmBookLevelRequest(book)
+function Bookbridge:confirmBookLevelRequest(book)
     self:showResilientConfirmBox{
         text = describeBook(book) .. "\n\n" .. _("Submit a plain request for this book (no specific release found)?"),
         ok_text = _("Request"),
@@ -8417,7 +8472,7 @@ end
 
 -- release is optional: nil submits a book-level request (Shelfmark finds a
 -- release later), given submits a release-level request (this exact file).
-function Shelfmark:submitRequest(book, release)
+function Bookbridge:submitRequest(book, release)
     local body = {
         book_data = book,
         context = { content_type = "ebook" },
@@ -8514,7 +8569,7 @@ end
 -- onNetworkConnected-style reconnection delay elsewhere in this session's
 -- work), so surfacing an error the user didn't ask for would be worse than
 -- just quietly retrying next time something triggers a check.
-function Shelfmark:checkPendingRequestNotifications()
+function Bookbridge:checkPendingRequestNotifications()
     local pending = loadPendingNotifyList()
     if next(pending) == nil then return end
 
@@ -8562,7 +8617,7 @@ end
 -- Reads the just-closed (or suspending) document's progress into the pending
 -- file. Guarded so it is a no-op unless progress sync is on, a token is set,
 -- and we are actually in the reader with a document.
-function Shelfmark:captureReadingProgress()
+function Bookbridge:captureReadingProgress()
     if not self.hardcover_progress_sync then debugLog("[hc] capture: progress sync off"); return end
     if not self.hardcover_token or self.hardcover_token == "" then debugLog("[hc] capture: no token"); return end
     local ui = self.ui
@@ -8596,7 +8651,7 @@ function Shelfmark:captureReadingProgress()
     debugLog(string.format("[hc] captured %d%% for %s", math.floor((percent or 0) * 100 + 0.5), tostring(props.title)))
 end
 
-function Shelfmark:clearHardcoverPending(md5)
+function Bookbridge:clearHardcoverPending(md5)
     local pending = loadHardcoverPending()
     if pending[md5] ~= nil then pending[md5] = nil; saveHardcoverPending(pending) end
 end
@@ -8604,7 +8659,7 @@ end
 -- Pushes every pending record it can: known books silently, and the FIRST
 -- unmatched book through a one-time confirm (the rest wait for the next pass).
 -- Must run inside a Trapper:wrap (both callers provide one).
-function Shelfmark:processHardcoverPending()
+function Bookbridge:processHardcoverPending()
     if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
     local pending = loadHardcoverPending()
     if next(pending) == nil then
@@ -8623,7 +8678,7 @@ function Shelfmark:processHardcoverPending()
             -- Dropping it silently is how "nothing happens, no dialog, no log"
             -- looked on-device: say which book, and how to undo it.
             debugLog(string.format(
-                "[hc] skip: %s is marked never-sync; dropping. Undo with Shelfmark > Forget Hardcover book choices.",
+                "[hc] skip: %s is marked never-sync; dropping. Undo with Bookbridge > Hardcover > Forget Hardcover book choices.",
                 tostring(entry.title or rec.title)))
             pending[md5] = nil
         elseif entry and entry.decision == "review" then
@@ -8691,7 +8746,7 @@ end
 -- and +3 s after waiting for the panel's own refresh to finish: a widget
 -- painted on top and refreshed alone did not reach either device's panel,
 -- while a repaint from the home screen up always did.
-function Shelfmark:showAfterCloseNotice(text)
+function Bookbridge:showAfterCloseNotice(text)
     local ok_dev, Device = pcall(require, "device")
     -- Android: the OS's own toast. It is drawn by Android's window manager on
     -- top of every app surface, so it is on screen the moment it is posted --
@@ -8761,7 +8816,7 @@ end
 -- parked as "review" -- never synced, never prompted -- keeping its progress
 -- so it pushes once picked in Hardcover > Review matches. Runs inside a
 -- Trapper:wrap (both callers provide one).
-function Shelfmark:resolveHardcoverMatch(md5, rec)
+function Bookbridge:resolveHardcoverMatch(md5, rec)
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
     local book_id, ft, fa, ranked, confident, edition
@@ -8811,7 +8866,7 @@ function Shelfmark:resolveHardcoverMatch(md5, rec)
 end
 
 -- Hardcover > Review matches: the books parked as "review", one button each.
-function Shelfmark:reviewHardcoverMatches()
+function Bookbridge:reviewHardcoverMatches()
     local ButtonDialog = require("ui/widget/buttondialog")
     local map = loadHardcoverMap()
     local items = {}
@@ -8871,7 +8926,7 @@ end
 -- first), then "None of these" (recorded as never-sync) and "Not now"
 -- (stays in the review list). Choosing a book records it as the match and,
 -- if progress is waiting, pushes it at once.
-function Shelfmark:pickHardcoverCandidate(md5, rec, candidates, token)
+function Bookbridge:pickHardcoverCandidate(md5, rec, candidates, token)
     local ButtonDialog = require("ui/widget/buttondialog")
     local map = loadHardcoverMap()
     local dialog
@@ -8924,7 +8979,7 @@ end
 --
 -- In-memory on purpose: a book is always opened before it is closed in the
 -- same session, and nothing here is worth persisting or going stale.
-function Shelfmark:prefetchHardcoverMatch()
+function Bookbridge:prefetchHardcoverMatch()
     if not self.hardcover_progress_sync then return end
     if not self.hardcover_token or self.hardcover_token == "" then return end
     local ui = self.ui
@@ -8975,7 +9030,7 @@ end
 -- record in place to retry. What was missing was a trigger -- until now
 -- pending work only moved on the next close or resume, so progress read on a
 -- plane sat there until you happened to close another book.
-function Shelfmark:onNetworkConnected()
+function Bookbridge:onNetworkConnected()
     if not self.hardcover_progress_sync then return end
     if not self.hardcover_token or self.hardcover_token == "" then return end
     if next(loadHardcoverPending()) == nil then return end
@@ -8989,7 +9044,7 @@ end
 
 -- Book opened: warm the Hardcover match in the background. Delayed so it never
 -- competes with rendering the first page.
-function Shelfmark:onReaderReady()
+function Bookbridge:onReaderReady()
     -- Bookshelf loads its parking module lazily; by reader-ready it has
     -- (the shelf opened this book), and if not there is nothing to park.
     if self:hookBookshelfPark() then debugLog("[hc] bookshelf parking hooked") end
@@ -9016,7 +9071,7 @@ local function bookshelfPark()
     return type(Park) == "table" and Park or nil
 end
 
-function Shelfmark:hookBookshelfPark()
+function Bookbridge:hookBookshelfPark()
     local Park = bookshelfPark()
     if not Park or type(Park.park) ~= "function" or Park._shelfmark_hooked then return Park ~= nil end
     local orig = Park.park
@@ -9033,7 +9088,7 @@ function Shelfmark:hookBookshelfPark()
     return true
 end
 
-function Shelfmark:onCloseConfigMenu()
+function Bookbridge:onCloseConfigMenu()
     UIManager:nextTick(function()
         -- The module may not have existed at reader-ready (Bookshelf loads it
         -- on first use, and on the desktop that first use WAS this park); hook
@@ -9044,7 +9099,7 @@ function Shelfmark:onCloseConfigMenu()
     end)
 end
 
-function Shelfmark:onBookshelfParked()
+function Bookbridge:onBookshelfParked()
     local now = os.time()
     if self._hc_park_at and now - self._hc_park_at < 5 then return end
     self._hc_park_at = now
@@ -9055,7 +9110,7 @@ end
 -- Fires in the reader when a document closes (and, via onBookshelfParked,
 -- when Bookshelf parks it): capture now, sync a moment later off the
 -- teardown path.
-function Shelfmark:onCloseDocument()
+function Bookbridge:onCloseDocument()
     self:captureReadingProgress()
     if self.hardcover_progress_sync and self.hardcover_token and self.hardcover_token ~= "" then
         -- A match prefetched at open costs no network: decide and push on the
@@ -9083,11 +9138,11 @@ end
 
 -- Device sleeping: capture now, push on the next resume (a scheduled push
 -- wouldn't survive the sleep). No-op in FileManager (no document).
-function Shelfmark:onSuspend()
+function Bookbridge:onSuspend()
     self:captureReadingProgress()
 end
 
-function Shelfmark:onResume()
+function Bookbridge:onResume()
     -- Push any progress captured on suspend/close. No throttle needed -- at
     -- most one record per book, and processHardcoverPending is a cheap no-op
     -- when nothing is pending.
@@ -9112,7 +9167,7 @@ function Shelfmark:onResume()
     end)
 end
 
-function Shelfmark:showMyRequests()
+function Bookbridge:showMyRequests()
     local resp, code, err = self:apiRequest("GET", "/api/requests")
     if err then
         UIManager:show(InfoMessage:new{ text = err })
@@ -9210,4 +9265,4 @@ function Shelfmark:showMyRequests()
     UIManager:show(requests_menu)
 end
 
-return Shelfmark
+return Bookbridge

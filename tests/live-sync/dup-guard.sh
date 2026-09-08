@@ -23,7 +23,7 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 [ -x "${KDIR:-/nonexistent}/luajit" ] || { echo "SKIP  no local KOReader (set KOREADER_DIR)"; exit 3; }
 [ -f "$STACK/docker-compose.yml" ] || { echo "SKIP  no stack compose at $STACK"; exit 3; }
 command -v docker >/dev/null || { echo "SKIP  no docker"; exit 3; }
-[ -e "$KDIR/plugins/shelfmark.koplugin" ] || { echo "FAIL  $KDIR/plugins/shelfmark.koplugin missing"; exit 1; }
+[ -e "$KDIR/plugins/bookbridge.koplugin" ] || { echo "FAIL  $KDIR/plugins/bookbridge.koplugin missing"; exit 1; }
 
 P=shelfmark-dupguard; CWA_PORT=19093; INSPECT=8181; I="http://127.0.0.1:$INSPECT/koreader"
 CFG=~/.config/koreader; SET=$CFG/settings
@@ -79,12 +79,12 @@ ss -ltn "( sport = :$INSPECT )" | tail -n +2 | grep -q . && { say FAIL ":$INSPEC
 (cd "$KDIR" && setsid -f ./koreader.sh > "$W/koreader.log" 2>&1)
 for i in $(seq 1 30); do curl -s -o /dev/null --max-time 2 "$I/" && break; sleep 1; done
 curl -s -o /dev/null --max-time 2 "$I/" || { say FAIL "inspector never answered"; exit 1; }
-got=$(curl -s --max-time 5 "$I/ui/shelfmark/download_dir" | tr -d '"')
+got=$(curl -s --max-time 5 "$I/ui/bookbridge/download_dir" | tr -d '"')
 [ "$got" = "$BOOKS" ] && say PASS "driving the KOReader this run launched" || { say FAIL "wrong KOReader (download_dir=$got)"; exit 1; }
 curl -s --max-time 8 "$I/ui/menu/onShowMenu/" >/dev/null; sleep 1
-idx=""; for i in $(seq 1 24); do [ "$(curl -s --max-time 5 "$I/ui/menu/menu_items/shelfmark/sub_item_table/$i/text")" = "Sync library with CWA" ] && { idx=$i; break; }; done
+idx=""; for i in $(seq 1 24); do [ "$(curl -s --max-time 5 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$i/text")" = "Sync library with CWA" ] && { idx=$i; break; }; done
 [ -n "$idx" ] || { say FAIL "sync menu item not found"; exit 1; }
-fire_sync() { curl -s --max-time 8 "$I/ui/menu/menu_items/shelfmark/sub_item_table/$idx/callback/" >/dev/null; }
+fire_sync() { curl -s --max-time 8 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$idx/callback/" >/dev/null; }
 
 # --- sync #1: uploads the book ---
 fire_sync

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regenerates shelfmark.koplugin/manifest.json -- the file the plugin's
+# Regenerates bookbridge.koplugin/manifest.json -- the file the plugin's
 # "Check for updates" reads to decide whether the served build differs from
 # the installed one, and to verify each download.
 #
@@ -15,7 +15,7 @@
 # not a code change.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DIR=shelfmark.koplugin
+DIR=bookbridge.koplugin
 FILES="main.lua _meta.lua"
 
 VERSION=$(grep -oE 'local PLUGIN_VERSION = "[^"]+"' "$DIR/main.lua" | head -1 | cut -d'"' -f2)

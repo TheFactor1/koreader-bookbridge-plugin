@@ -29,7 +29,7 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 # Pull the live function out of main.lua so the test can never drift from it.
 awk '/^-- HARDCOVER MATCH BLOCK/{f=1} f{print} /^-- END HARDCOVER MATCH BLOCK/{exit}' \
-    "$REPO/shelfmark.koplugin/main.lua" > "$W/fn.lua"
+    "$REPO/bookbridge.koplugin/main.lua" > "$W/fn.lua"
 [ -s "$W/fn.lua" ] || { echo "FAIL  could not extract doHardcoverFindBook from main.lua"; exit 1; }
 grep -q "^local function doHardcoverFindBook" "$W/fn.lua" || { echo "FAIL  extracted block is not doHardcoverFindBook"; exit 1; }
 

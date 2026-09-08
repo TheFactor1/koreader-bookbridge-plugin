@@ -12,7 +12,7 @@
 #   bash tests/run-matcher-tests.sh          # exit 0 = all cases pass
 set -euo pipefail
 cd "$(dirname "$0")/.."
-MAIN=shelfmark.koplugin/main.lua
+MAIN=bookbridge.koplugin/main.lua
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 

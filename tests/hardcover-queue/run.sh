@@ -18,15 +18,15 @@ HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | sort -V | tail -1)}
 [ -x "${KDIR:-/nonexistent}/luajit" ] || { echo "SKIP  no local KOReader (set KOREADER_DIR)"; exit 3; }
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
-M="$REPO/shelfmark.koplugin/main.lua"
-awk '/^function Shelfmark:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit}' "$M" >  "$W/fns.lua"
-awk '/^function Shelfmark:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
-awk '/^function Shelfmark:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
-awk '/^function Shelfmark:captureReadingProgress/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+M="$REPO/bookbridge.koplugin/main.lua"
+awk '/^function Bookbridge:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit}' "$M" >  "$W/fns.lua"
+awk '/^function Bookbridge:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:captureReadingProgress/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^local function bookshelfPark/{f=1}                 f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
-awk '/^function Shelfmark:hookBookshelfPark/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
-awk '/^function Shelfmark:onCloseConfigMenu/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
-awk '/^function Shelfmark:onBookshelfParked/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:hookBookshelfPark/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:onCloseConfigMenu/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:onBookshelfParked/{f=1}         f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -q "processHardcoverPending" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
 grep -q "onNetworkConnected"      "$W/fns.lua" || { echo "FAIL  onNetworkConnected not extracted"; exit 1; }
 
@@ -54,7 +54,7 @@ package.loaded["ui/trapper"] = {
 }
 local PUSHES = 0
 doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
-Shelfmark = {}
+Bookbridge = {}
 assert(load(io.open(SRC):read("*a")))()
 
 local pass, fail = 0, 0
@@ -66,7 +66,7 @@ local s1 = { hardcover_progress_sync=true, hardcover_token="t",
              _hc_prefetch_inflight = { md5a = true },
              resolveHardcoverMatch = function() confirms = confirms + 1 end }
 PENDING = { md5a = { title="Red Rising", percent=0.5 } }; MAP = {}; scheduled = {}
-Shelfmark.processHardcoverPending(s1)
+Bookbridge.processHardcoverPending(s1)
 ck(confirms == 0, "open-time lookup in flight -> does NOT start a competing search")
 ck(#scheduled == 1, "instead it schedules a retry")
 
@@ -75,13 +75,13 @@ ck(scheduled[1] and scheduled[1].delay == 1, "retry is one second out")
 -- ...and gives up eventually rather than waiting forever
 s1._hc_wait_tries = 20
 scheduled = {}
-Shelfmark.processHardcoverPending(s1)
+Bookbridge.processHardcoverPending(s1)
 ck(confirms == 1, "after 20 tries it stops waiting and searches")
 -- a book parked for review is neither pushed nor resolved again
 local resolves = 0
 local sr = { hardcover_progress_sync=true, hardcover_token="t", resolveHardcoverMatch=function() resolves = resolves + 1 end }
 PENDING = { r = { title="R", percent=0.3 } }; MAP = { r = { decision="review", title="R" } }; PUSHES = 0
-Shelfmark.processHardcoverPending(sr)
+Bookbridge.processHardcoverPending(sr)
 ck(resolves == 0 and PUSHES == 0 and PENDING.r ~= nil, "review entry: not pushed, not re-resolved, progress kept")
 
 -- 2. no lookup in flight -> confirm immediately
@@ -89,18 +89,18 @@ local confirms2 = 0
 local s2 = { hardcover_progress_sync=true, hardcover_token="t",
              resolveHardcoverMatch = function() confirms2 = confirms2 + 1 end }
 PENDING = { m = { title="X", percent=0.2 } }; MAP = {}; scheduled = {}
-Shelfmark.processHardcoverPending(s2)
+Bookbridge.processHardcoverPending(s2)
 ck(confirms2 == 1, "nothing in flight -> confirms straight away")
 
 -- 3. a book already mapped pushes silently, no dialog
 local confirms3 = 0
 local s3 = { hardcover_progress_sync=true, hardcover_token="t",
              resolveHardcoverMatch = function() confirms3 = confirms3 + 1 end,
-             showAfterCloseNotice = Shelfmark.showAfterCloseNotice }
+             showAfterCloseNotice = Bookbridge.showAfterCloseNotice }
 PENDING = { m = { title="X", percent=0.2 } }
 MAP = { m = { decision="sync", book_id=42, title="X" } }
 PUSHES = 0
-Shelfmark.processHardcoverPending(s3)
+Bookbridge.processHardcoverPending(s3)
 ck(PUSHES == 1 and confirms3 == 0, "already-matched book pushes without a dialog")
 ck(#shown == 1 and shown[1].timeout and shown[1].text:find("page 8 of 382", 1, true), "...and shows the page it recorded in a brief note")
 ck(next(PENDING) == nil, "a successful push clears the queue entry")
@@ -108,28 +108,28 @@ ck(MAP.m.last_percent == 0.2, "...and remembers the position it pushed")
 
 -- same position again (suspend/resume re-capture) -> no push, entry cleared
 PENDING = { m = { title="X", percent=0.2 } }; PUSHES = 0
-Shelfmark.processHardcoverPending(s3)
+Bookbridge.processHardcoverPending(s3)
 ck(PUSHES == 0 and next(PENDING) == nil, "unchanged position -> no push, queue entry cleared")
 -- a new position pushes again
 PENDING = { m = { title="X", percent=0.25 } }; PUSHES = 0
-Shelfmark.processHardcoverPending(s3)
+Bookbridge.processHardcoverPending(s3)
 ck(PUSHES == 1 and MAP.m.last_percent == 0.25, "changed position -> pushed, position updated")
 
 -- 4. Wi-Fi back -> flush, but only when there is something queued
 local s4 = { hardcover_progress_sync=true, hardcover_token="t" }
 PENDING = {}; scheduled = {}
-Shelfmark.onNetworkConnected(s4)
+Bookbridge.onNetworkConnected(s4)
 ck(#scheduled == 0, "network back with an empty queue does nothing")
 PENDING = { m = { title="X", percent=0.2 } }; scheduled = {}
-Shelfmark.onNetworkConnected(s4)
+Bookbridge.onNetworkConnected(s4)
 ck(#scheduled == 1, "network back with queued progress schedules a flush")
 ck(scheduled[1] and scheduled[1].delay == 2, "flush waits for the connection to settle")
 
 -- and stays quiet when the feature is off
 PENDING = { m = { title="X", percent=0.2 } }; scheduled = {}
-Shelfmark.onNetworkConnected({ hardcover_progress_sync=false, hardcover_token="t" })
+Bookbridge.onNetworkConnected({ hardcover_progress_sync=false, hardcover_token="t" })
 ck(#scheduled == 0, "progress sync off -> network events ignored")
-Shelfmark.onNetworkConnected({ hardcover_progress_sync=true, hardcover_token="" })
+Bookbridge.onNetworkConnected({ hardcover_progress_sync=true, hardcover_token="" })
 ck(#scheduled == 0, "no token -> network events ignored")
 
 -- capture records what the footer shows, not the raw page ratio
@@ -142,12 +142,12 @@ local ui = {
     rolling = { getLastPercent = function() return 0.40 end },
     view = { footer = { percent_finished = 0.42 } },
 }
-Shelfmark.captureReadingProgress({ hardcover_progress_sync = true, hardcover_token = "t", ui = ui })
+Bookbridge.captureReadingProgress({ hardcover_progress_sync = true, hardcover_token = "t", ui = ui })
 ck(PENDING.cap1 and math.abs(PENDING.cap1.percent - 0.42) < 1e-9, "capture records the footer's 42%, not the raw 40%")
 local noted = false; for _, m in ipairs(LOGS) do if m:find("footer shows 42.0%", 1, true) then noted = true end end
 ck(noted, "...and logs that the two disagreed")
 ui.view = nil; PENDING = {}
-Shelfmark.captureReadingProgress({ hardcover_progress_sync = true, hardcover_token = "t", ui = ui })
+Bookbridge.captureReadingProgress({ hardcover_progress_sync = true, hardcover_token = "t", ui = ui })
 ck(PENDING.cap1 and math.abs(PENDING.cap1.percent - 0.40) < 1e-9, "no footer value -> falls back to the raw ratio")
 
 -- Bookshelf hot parking: the park is treated as the close, once
@@ -156,8 +156,8 @@ do
     local old_next = UIManager.nextTick
     UIManager.nextTick = function(_s, f) ticks[#ticks+1] = f end
     local sm = { onCloseDocument = function() closes = closes + 1 end,
-        hookBookshelfPark = Shelfmark.hookBookshelfPark, onCloseConfigMenu = Shelfmark.onCloseConfigMenu,
-        onBookshelfParked = Shelfmark.onBookshelfParked }
+        hookBookshelfPark = Bookbridge.hookBookshelfPark, onCloseConfigMenu = Bookbridge.onCloseConfigMenu,
+        onBookshelfParked = Bookbridge.onBookshelfParked }
     package.loaded["apps/reader/readerui"] = { instance = { shelfmark = sm } }
     ck(sm:hookBookshelfPark() == false, "no Bookshelf park module loaded -> nothing to hook")
     local parked = false

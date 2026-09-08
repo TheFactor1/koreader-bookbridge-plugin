@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static audits for the Trapper coroutine rule in shelfmark.koplugin/main.lua.
+"""Static audits for the Trapper coroutine rule in bookbridge.koplugin/main.lua.
 
 Two checks, both of which caught real bugs during the 2026-09-06 pass:
 
@@ -30,7 +30,7 @@ import re
 import sys
 from pathlib import Path
 
-MAIN = Path(__file__).resolve().parent.parent / "shelfmark.koplugin" / "main.lua"
+MAIN = Path(__file__).resolve().parent.parent / "bookbridge.koplugin" / "main.lua"
 WINDOW = 18
 
 FORK_MARKERS = re.compile(
@@ -48,7 +48,7 @@ def strip_comment(line: str) -> str:
 def forking_methods(lines):
     fork = set()
     for i, line in enumerate(lines):
-        m = re.match(r"function Shelfmark:(\w+)\(", line)
+        m = re.match(r"function Bookbridge:(\w+)\(", line)
         if not m:
             continue
         body = []

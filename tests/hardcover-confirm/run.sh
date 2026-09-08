@@ -4,7 +4,7 @@
 # It used to run the book search itself, so it could not appear until a round
 # trip finished -- during reader teardown, with the radio possibly still
 # waking. It now uses the match prefetched when the book was OPENED
-# (Shelfmark:prefetchHardcoverMatch, via onReaderReady), so the dialog goes up
+# (Bookbridge:prefetchHardcoverMatch, via onReaderReady), so the dialog goes up
 # immediately.
 #
 # The stub here counts calls to doHardcoverFindBook, so "instant" is asserted
@@ -23,12 +23,12 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 # Extracted by name so it cannot drift from the real implementation.
-awk '/^function Shelfmark:resolveHardcoverMatch/{f=1} f{print} f&&/^end$/{exit}' \
-    "$REPO/shelfmark.koplugin/main.lua" > "$W/confirm.lua"
-awk '/^function Shelfmark:pickHardcoverCandidate/{f=1} f{print} f&&/^end$/{exit}' \
-    "$REPO/shelfmark.koplugin/main.lua" >> "$W/confirm.lua"
-awk '/^function Shelfmark:showAfterCloseNotice/{f=1} f{print} f&&/^end$/{exit}' \
-    "$REPO/shelfmark.koplugin/main.lua" >> "$W/confirm.lua"
+awk '/^function Bookbridge:resolveHardcoverMatch/{f=1} f{print} f&&/^end$/{exit}' \
+    "$REPO/bookbridge.koplugin/main.lua" > "$W/confirm.lua"
+awk '/^function Bookbridge:pickHardcoverCandidate/{f=1} f{print} f&&/^end$/{exit}' \
+    "$REPO/bookbridge.koplugin/main.lua" >> "$W/confirm.lua"
+awk '/^function Bookbridge:showAfterCloseNotice/{f=1} f{print} f&&/^end$/{exit}' \
+    "$REPO/bookbridge.koplugin/main.lua" >> "$W/confirm.lua"
 grep -q "resolveHardcoverMatch" "$W/confirm.lua" || { echo "FAIL  could not extract resolveHardcoverMatch"; exit 1; }
 
 cd "$KDIR" || exit 1
@@ -56,7 +56,7 @@ package.loaded["ui/trapper"] = {
 local SEARCHES = 0
 doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return 999, "SEARCHED", "Someone", nil, { {id=999,title="SEARCHED",author="Someone"} }, false end
 doHardcoverPushProgress = function() return true, 8, 382 end
-Shelfmark = {}
+Bookbridge = {}
 assert(load(io.open(SRC):read("*a")))()
 
 local pass, fail = 0, 0
@@ -64,7 +64,7 @@ local function ck(c,m) if c then pass=pass+1; print("PASS  "..m) else fail=fail+
 local CLEARED = {}
 local function inst(extra)
     local t = { hardcover_token="t", clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end,
-                showAfterCloseNotice = Shelfmark.showAfterCloseNotice }
+                showAfterCloseNotice = Bookbridge.showAfterCloseNotice }
     for k,v in pairs(extra or {}) do t[k]=v end
     return t
 end
@@ -72,7 +72,7 @@ end
 -- 1. confident prefetch -> silent sync + push, no UI at all
 shown = {}; MAP = {}; SEARCHES = 0; CLEARED = {}
 local PUSHES = 0; doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
-Shelfmark.resolveHardcoverMatch(inst{ _hc_prefetch = { m = { book_id=427473, title="Red Rising", author="Pierce Brown", ranked={}, confident=true } } },
+Bookbridge.resolveHardcoverMatch(inst{ _hc_prefetch = { m = { book_id=427473, title="Red Rising", author="Pierce Brown", ranked={}, confident=true } } },
     "m", { title="Red Rising", author="Pierce Brown", percent=0.02 })
 ck(#shown == 1 and shown[1].timeout and not shown[1].buttons, "confident match: one auto-dismissing note, no dialog")
 ck(shown[1].text:find("page 8 of 382", 1, true) ~= nil, "the note carries the page numbers")
@@ -83,7 +83,7 @@ ck(SEARCHES == 0, "confident match from prefetch: zero searches")
 -- 2. uncertain prefetch -> review, no UI, no push, progress kept
 shown = {}; MAP = {}; PUSHES = 0; CLEARED = {}
 local ranked = { {id=427798,title="The Hitchhiker's Guide to the Galaxy",author="Douglas Adams"}, {id=205829,title="Omnibus",author="Douglas Adams"} }
-Shelfmark.resolveHardcoverMatch(inst{ _hc_prefetch = { h = { book_id=427798, title="The Hitchhiker's Guide to the Galaxy", author="Douglas Adams", ranked=ranked, confident=false } } },
+Bookbridge.resolveHardcoverMatch(inst{ _hc_prefetch = { h = { book_id=427798, title="The Hitchhiker's Guide to the Galaxy", author="Douglas Adams", ranked=ranked, confident=false } } },
     "h", { title="The Ultimate Hitchhiker's Guide to the Galaxy", author="Douglas Adams", percent=0.07 })
 ck(#shown == 1 and shown[1].timeout and not shown[1].buttons and PUSHES == 0, "uncertain match: one note pointing at Review matches, nothing pushed")
 ck(MAP.h and MAP.h.decision=="review" and #MAP.h.ranked == 2, "uncertain match: parked for review with its candidates")
@@ -91,23 +91,23 @@ ck(#CLEARED == 0, "uncertain match: progress stays queued")
 
 -- 3. no prefetch -> one search, then the same rules
 shown = {}; MAP = {}; SEARCHES = 0
-Shelfmark.resolveHardcoverMatch(inst{}, "c", { title="Whatever", author="A Person", percent=0.5 })
+Bookbridge.resolveHardcoverMatch(inst{}, "c", { title="Whatever", author="A Person", percent=0.5 })
 ck(SEARCHES == 1, "no prefetch -> exactly one search")
 ck(MAP.c and MAP.c.decision=="review", "search stub (not confident) -> review")
 
 -- 4. the review picker: choose -> sync + push; None -> skip; Not now -> nothing
 shown = {}; MAP = { h = { decision="review", title="T" } }; PUSHES = 0; CLEARED = {}
-Shelfmark.pickHardcoverCandidate(inst{}, "h", { title="T", author="A", percent=0.1 }, ranked, "t")
+Bookbridge.pickHardcoverCandidate(inst{}, "h", { title="T", author="A", percent=0.1 }, ranked, "t")
 local pk = shown[1]
 ck(pk and #pk.buttons == 4, "picker: 2 candidates + None of these + Not now")
 pk.buttons[1][1].callback()
 ck(MAP.h and MAP.h.decision=="sync" and MAP.h.book_id==427798 and PUSHES == 1, "picking a candidate records sync and pushes the waiting progress")
 shown = {}; MAP = { h = { decision="review", title="T" } }
-Shelfmark.pickHardcoverCandidate(inst{}, "h", { title="T", author="A" }, ranked, "t")
+Bookbridge.pickHardcoverCandidate(inst{}, "h", { title="T", author="A" }, ranked, "t")
 shown[1].buttons[3][1].callback()
 ck(MAP.h and MAP.h.decision=="skip", "None of these records skip")
 shown = {}; MAP = { h = { decision="review", title="T" } }
-Shelfmark.pickHardcoverCandidate(inst{}, "h", { title="T", author="A" }, ranked, "t")
+Bookbridge.pickHardcoverCandidate(inst{}, "h", { title="T", author="A" }, ranked, "t")
 shown[1].buttons[4][1].callback()
 ck(MAP.h and MAP.h.decision=="review", "Not now leaves it in review")
 
@@ -128,13 +128,13 @@ do
     UIManager.show = function() shown_msgs = shown_msgs + 1 end
     android = { notification = function(t, long) toasts[#toasts+1] = { t = t, long = long } end,
         getScreenBrightness = function() return 48 end, setScreenBrightness = function(v) if v == 48 then nudges = nudges + 1 end end }
-    Shelfmark.showAfterCloseNotice({}, "hi")
+    Bookbridge.showAfterCloseNotice({}, "hi")
     ck(#toasts == 1 and toasts[1].t == "hi" and toasts[1].long == true, "Android: the notice is a long system toast")
     ck(shown_msgs == 0 and #timers == 0 and nudges == 0, "Android toast: no InfoMessage, no timers, no nudge")
     ck(logs[#logs] == "[hc] notice: system toast", "...and it is logged")
     -- Android without a toast (older launcher): the in-app path with the nudge
     android.notification = nil; logs = {}
-    Shelfmark.showAfterCloseNotice({}, "hi")
+    Bookbridge.showAfterCloseNotice({}, "hi")
     ck(shown_msgs == 1 and logs[1]:find("system toast failed"), "no toast -> falls back to the in-app notice, logged")
     table.sort(timers, function(a, b) return a.d < b.d end)
     for _, t in ipairs(timers) do t.f() end
@@ -147,7 +147,7 @@ do
     -- Kindle: no nudge, no explicit post, just the repaints
     timers, nudges, posts, dirty = {}, 0, 0, 0
     package.loaded["device"].isAndroid = function() return false end
-    Shelfmark.showAfterCloseNotice({}, "hi")
+    Bookbridge.showAfterCloseNotice({}, "hi")
     for _, t in ipairs(timers) do t.f() end
     ck(nudges == 0 and posts == 0 and dirty == 2, "Kindle: repaints only (nudges=" .. nudges .. " posts=" .. posts .. " dirty=" .. dirty .. ")")
     UIManager, package.loaded["device"], debugLog, android = old_UI, old_dev, old_log, nil
@@ -158,16 +158,16 @@ do
     local old = doHardcoverFindBook
     doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return nil, nil, nil, "connection refused", nil, false, true end
     shown = {}; CLEARED = {}; local before = SEARCHES
-    Shelfmark.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = {}, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Shelfmark.showAfterCloseNotice }, "off1", { title = "Upgrade", author = "Blake Crouch", percent = 0.1 })
+    Bookbridge.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = {}, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Bookbridge.showAfterCloseNotice }, "off1", { title = "Upgrade", author = "Blake Crouch", percent = 0.1 })
     ck(SEARCHES == before + 1, "unreachable: one lookup attempted")
     ck(MAP.off1 == nil, "unreachable: NO review entry recorded (the bug that parked 'Upgrade' with no candidates)")
     ck(#CLEARED == 0 and #shown == 0, "unreachable: progress stays queued, nothing shown")
     doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return 7, "Upgrade", "Blake Crouch", nil, { {id=7,title="Upgrade",author="Blake Crouch"} }, true end
     before = SEARCHES
-    Shelfmark.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = { off2 = { book_id = nil, ranked = {} } }, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Shelfmark.showAfterCloseNotice }, "off2", { title = "Upgrade", author = "Blake Crouch", percent = 0.1 })
+    Bookbridge.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = { off2 = { book_id = nil, ranked = {} } }, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Bookbridge.showAfterCloseNotice }, "off2", { title = "Upgrade", author = "Blake Crouch", percent = 0.1 })
     ck(SEARCHES == before + 1 and MAP.off2 and MAP.off2.decision == "sync", "stale empty prefetch is not trusted: looked up again and matched")
     doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return nil, nil, nil, "No matching book found on Hardcover.", {}, false, false end
-    Shelfmark.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = {}, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Shelfmark.showAfterCloseNotice }, "miss1", { title = "Zqxv Nonexistent", author = "Nobody", percent = 0.1 })
+    Bookbridge.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = {}, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Bookbridge.showAfterCloseNotice }, "miss1", { title = "Zqxv Nonexistent", author = "Nobody", percent = 0.1 })
     ck(MAP.miss1 and MAP.miss1.decision == "review" and #MAP.miss1.ranked == 0, "genuine miss: parked for review (empty list, re-searched when opened)")
     doHardcoverFindBook = old
 end

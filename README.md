@@ -1,4 +1,15 @@
-# shelfmark.koplugin
+# bookbridge.koplugin
+
+> **Written 100% by an AI.** Every line of code, every test and this document
+> were written by Claude (Anthropic). Matt directed the work, ran every build on
+> his own Kindle, Android phone and desktop KOReader, reported what he saw and
+> decided what to build. No line here was hand-written by a person -- read it
+> before you trust it, and treat it as you would any unaudited code.
+
+*Formerly `shelfmark.koplugin`. Shelfmark is one of the services it connects
+to, not the plugin; the name changed in September 2026. Settings and log files
+keep their `shelfmark*` names, and an existing install moves itself into the
+new folder on its first start after updating.*
 
 A KOReader plugin that ties the device to a self-hosted reading stack:
 [Shelfmark](https://github.com/calibrain/shelfmark) for requesting books,
@@ -7,7 +18,7 @@ for tracking what you read. Runs on Kindle, Android and desktop KOReader.
 
 ## What it does
 
-Adds a **Shelfmark** entry to KOReader's main menu.
+Adds a **Bookbridge** entry to KOReader's main menu.
 
 ### Requesting books
 - **Search & request a book** — searches Shelfmark's metadata providers and
@@ -43,7 +54,7 @@ Adds a **Shelfmark** entry to KOReader's main menu.
 
 ## Reading progress sync (Hardcover)
 
-Turn on **Hardcover → Sync reading progress to Hardcover** with a token set.
+Turn on **Bookbridge → Hardcover → Sync reading progress to Hardcover** with a token set.
 From then on, closing a book does the work — including "closing" it from
 the Bookshelf home screen, which parks the reader rather than closing it.
 
@@ -86,10 +97,10 @@ choices** clears every match so books are decided again.
 
 ## Install
 
-Copy `shelfmark.koplugin/` into your KOReader install's `plugins/` directory
+Copy `bookbridge.koplugin/` into your KOReader install's `plugins/` directory
 and restart KOReader, or point **Settings → Update source** at a server
-hosting this repo's `shelfmark.koplugin/` and use **Check for updates** from
-then on. Configure the servers under **Shelfmark → Settings → Connections**.
+hosting this repo's `bookbridge.koplugin/` and use **Check for updates** from
+then on. Configure the servers under **Bookbridge → Settings → Connections**.
 
 ## Development
 

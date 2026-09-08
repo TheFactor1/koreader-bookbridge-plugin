@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuses to pass if shelfmark.koplugin/manifest.json disagrees with the
+"""Refuses to pass if bookbridge.koplugin/manifest.json disagrees with the
 served files on disk.
 
 The update server serves the git working tree, and the plugin verifies each
@@ -17,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-DIR = Path(__file__).resolve().parent.parent / "shelfmark.koplugin"
+DIR = Path(__file__).resolve().parent.parent / "bookbridge.koplugin"
 
 
 def main() -> int:

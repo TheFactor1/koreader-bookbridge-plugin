@@ -30,7 +30,7 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 [ -x "${KDIR:-/nonexistent}/luajit" ] || { echo "SKIP  no local KOReader (set KOREADER_DIR)"; exit 3; }
 [ -f "$STACK/docker-compose.yml" ] || { echo "SKIP  no stack compose at $STACK (set SHELFMARK_STACK_DIR)"; exit 3; }
 command -v docker >/dev/null || { echo "SKIP  no docker"; exit 3; }
-[ -e "$KDIR/plugins/shelfmark.koplugin" ] || { echo "FAIL  $KDIR/plugins/shelfmark.koplugin missing -- symlink this checkout's shelfmark.koplugin there"; exit 1; }
+[ -e "$KDIR/plugins/bookbridge.koplugin" ] || { echo "FAIL  $KDIR/plugins/bookbridge.koplugin missing -- symlink this checkout's bookbridge.koplugin there"; exit 1; }
 
 P=shelfmark-livetest; CWA_PORT=19083; INSPECT=8181; I="http://127.0.0.1:$INSPECT/koreader"
 CFG=~/.config/koreader; SET=$CFG/settings
@@ -106,14 +106,14 @@ curl -s -o /dev/null --max-time 2 "$I/" && say PASS "KOReader up, inspector answ
 KPID=$(pgrep -f '^\./luajit \./reader\.lua' | tail -1)
 # Identity: the instance answering must be the one THIS run launched, i.e.
 # it read this run's settings. Its download_dir is unique to this run.
-got=$(curl -s --max-time 5 "$I/ui/shelfmark/download_dir" | tr -d '"')
+got=$(curl -s --max-time 5 "$I/ui/bookbridge/download_dir" | tr -d '"')
 [ "$got" = "$BOOKS" ] && say PASS "driving the KOReader this run launched (pid ${KPID:-?})" || { say FAIL "inspector belongs to a different KOReader (download_dir=$got)"; exit 1; }
 curl -s --max-time 8 "$I/ui/menu/onShowMenu/" >/dev/null; sleep 1
-idx=""; for i in $(seq 1 24); do t=$(curl -s --max-time 5 "$I/ui/menu/menu_items/shelfmark/sub_item_table/$i/text"); [ "$t" = "Sync library with CWA" ] && { idx=$i; break; }; done
+idx=""; for i in $(seq 1 24); do t=$(curl -s --max-time 5 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$i/text"); [ "$t" = "Sync library with CWA" ] && { idx=$i; break; }; done
 [ -n "$idx" ] && say PASS "found 'Sync library with CWA' at submenu index $idx" || { say FAIL "sync menu item not found"; exit 1; }
 
 # --- drive it, exactly as a tap: the item's own Trapper-wrapped callback ---
-curl -s --max-time 8 "$I/ui/menu/menu_items/shelfmark/sub_item_table/$idx/callback/" >/dev/null
+curl -s --max-time 8 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$idx/callback/" >/dev/null
 reg=0; for i in $(seq 1 45); do
   reg=$(python3 -c "import json;print(len(json.load(open('$SET/shelfmark_synced_books.json'))))" 2>/dev/null || echo 0)
   [ "$reg" = 2 ] && break; sleep 2

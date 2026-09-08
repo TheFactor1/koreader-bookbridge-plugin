@@ -71,6 +71,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, pref
 elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-confirm (no local KOReader)"; skipped="${skipped:+$skipped, }hardcover-confirm"
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
+section "Rename migration (a Bookbridge build inside the old shelfmark.koplugin folder moves itself)"
+out=$(bash tests/rename-migration/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- copies itself, disables the old folder, offers a restart, then removes the old folder"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  rename-migration (no local KOReader)"; skipped="${skipped:+$skipped, }rename-migration"
+else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
+
 section "Hardcover + Bookshelf hot parking (real Bookshelf plugin, desktop KOReader)"
 out=$(bash tests/hardcover-park/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- the park is treated as the close"
@@ -113,7 +119,7 @@ if [ -n "$counts" ]; then
     else                          printf '  %-26s %4s  = baseline\n' "$tag" "$n"; fi
   done <<< "$counts"
   if [ $UPDATE -eq 1 ]; then
-    build=$(python3 -c "import json;print(json.load(open('shelfmark.koplugin/manifest.json'))['build'])")
+    build=$(python3 -c "import json;print(json.load(open('bookbridge.koplugin/manifest.json'))['build'])")
     { grep '^#' "$BASE" | grep -v '^# Recorded '
       echo "# Recorded $(date +%F) at build $build."
       echo "$counts"; } > "$BASE.tmp" && mv "$BASE.tmp" "$BASE"
