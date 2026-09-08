@@ -1,7 +1,7 @@
 # bookbridge.koplugin
 
 > **Written 100% by an AI.** Every line of code, every test and this document
-> were written by Claude (Anthropic). Matt directed the work, ran every build on
+> were written by Claude (Anthropic). I directed the work, ran every build on
 > his own Kindle, Android phone and desktop KOReader, reported what he saw and
 > decided what to build. No line here was hand-written by a person -- read it
 > before you trust it, and treat it as you would any unaudited code.
