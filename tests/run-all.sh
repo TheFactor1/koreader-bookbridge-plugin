@@ -71,6 +71,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, pref
 elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-confirm (no local KOReader)"; skipped="${skipped:+$skipped, }hardcover-confirm"
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
+section "Bluetooth keyboard menu (Kindle feature exercised on the desktop KOReader)"
+out=$(bash tests/bt-keyboard/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- submenu under Bookbridge, engine written, detached step, viewer, KOReader never blocked"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  bt-keyboard (no local KOReader)"; skipped="${skipped:+$skipped, }bt-keyboard"
+else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
+
 section "Rename migration (a Bookbridge build inside the old shelfmark.koplugin folder moves itself)"
 out=$(bash tests/rename-migration/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- copies itself, disables the old folder, offers a restart, then removes the old folder"

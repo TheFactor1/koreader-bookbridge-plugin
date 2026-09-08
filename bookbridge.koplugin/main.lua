@@ -135,6 +135,8 @@ function Bookbridge:loadSettings()
     if self.hardcover_language == nil then self.hardcover_language = "en" end
     -- Opt-in: push reading progress to Hardcover on close/suspend (see onCloseDocument).
     self.hardcover_progress_sync = self.sm_settings.data.shelfmark.hardcover_progress_sync
+    self.bt_keyboard_addr = self.sm_settings.data.shelfmark.bt_keyboard_addr
+    self.bt_ready_on_wake = self.sm_settings.data.shelfmark.bt_ready_on_wake
 end
 
 function Bookbridge:defaultDownloadDir()
@@ -174,6 +176,8 @@ function Bookbridge:saveAllSettings(msg)
         ai_relay_url = self.ai_relay_url,
         ai_relay_token = self.ai_relay_token,
         update_url = self.update_url,
+        bt_keyboard_addr = self.bt_keyboard_addr,
+        bt_ready_on_wake = self.bt_ready_on_wake,
     })
     self.sm_settings:flush()
     self.session_cookie = nil -- force re-login with new creds
@@ -6526,6 +6530,330 @@ end
 
 -- ===== menu =====
 
+-- ===== Bluetooth keyboard (Kindle) =====
+-- A phone (or any Classic Bluetooth keyboard) typing into KOReader on a
+-- jailbroken MediaTek Kindle, through Amazon's own Bluetooth stack
+-- (btmanagerd, driven by ace_bt_cli). Facts this rests on, all found live:
+--   * the stack has a full HID host; only a udev filter and the missing
+--     pairing UI stop it from taking a keyboard (the rule below fixes both);
+--   * pairing must be Kindle-initiated (phone-initiated dies before the
+--     passkey stage); the numeric-comparison request must be answered from
+--     the CLI ("passkey y") within 30 s -- done on a timer, because the
+--     CLI's output is block-buffered when redirected;
+--   * the keyboard link itself is always started by the phone's app -- the
+--     Kindle cannot initiate it -- so "ready" means: radio on, HID host
+--     callbacks registered, connectable, session held open;
+--   * the CLI is never shown scan results (the daemon masks them for it),
+--     so the phone's address is entered once (Settings > About phone) and kept;
+--   * ace_bt_cli ignores a closed stdin and must be ended with "exit", never
+--     killed (an abrupt client death coincided with the Wi-Fi radio dropping;
+--     the two share the chip);
+--   * the whole thing runs detached from KOReader (setsid, stdio to /dev/null)
+--     and the plugin polls for a ".done" marker, so nothing ever blocks the UI.
+-- The engine is a busybox sh script the plugin writes itself, so it ships
+-- inside this one file and rides the normal update.
+local BT_DIR = os.getenv("BOOKBRIDGE_BT_DIR") or "/mnt/us/btkeyboard"
+local BT_RULE = "/etc/udev/rules.d/99-bt-keyboard.rules"
+local BT_ENGINE = [==[#!/bin/sh
+# Bookbridge Bluetooth keyboard engine (MediaTek Kindle). Written by the plugin.
+STEP=${1:-status}; A=${2:-}
+D=${BOOKBRIDGE_BT_DIR:-/mnt/us/btkeyboard}; mkdir -p "$D"
+OUT="$D/$STEP.txt"; : > "$OUT"; rm -f "$D/$STEP.done"
+trap 'touch "$D/$STEP.done"' EXIT
+RULE=/etc/udev/rules.d/99-bt-keyboard.rules
+HELPER=/usr/local/bin/dev_is_keyboard.sh
+say() { echo "$@" >> "$OUT"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+stamp() { date +%y%m%d:%H%M%S; }
+session_end() { [ -p /tmp/ace.in ] && { echo "exit" > /tmp/ace.in; sleep 2; }; rm -f /tmp/ace.in; }
+session_start() {
+  session_end; rm -f /tmp/ace.out; mkfifo /tmp/ace.in
+  setsid sh -c 'tail -f /tmp/ace.in | ace_bt_cli > /tmp/ace.out 2>&1' </dev/null >/dev/null 2>&1 &
+  sleep 1
+}
+w() { echo "$1" > /tmp/ace.in; }
+dump() { grep -v "No Input Parameters" /tmp/ace.out 2>/dev/null | grep -v "^\s*$\|^p_data\|^ *[0-9A-F][0-9A-F] " >> "$OUT"; }
+keep() { ( sleep ${1:-600}; [ -p /tmp/ace.in ] && echo "exit" > /tmp/ace.in; sleep 2; rm -f /tmp/ace.in ) </dev/null >/dev/null 2>&1 & }
+inputs() { say "--- input devices"; awk '/^N:/{n=$0} /^H:/{print n " | " $0}' /proc/bus/input/devices >> "$OUT" 2>/dev/null; }
+bonded_since() { showlog 2>/dev/null | awk -v t="$1" '$1 >= t' | grep -q "bondState:2"; }
+say "Bookbridge Bluetooth: $STEP $A  $(date '+%F %T')"
+case "$STEP" in
+install)
+  [ -f "$RULE" ] && [ -f "$HELPER" ] && { say "already installed"; exit 0; }
+  have mntroot || { say "no mntroot on this device"; exit 1; }
+  mntroot rw >> "$OUT" 2>&1 || { say "mntroot rw failed"; exit 1; }
+  mkdir -p /usr/local/bin
+  cat > "$HELPER" <<'SH'
+#!/bin/sh
+DEVICE=$1
+if evtest info "$DEVICE" 2>/dev/null | grep -q 'Event type 1 (Key)'; then
+  if evtest info "$DEVICE" 2>/dev/null | grep -q 'Event code 16 (Q)'; then
+    echo ID_INPUT=1
+    echo ID_INPUT_KEY=1
+    echo ID_INPUT_KEYBOARD=1
+  fi
+fi
+SH
+  chmod 755 "$HELPER"
+  cat > "$RULE" <<'RULES'
+KERNEL=="uhid", MODE="0660", GROUP="bluetooth"
+ACTION=="add", SUBSYSTEM=="input", IMPORT+="/usr/local/bin/dev_is_keyboard.sh %N"
+RULES
+  sync; mntroot ro >> "$OUT" 2>&1
+  udevadm control --reload-rules >> "$OUT" 2>&1
+  [ -e /dev/uhid ] && { chgrp bluetooth /dev/uhid 2>/dev/null; chmod 660 /dev/uhid 2>/dev/null; }
+  say "INSTALLED"; ls -l "$HELPER" "$RULE" /dev/uhid >> "$OUT" 2>&1
+  ;;
+uninstall)
+  mntroot rw >> "$OUT" 2>&1 && { rm -f "$RULE" "$HELPER"; sync; mntroot ro >> "$OUT" 2>&1; }
+  udevadm control --reload-rules >> "$OUT" 2>&1; say "UNINSTALLED"
+  ;;
+pair)
+  [ -n "$A" ] || { say "no address"; exit 1; }
+  [ -f "$RULE" ] || { say "keyboard rule not installed"; exit 1; }
+  session_start; w enable; sleep 3; w "classic discoverable y 120"; sleep 1; w "unpair $A"; sleep 2
+  T=$(stamp); w "pair $A"; say "pairing started at $T -- confirm on the phone"
+  sleep 4; bonded=0
+  for i in $(seq 1 18); do
+    w "passkey y"; sleep 2
+    if bonded_since "$T"; then bonded=1; break; fi
+  done
+  if [ $bonded = 1 ]; then
+    w "classic registerhid"; sleep 1; w "classic discoverable y 600"; sleep 1
+    dump; say "BONDED $A"; keep 600
+  else
+    w "bondstate $A"; sleep 2; dump
+    say "--- daemon"; showlog 2>/dev/null | awk -v t="$T" '$1 >= t' | grep -iE "ssp|bond|auth" | tail -6 | cut -c1-160 >> "$OUT"
+    say "NOT BONDED"; session_end
+  fi
+  ;;
+ready)
+  session_start; w enable; sleep 3; w "classic registerhid"; sleep 1; w "classic discoverable y 600"; sleep 1
+  [ -n "$A" ] && { w "bondstate $A"; sleep 2; }
+  dump; say "READY"; keep 600
+  ;;
+status)
+  # its own short session: must not end a "ready" session that is listening
+  if have ace_bt_cli; then
+    ( printf 'radiostate\nbondedlist\nconnectedlist\n'; [ -n "$A" ] && printf 'classic hidprofilestate %s\n' "$A"; printf 'exit\n'; sleep 3 ) | timeout 20 ace_bt_cli 2>&1 \
+      | grep -v "No Input Parameters" | grep -v "^\s*$\|^p_data\|^ *[0-9A-F][0-9A-F] " >> "$OUT"
+  else say "ace_bt_cli: not on this device"; fi
+  say "rule installed: $([ -f "$RULE" ] && echo yes || echo no)"
+  say "listening session: $([ -p /tmp/ace.in ] && echo open || echo none)"
+  inputs
+  ;;
+off) session_start; w disable; sleep 2; dump; say "OFF"; session_end ;;
+unpair) [ -n "$A" ] || { say "no address"; exit 1; }; session_start; w enable; sleep 2; w "unpair $A"; sleep 2; dump; say "UNPAIRED $A"; session_end ;;
+*) say "unknown step $STEP"; exit 1 ;;
+esac
+]==]
+
+local function btOnKindle()
+    if os.getenv("BOOKBRIDGE_BT_FORCE") then return true end
+    local ok, Device = pcall(require, "device")
+    return ok and Device and Device.isKindle and Device:isKindle() or false
+end
+
+-- Writes the engine to BT_DIR when missing or stale; returns its path.
+local function btEnginePath()
+    lfs.mkdir(BT_DIR)
+    local path = BT_DIR .. "/engine.sh"
+    local f = io.open(path, "r")
+    local current = f and f:read("*a"); if f then f:close() end
+    if current ~= BT_ENGINE then
+        local out = io.open(path, "w")
+        if not out then return nil end
+        out:write(BT_ENGINE); out:close()
+        os.execute("chmod +x '" .. path .. "'")
+    end
+    return path
+end
+
+local function btRuleInstalled()
+    local f = io.open(BT_RULE, "r")
+    if f then f:close(); return true end
+    return false
+end
+
+-- Runs one engine step detached and polls for its ".done" marker once a
+-- second; on_done(text, finished) gets the step's result file. Never blocks
+-- KOReader: nothing here is a fork of it, and nothing waits on a pipe.
+function Bookbridge:btRun(step, arg, wait_text, on_done)
+    if self._bt_running then
+        UIManager:show(InfoMessage:new{ text = _("A Bluetooth step is still running; wait for it to finish."), timeout = 3 })
+        return
+    end
+    local script = btEnginePath()
+    if not script then UIManager:show(InfoMessage:new{ text = _("Couldn't write the Bluetooth helper script.") }); return end
+    local done = BT_DIR .. "/" .. step .. ".done"
+    os.remove(done)
+    os.execute(string.format("BOOKBRIDGE_BT_DIR='%s' setsid sh '%s' %s %s </dev/null >/dev/null 2>&1 &", BT_DIR, script, step, arg or ""))
+    self._bt_running = step
+    debugLog("[bt] step " .. step .. (arg and (" " .. arg) or "") .. " started")
+    local msg = wait_text and InfoMessage:new{ text = wait_text } or nil
+    if msg then UIManager:show(msg) end
+    local started = os.time()
+    local function poll()
+        local f = io.open(done, "r")
+        local finished = f ~= nil
+        if f then f:close() end
+        if not finished and os.time() - started < 150 then
+            UIManager:scheduleIn(1, poll)
+            return
+        end
+        self._bt_running = nil
+        if msg and UIManager:isWidgetShown(msg) then UIManager:close(msg) end
+        local rf = io.open(BT_DIR .. "/" .. step .. ".txt", "r")
+        local text = rf and rf:read("*a") or ""; if rf then rf:close() end
+        debugLog("[bt] step " .. step .. (finished and " done" or " timed out"))
+        if on_done then on_done(text, finished) end
+    end
+    UIManager:scheduleIn(1, poll)
+end
+
+function Bookbridge:btAskAddress(then_cb)
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Phone / keyboard Bluetooth address"),
+        input = self.bt_keyboard_addr or "",
+        input_hint = "AA:BB:CC:DD:EE:FF",
+        description = _("Entered once and kept. On the phone: Settings > About phone > Status > Bluetooth address. (The Kindle isn't shown scan results by its own Bluetooth stack, so it can't find the phone by name.)"),
+        buttons = {{
+            { text = _("Cancel"), id = "close", callback = function() UIManager:close(dialog) end },
+            { text = _("Save"), is_enter_default = true, callback = function()
+                local a = (dialog:getInputText() or ""):upper():match("(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)")
+                if not a then
+                    UIManager:show(InfoMessage:new{ text = _("That doesn't look like a Bluetooth address (six pairs like AA:BB:CC:DD:EE:FF).") })
+                    return
+                end
+                UIManager:close(dialog)
+                self.bt_keyboard_addr = a
+                self:saveAllSettings(T(_("Saved %1."), a))
+                if then_cb then then_cb(a) end
+            end },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+-- One tap: rule (installed once, with a confirmation), address (asked once),
+-- then pair; the phone's prompt is confirmed from here; the moment the bond
+-- lands the Kindle is already listening for the keyboard link.
+function Bookbridge:btPair()
+    local function pair(addr)
+        self:btRun("pair", addr, _("Pairing... when the phone shows \"Pair with Kindle?\", tap Pair.\n\nThis finishes by itself, usually within 15 seconds."), function(text, finished)
+            if text:find("BONDED " .. addr, 1, true) then
+                UIManager:show(InfoMessage:new{ text = _("Paired, and the Kindle is listening.\n\nNow open the keyboard app on the phone and choose \"Kindle\". KOReader picks the keyboard up by itself.") })
+            else
+                local TextViewer = require("ui/widget/textviewer")
+                UIManager:show(TextViewer:new{ title = _("Pairing did not complete"), text = text, justified = false })
+            end
+        end)
+    end
+    local function with_rule(addr)
+        if btRuleInstalled() then pair(addr); return end
+        local ConfirmBox = require("ui/widget/confirmbox")
+        UIManager:show(ConfirmBox:new{
+            text = _("First time: two small files are written to the system so the Bluetooth stack may take a keyboard (the root filesystem is made writable and set back to read-only). Reversible from this menu.\n\nContinue?"),
+            ok_text = _("Install and pair"),
+            ok_callback = function()
+                self:btRun("install", nil, _("Installing the keyboard rule..."), function(text)
+                    if text:find("INSTALLED", 1, true) then pair(addr)
+                    else UIManager:show(InfoMessage:new{ text = _("The keyboard rule could not be installed:\n\n") .. text }) end
+                end)
+            end,
+        })
+    end
+    if self.bt_keyboard_addr then with_rule(self.bt_keyboard_addr) else self:btAskAddress(with_rule) end
+end
+
+function Bookbridge:btReady(silent)
+    if not self.bt_keyboard_addr and not silent then self:btAskAddress(function() self:btReady() end); return end
+    self:btRun("ready", self.bt_keyboard_addr, (not silent) and _("Turning Bluetooth on and listening for the keyboard...") or nil, function(text)
+        if silent then return end
+        if text:find("READY", 1, true) then
+            UIManager:show(InfoMessage:new{ text = _("Listening for 10 minutes. Connect from the phone's keyboard app (choose \"Kindle\")."), timeout = 6 })
+        else
+            local TextViewer = require("ui/widget/textviewer")
+            UIManager:show(TextViewer:new{ title = _("Bluetooth"), text = text, justified = false })
+        end
+    end)
+end
+
+function Bookbridge:btMenuEntry()
+    return {
+        text = _("Bluetooth keyboard"),
+        sub_item_table = {
+            {
+                text = _("Pair the phone (or a keyboard)"),
+                help_text = _("Kindle-initiated pairing. The phone shows a code and asks to pair; tap Pair there. Nothing to type here after the first time."),
+                callback = function() self:btPair() end,
+            },
+            {
+                text = _("Ready for keyboard now"),
+                help_text = _("Radio on and listening for 10 minutes. Then connect from the phone's keyboard app -- the phone starts the link; the Kindle only listens."),
+                enabled_func = function() return btRuleInstalled() end,
+                callback = function() self:btReady(false) end,
+            },
+            {
+                text = _("Keep Bluetooth ready when the Kindle wakes"),
+                help_text = _("Turns the radio on and listens every time KOReader wakes, so reconnecting is just choosing Kindle in the phone's app. Costs a little battery while awake."),
+                checked_func = function() return self.bt_ready_on_wake == true end,
+                enabled_func = function() return btRuleInstalled() and self.bt_keyboard_addr ~= nil end,
+                callback = function()
+                    self.bt_ready_on_wake = not self.bt_ready_on_wake
+                    self:saveAllSettings(self.bt_ready_on_wake and _("On: the Kindle listens for the keyboard whenever it wakes.") or _("Off."))
+                end,
+            },
+            {
+                text_func = function()
+                    return self.bt_keyboard_addr and T(_("Phone address: %1"), self.bt_keyboard_addr) or _("Phone address: not set")
+                end,
+                keep_menu_open = true,
+                callback = function() self:btAskAddress() end,
+            },
+            {
+                text = _("Status"),
+                keep_menu_open = true,
+                callback = function()
+                    self:btRun("status", self.bt_keyboard_addr, _("Checking..."), function(text)
+                        local TextViewer = require("ui/widget/textviewer")
+                        UIManager:show(TextViewer:new{ title = _("Bluetooth status"), text = text, justified = false })
+                    end)
+                end,
+            },
+            {
+                text = _("Bluetooth off"),
+                callback = function() self:btRun("off", nil, nil, function() UIManager:show(InfoMessage:new{ text = _("Bluetooth is off."), timeout = 2 }) end) end,
+            },
+            {
+                text = _("Forget the paired phone"),
+                enabled_func = function() return self.bt_keyboard_addr ~= nil end,
+                callback = function()
+                    local addr = self.bt_keyboard_addr
+                    self:btRun("unpair", addr, _("Forgetting..."), function()
+                        self.bt_keyboard_addr = nil; self.bt_ready_on_wake = nil
+                        self:saveAllSettings(_("Forgotten. Also remove \"Kindle\" from the phone's Bluetooth list."))
+                    end)
+                end,
+            },
+            {
+                text_func = function() return btRuleInstalled() and _("Uninstall keyboard rule") or _("Install keyboard rule (one time)") end,
+                keep_menu_open = true,
+                callback = function()
+                    local step = btRuleInstalled() and "uninstall" or "install"
+                    self:btRun(step, nil, nil, function(text)
+                        local TextViewer = require("ui/widget/textviewer")
+                        UIManager:show(TextViewer:new{ title = _("Keyboard rule"), text = text, justified = false })
+                    end)
+                end,
+            },
+        },
+    }
+end
+
 function Bookbridge:addToMainMenu(menu_items)
     menu_items.bookbridge = {
         text = _("Bookbridge"),
@@ -6798,6 +7126,12 @@ function Bookbridge:addToMainMenu(menu_items)
             },
         },
     }
+    if btOnKindle() then
+        local items = menu_items.bookbridge.sub_item_table
+        local at = #items + 1
+        for k, it in ipairs(items) do if it.text == _("Settings") then at = k; break end end
+        table.insert(items, at, self:btMenuEntry())
+    end
 end
 
 -- "Send debug log to server". Must run inside a Trapper:wrap (the menu
@@ -9143,6 +9477,10 @@ function Bookbridge:onSuspend()
 end
 
 function Bookbridge:onResume()
+    -- Bluetooth keyboard: listen again after a wake, if asked to (Kindle).
+    if self.bt_ready_on_wake and self.bt_keyboard_addr and btOnKindle() then
+        UIManager:scheduleIn(2, function() self:btReady(true) end)
+    end
     -- Push any progress captured on suspend/close. No throttle needed -- at
     -- most one record per book, and processHardcoverPending is a cheap no-op
     -- when nothing is pending.

@@ -42,6 +42,24 @@ Adds a **Bookbridge** entry to KOReader's main menu.
 - **Hardcover settings** — API token (from hardcover.app/account/api) and
   the edition language to prefer (default English).
 
+### Bluetooth keyboard (Kindle only)
+On a jailbroken MediaTek Kindle (Paperwhite 5 / 11th gen and later) a phone
+running a Bluetooth-keyboard app — or any Classic Bluetooth keyboard — can
+type into KOReader, through Amazon's own Bluetooth stack (no replacement
+stack, Audible keeps working). **Bookbridge → Bluetooth keyboard**:
+- **Pair the phone** — one tap: the keyboard rule is installed the first
+  time (two small files; reversible), the phone's Bluetooth address is asked
+  once (Settings → About phone → Status), the Kindle initiates, you tap
+  *Pair* on the phone, and it finishes the moment the bond lands — already
+  listening. Then choose "Kindle" in the phone's keyboard app; KOReader's
+  external-keyboard plugin picks it up by itself.
+- **Ready for keyboard now** — after a sleep: radio on and listening for 10
+  minutes. The link is always started by the phone's app; the Kindle can't.
+- **Keep Bluetooth ready when the Kindle wakes** — does that on every wake,
+  so reconnecting is just choosing Kindle in the app (small battery cost).
+- Status, Bluetooth off, Forget the paired phone, Install/Uninstall rule.
+Mouse movement is not supported: KOReader has no pointer input on e-ink.
+
 ### Settings
 - **Connections** — Shelfmark server, CWA, Anna's Archive, AI match
   suggestions, and a connection-status screen that says what is reachable.
@@ -133,6 +151,14 @@ This plugin stands on other people's work:
   features use.
 - [Open Library](https://openlibrary.org) (Internet Archive) — its open
   search API is the second opinion that resolves ambiguous titles to ISBNs.
+- The Bluetooth keyboard feature follows what the Kindle community worked
+  out: the udev rule + helper and the `ace_bt_cli` pairing approach from the
+  MobileRead thread [Connecting to Bluetooth classic keyboards](https://www.mobileread.com/forums/showthread.php?t=369712)
+  and finlater's [kindlebtcontroller.koplugin](https://github.com/finlater/kindlebtcontroller.koplugin);
+  the stack analysis from sighery's [Reverse engineering Bluetooth on Amazon Kindle eReaders](https://sighery.com/posts/reverse-engineering-bluetooth-on-kindle-ereaders/);
+  the userspace-stack alternative is zampierilucas's [kindle-hid-passthrough](https://github.com/zampierilucas/kindle-hid-passthrough).
+  KOReader's `externalkeyboard` support on Kindle landed in
+  [koreader#15248](https://github.com/koreader/koreader/pull/15248).
 
 ## Authorship
 
