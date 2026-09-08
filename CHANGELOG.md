@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build 6f36f79
+
+- **"Restart now" after an update.** When Check for updates installs a new
+  build, the confirmation now offers to restart KOReader on the spot (a
+  clean restart — settings and reading position are saved first), instead
+  of leaving you to find the restart yourself.
+
 ## 2026-09-08 — build f808bd4
 
 ### Matching: identifiers first, Open Library as a second opinion
