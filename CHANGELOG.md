@@ -7,9 +7,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 ## 2026-09-08 — build 3d02dd3
 
 - **Bluetooth keyboard: "ready" in a few seconds after waking**, not a
-  minute. The engine was waiting for a log line the radio never writes and
-  re-reading the Kindle's entire archived system log on every check; it now
-  reads the live log and matches the real "radio on" line.
+  minute. The engine was waiting for a log line the radio never writes, so
+  every wake ran out its full 15-round wait, and each round re-read the
+  Kindle's entire archived system log (about a quarter million lines). It
+  now reads the live log and matches the real "radio on" line. Measured on
+  a Paperwhite 5: the ready step finishes 7 s after waking (was 68 s), and
+  the phone's keyboard is attached about 7 s after the wake.
+- The README's Bluetooth section now describes the current behaviour: the
+  Kindle stays listening for as long as it is awake, not for 10 minutes.
 
 ## 2026-09-08 — build 6dfdfee
 

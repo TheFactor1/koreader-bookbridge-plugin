@@ -53,10 +53,13 @@ stack, Audible keeps working). **Bookbridge → Bluetooth keyboard**:
   *Pair* on the phone, and it finishes the moment the bond lands — already
   listening. Then choose "Kindle" in the phone's keyboard app; KOReader's
   external-keyboard plugin picks it up by itself.
-- **Ready for keyboard now** — after a sleep: radio on and listening for 10
-  minutes. The link is always started by the phone's app; the Kindle can't.
-- **Keep Bluetooth ready when the Kindle wakes** — does that on every wake,
-  so reconnecting is just choosing Kindle in the app (small battery cost).
+- **Ready for keyboard now** — radio on and listening in about six seconds,
+  and it stays listening for as long as the Kindle is awake. The link is
+  always started by the phone's app; the Kindle can't.
+- **Keep Bluetooth ready when the Kindle wakes** — the radio goes off when
+  the Kindle sleeps and is back listening a few seconds after it wakes, so
+  reconnecting is just choosing Kindle in the app: the keyboard is typically
+  attached within ten seconds of waking (small battery cost while awake).
 - Status, Bluetooth off, Forget the paired phone, Install/Uninstall rule.
 Mouse movement is not supported: KOReader has no pointer input on e-ink.
 
