@@ -4,6 +4,19 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build 8b1bfd8
+
+### Bluetooth keyboard, now part of Bookbridge (Kindle)
+
+- **Bookbridge → Bluetooth keyboard** replaces the separate plugin. One tap
+  pairs the phone: the first time it installs the keyboard rule (asks
+  first) and asks for the phone's Bluetooth address once; then the Kindle
+  starts the pairing, you tap Pair on the phone, and it's done the moment
+  the phone confirms — already listening for the keyboard app.
+- **Ready for keyboard now** after a sleep, or **Keep Bluetooth ready when
+  the Kindle wakes** to make reconnecting just "choose Kindle in the app".
+- Status, Bluetooth off, Forget the paired phone, Install/Uninstall rule.
+
 ## 2026-09-08 — build 314d83e
 
 ### The plugin is now called Bookbridge
