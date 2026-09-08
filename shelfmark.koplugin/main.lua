@@ -1882,7 +1882,10 @@ local function doHardcoverFindBook(token, title, author, lang)
             search(query: $q, query_type: "Book", per_page: 5) { ids results }
         }
     ]], { q = title })
-    if not data then return nil, nil, nil, err end
+    -- Seventh value: true when Hardcover could not be reached at all (offline,
+    -- DNS, timeout) as opposed to answering with nothing. Callers keep the
+    -- book queued on the former and only park it for review on the latter.
+    if not data then return nil, nil, nil, err, nil, false, true end
     local search = data.search
     local ids = search and search.ids
 
@@ -1949,7 +1952,7 @@ local function doHardcoverFindBook(token, title, author, lang)
     end
 
     if #candidates == 0 then
-        return nil, nil, nil, _("No matching book found on Hardcover.")
+        return nil, nil, nil, _("No matching book found on Hardcover."), {}, false, false
     end
 
     -- Language preference. The search index carries no language at all; it
@@ -6416,7 +6419,10 @@ function Shelfmark:addToMainMenu(menu_items)
                             return n > 0 and T(_("Review Hardcover matches (%1)"), n) or _("Review Hardcover matches")
                         end,
                         keep_menu_open = true,
-                        callback = function() self:reviewHardcoverMatches() end,
+                        callback = function()
+                            local Trapper = require("ui/trapper")
+                            Trapper:wrap(function() self:reviewHardcoverMatches() end)
+                        end,
                     },
                     {
                         -- Answering "No" -- or, before build 9b45e72, a stray
@@ -8579,14 +8585,20 @@ function Shelfmark:resolveHardcoverMatch(md5, rec)
     local Trapper = require("ui/trapper")
     local book_id, ft, fa, ranked, confident
     local warm = self._hc_prefetch and self._hc_prefetch[md5]
-    if warm then
+    if warm and (warm.book_id or (warm.ranked and #warm.ranked > 0)) then
         book_id, ft, fa, ranked, confident = warm.book_id, warm.title, warm.author, warm.ranked, warm.confident
     else
-        local completed, _err
-        completed, book_id, ft, fa, _err, ranked, confident = Trapper:dismissableRunInSubprocess(function()
+        local completed, _err, unreachable
+        completed, book_id, ft, fa, _err, ranked, confident, unreachable = Trapper:dismissableRunInSubprocess(function()
             return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language)
         end, {})
         if not completed then return end
+        if unreachable then
+            -- Not a verdict: the book stays queued and is looked up again on
+            -- the next reconnect/wake, like a queued progress push.
+            debugLog("[hc] Hardcover unreachable (" .. tostring(_err) .. "); keeping " .. tostring(rec.title) .. " queued")
+            return
+        end
     end
     local map = loadHardcoverMap()
     if book_id and confident then
@@ -8640,7 +8652,28 @@ function Shelfmark:reviewHardcoverMatches()
                 local pending = loadHardcoverPending()
                 local rec = pending[it.md5] or { title = e.title, author = e.author }
                 local Trapper = require("ui/trapper")
-                Trapper:wrap(function() self:pickHardcoverCandidate(it.md5, rec, e.ranked or {}, self.hardcover_token) end)
+                Trapper:wrap(function()
+                    local candidates = e.ranked or {}
+                    if #candidates == 0 then
+                        -- Parked with nothing to choose from (looked up while
+                        -- offline, or a genuine miss): ask Hardcover again now.
+                        local token = self.hardcover_token
+                        local completed, _id, _t, _a, err, ranked, _c, unreachable = Trapper:dismissableRunInSubprocess(function()
+                            return doHardcoverFindBook(token, rec.title or "", rec.author, self.hardcover_language)
+                        end, _("Asking Hardcover again..."))
+                        if not completed then return end
+                        if unreachable then
+                            UIManager:show(InfoMessage:new{ text = T(_("Hardcover can't be reached right now (%1). Try again when online."), tostring(err)) })
+                            return
+                        end
+                        if ranked and #ranked > 0 then
+                            candidates = ranked
+                            local m = loadHardcoverMap(); if m[it.md5] then m[it.md5].ranked = ranked; saveHardcoverMap(m) end
+                            debugLog("[hc] review: fresh lookup found " .. #ranked .. " candidate(s) for " .. tostring(rec.title))
+                        end
+                    end
+                    self:pickHardcoverCandidate(it.md5, rec, candidates, self.hardcover_token)
+                end)
             end,
         }}
     end
@@ -8732,12 +8765,19 @@ function Shelfmark:prefetchHardcoverMatch()
     local Trapper = require("ui/trapper")
     self._hc_prefetch_inflight[md5] = true
     Trapper:wrap(function()
-        local completed, book_id, ft, fa, _err, ranked, confident = Trapper:dismissableRunInSubprocess(function()
+        local completed, book_id, ft, fa, _err, ranked, confident, unreachable = Trapper:dismissableRunInSubprocess(function()
             return doHardcoverFindBook(token, title, author, lang)
         end, {})   -- invisible and non-dismissable; see the note in processHardcoverPending
         self._hc_prefetch_inflight[md5] = nil
         if not completed then debugLog("[hc] prefetch: interrupted"); return end
         -- A miss is cached too, so the close costs no network either way.
+        if unreachable then
+            -- Offline (or Hardcover down): cache nothing, so the close looks
+            -- again -- a cached "nothing" here once sent a book straight to
+            -- the review list with no candidates.
+            debugLog("[hc] prefetch: Hardcover unreachable (" .. tostring(_err) .. "); will look up at close")
+            return
+        end
         self._hc_prefetch[md5] = { book_id = book_id, title = ft, author = fa, ranked = ranked, confident = confident }
         debugLog("[hc] prefetch: " .. (book_id
             and ((confident and "confident match " or "uncertain match ") .. tostring(ft) .. " by " .. tostring(fa))

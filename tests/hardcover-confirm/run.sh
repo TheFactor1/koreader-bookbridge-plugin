@@ -153,6 +153,25 @@ do
     UIManager, package.loaded["device"], debugLog, android = old_UI, old_dev, old_log, nil
 end
 
+-- Offline: an unreachable Hardcover is not a verdict -- the book stays queued
+do
+    local old = doHardcoverFindBook
+    doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return nil, nil, nil, "connection refused", nil, false, true end
+    shown = {}; CLEARED = {}; local before = SEARCHES
+    Shelfmark.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = {}, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Shelfmark.showAfterCloseNotice }, "off1", { title = "Upgrade", author = "Blake Crouch", percent = 0.1 })
+    ck(SEARCHES == before + 1, "unreachable: one lookup attempted")
+    ck(MAP.off1 == nil, "unreachable: NO review entry recorded (the bug that parked 'Upgrade' with no candidates)")
+    ck(#CLEARED == 0 and #shown == 0, "unreachable: progress stays queued, nothing shown")
+    doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return 7, "Upgrade", "Blake Crouch", nil, { {id=7,title="Upgrade",author="Blake Crouch"} }, true end
+    before = SEARCHES
+    Shelfmark.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = { off2 = { book_id = nil, ranked = {} } }, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Shelfmark.showAfterCloseNotice }, "off2", { title = "Upgrade", author = "Blake Crouch", percent = 0.1 })
+    ck(SEARCHES == before + 1 and MAP.off2 and MAP.off2.decision == "sync", "stale empty prefetch is not trusted: looked up again and matched")
+    doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return nil, nil, nil, "No matching book found on Hardcover.", {}, false, false end
+    Shelfmark.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = {}, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Shelfmark.showAfterCloseNotice }, "miss1", { title = "Zqxv Nonexistent", author = "Nobody", percent = 0.1 })
+    ck(MAP.miss1 and MAP.miss1.decision == "review" and #MAP.miss1.ranked == 0, "genuine miss: parked for review (empty list, re-searched when opened)")
+    doHardcoverFindBook = old
+end
+
 print(pass.." passed, "..fail.." failed")
 os.exit(fail==0 and 0 or 1)
 LUA
