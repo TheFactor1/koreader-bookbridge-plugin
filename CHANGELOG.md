@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build a86ccdb
+
+- **Fixed: a book closed while offline landed in "Review Hardcover matches"
+  with nothing to choose from.** A failed lookup (no network) was being
+  treated like "Hardcover found nothing". Now an unreachable Hardcover
+  leaves the book queued and it is looked up again when you're back online,
+  and opening a review entry that has no candidates asks Hardcover again
+  first — so any such entry you already have fixes itself when opened.
+
 ## 2026-09-07 — build e70c72e
 
 - **The library sync now writes its report to the debug log** (each line as
