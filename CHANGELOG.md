@@ -4,6 +4,12 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build 0838c07
+
+- **Automatic updates retry sooner.** A check that couldn't reach the update
+  server (Kindle awake before Wi-Fi or Tailscale is back) no longer counts as
+  the six-hourly check; it tries again ten minutes later.
+
 ## 2026-09-08 — build 5557266
 
 - **Updates install themselves.** With a self-hosted update source set, the
