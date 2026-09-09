@@ -6220,8 +6220,9 @@ end
 -- Shared across plugin instances (FileManager and Reader each get one) so
 -- two instances can't double-check, and persisted so a reboot doesn't reset
 -- the six-hour clock.
-local auto_update_state = { last = nil, running = false }
+local auto_update_state = { last = nil, running = false, not_before = nil }
 local AUTO_UPDATE_INTERVAL = 6 * 3600
+local AUTO_UPDATE_RETRY = 10 * 60   -- after a check that couldn't reach the server
 
 -- Quiet check-and-install from the self-hosted update source. Called with a
 -- reason ("wake", "network", "startup") from the hooks below; safe to call
@@ -6239,12 +6240,14 @@ function Bookbridge:autoCheckForUpdate(reason)
     if not self:autoUpdateWanted() then return end
     if auto_update_state.running then return end
     local now = os.time()
+    -- Only a check that actually reached the server starts the six-hour
+    -- clock. A wake without Wi-Fi (or before Tailscale is back) fails fast
+    -- and just holds off for ten minutes, so the next wake or network
+    -- event inside the window gets another try instead of waiting hours.
     local last = auto_update_state.last or tonumber(self.last_auto_update_check) or 0
     if now - last < AUTO_UPDATE_INTERVAL then return end
+    if auto_update_state.not_before and now < auto_update_state.not_before then return end
     auto_update_state.running = true
-    auto_update_state.last = now
-    self.last_auto_update_check = now
-    self:saveAllSettings()
     debugLog("[update] auto (" .. reason .. "): checking " .. tostring(self.update_url))
     local Trapper = require("ui/trapper")
     Trapper:wrap(function()
@@ -6255,9 +6258,14 @@ function Bookbridge:autoCheckForUpdate(reason)
         if not completed then auto_update_state.running = false; return end
         if not info then
             debugLog("[update] auto (" .. reason .. "): couldn't check: " .. tostring(err or code))
+            auto_update_state.not_before = os.time() + AUTO_UPDATE_RETRY
             auto_update_state.running = false
             return
         end
+        auto_update_state.last = now
+        auto_update_state.not_before = nil
+        self.last_auto_update_check = now
+        self:saveAllSettings()
         if not info.manifest or #info.changed == 0 then
             debugLog("[update] auto (" .. reason .. "): up to date (build " .. tostring(info.build or info.version or "?") .. ")")
             auto_update_state.running = false

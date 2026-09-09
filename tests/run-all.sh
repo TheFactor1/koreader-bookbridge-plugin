@@ -84,6 +84,9 @@ elif [ $rc -eq 3 ]; then echo "SKIPPED  rename-migration (no local KOReader)"; s
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
 section "Automatic updates (stale install, a wake, the served build installs itself)"
+out=$(bash tests/auto-update/unit.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') unit checks -- a failed check retries in 10 min, a completed one starts the 6 h clock"
+elif [ $rc -ne 3 ]; then echo "$out" | grep -E '^FAIL|attempt|error'; echo "FAIL"; fail=1; fi
 out=$(bash tests/auto-update/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- checks unprompted, installs silently, asks only about the restart, throttled"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  auto-update (no local KOReader)"; skipped="${skipped:+$skipped, }auto-update"
