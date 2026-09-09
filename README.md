@@ -71,6 +71,11 @@ Mouse movement is not supported: KOReader has no pointer input on e-ink.
   `homeserver-configs/shelfmark-pairing-relay`).
 - **Check for updates** — installs new builds from your own update server
   (`Update source`); the build id is in `manifest.json`.
+- **Install updates automatically** (on by default once an update source is
+  set) — the plugin looks at the update server quietly when the device wakes,
+  gets its network back, or starts (at most once every six hours), installs a
+  changed build without asking, and only asks about the restart. Nothing is
+  ever checked unasked against GitHub releases.
 - **View debug log** / **Send debug log to server** / **Clear log** — the plugin's own log; sending it uploads to the pairing relay for support.
 
 ## Reading progress sync (Hardcover)

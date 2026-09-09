@@ -83,6 +83,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- co
 elif [ $rc -eq 3 ]; then echo "SKIPPED  rename-migration (no local KOReader)"; skipped="${skipped:+$skipped, }rename-migration"
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
+section "Automatic updates (stale install, a wake, the served build installs itself)"
+out=$(bash tests/auto-update/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- checks unprompted, installs silently, asks only about the restart, throttled"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  auto-update (no local KOReader)"; skipped="${skipped:+$skipped, }auto-update"
+else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
+
 section "Hardcover + Bookshelf hot parking (real Bookshelf plugin, desktop KOReader)"
 out=$(bash tests/hardcover-park/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- the park is treated as the close"

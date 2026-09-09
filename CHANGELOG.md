@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-08 — build BUILDID
+
+- **Updates install themselves.** With a self-hosted update source set, the
+  plugin checks it quietly when the device wakes, reconnects, or starts (at
+  most every six hours), installs a changed build, and asks only whether to
+  restart now. *Bookbridge → Install updates automatically* turns it off.
+  Verified end to end on the desktop KOReader: a stale install, a Resume
+  event, the served build installed with no dialogs, and a second wake inside
+  the interval doing nothing.
+
 ## 2026-09-08 — build 3d02dd3
 
 - **Bluetooth keyboard: "ready" in a few seconds after waking**, not a

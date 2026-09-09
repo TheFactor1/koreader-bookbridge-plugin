@@ -124,6 +124,13 @@ function Bookbridge:loadSettings()
     -- is public is a settings change, not a code change. Clearing it falls
     -- back to the GitHub *releases* path below, unchanged.
     self.update_url = self.sm_settings.data.shelfmark.update_url
+    -- Automatic updates from the self-hosted source: checked quietly when
+    -- the device wakes, gets its network back, or starts (at most once every
+    -- six hours), installed without asking, and only the restart is offered.
+    -- Nothing is ever checked unasked against the GitHub-releases path.
+    self.auto_update = self.sm_settings.data.shelfmark.auto_update
+    if self.auto_update == nil then self.auto_update = true end
+    self.last_auto_update_check = self.sm_settings.data.shelfmark.last_auto_update_check
     -- Hardcover (hardcover.app) -- a public HTTPS GraphQL API, unlike Anna's
     -- Archive/CWA/the Shelfmark server, so no self-hosted companion or
     -- SOCKS5 proxy is needed for this one; it's reachable directly.
@@ -147,6 +154,11 @@ function Bookbridge:init()
     self:loadSettings()
     self:migratePluginFolder()
     self.ui.menu:registerToMainMenu(self)
+    -- Automatic update check a little after start; the interval inside makes
+    -- this free on every start but the first in six hours.
+    if self.auto_update and self.update_url and self.update_url ~= "" then
+        UIManager:scheduleIn(30, function() self:autoCheckForUpdate("startup") end)
+    end
     self:registerFileDialogButtons()
 end
 
@@ -176,6 +188,8 @@ function Bookbridge:saveAllSettings(msg)
         ai_relay_url = self.ai_relay_url,
         ai_relay_token = self.ai_relay_token,
         update_url = self.update_url,
+        auto_update = self.auto_update,
+        last_auto_update_check = self.last_auto_update_check,
         bt_keyboard_addr = self.bt_keyboard_addr,
         bt_ready_on_wake = self.bt_ready_on_wake,
     })
@@ -6165,29 +6179,95 @@ function Bookbridge:checkForUpdate()
     })
 end
 
-function Bookbridge:applyUpdate(target)
+-- opts.auto: an unattended install (autoCheckForUpdate) -- no progress
+-- dialog, failures go to the debug log instead of a popup, and the restart
+-- offer says the update happened by itself.
+function Bookbridge:applyUpdate(target, opts)
+    opts = opts or {}
     local Trapper = require("ui/trapper")
     local socks5_proxy = self.socks5_proxy
     local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
         return doApplyUpdate(target, socks5_proxy)
-    end, _("Downloading update..."))
+    end, not opts.auto and _("Downloading update...") or nil)
 
     if not completed then return end
     if not ok then
-        UIManager:show(InfoMessage:new{ text = err or _("Update failed.") })
-        return
+        if opts.auto then
+            debugLog("[update] auto: install failed: " .. tostring(err or "?"))
+        else
+            UIManager:show(InfoMessage:new{ text = err or _("Update failed.") })
+        end
+        return false
     end
+    local label = "v" .. tostring(target.version) .. (target.build and (" build " .. target.build) or "")
+    if opts.auto then debugLog("[update] auto: installed " .. label) end
     -- Offer the restart right here: UIManager:restartKOReader() exits with
     -- code 85, which koreader.sh treats as "start again" on every platform.
     -- A clean quit, so settings and the reading position are saved first.
     local ConfirmBox = require("ui/widget/confirmbox")
     UIManager:show(ConfirmBox:new{
-        text = T(_("Updated to %1. The new version takes effect when KOReader restarts.\n\nRestart now?"),
-            "v" .. tostring(target.version) .. (target.build and (" build " .. target.build) or "")),
+        text = opts.auto
+            and T(_("Bookbridge updated itself to %1. The new version takes effect when KOReader restarts.\n\nRestart now?"), label)
+            or T(_("Updated to %1. The new version takes effect when KOReader restarts.\n\nRestart now?"), label),
         ok_text = _("Restart now"),
         cancel_text = _("Later"),
         ok_callback = function() UIManager:restartKOReader() end,
     })
+    return true
+end
+
+-- ===== automatic updates =====
+-- Shared across plugin instances (FileManager and Reader each get one) so
+-- two instances can't double-check, and persisted so a reboot doesn't reset
+-- the six-hour clock.
+local auto_update_state = { last = nil, running = false }
+local AUTO_UPDATE_INTERVAL = 6 * 3600
+
+-- Quiet check-and-install from the self-hosted update source. Called with a
+-- reason ("wake", "network", "startup") from the hooks below; safe to call
+-- often -- the interval and the running flag make it a no-op almost always.
+-- True when an automatic check could do anything at all: the switch is on
+-- and a self-hosted source is set. The hooks test the same two fields inline
+-- before scheduling (they are exercised on bare tables by the test suites),
+-- so a device without an update source never runs a timer.
+function Bookbridge:autoUpdateWanted()
+    return self.auto_update and self.update_url and self.update_url ~= "" and true or false
+end
+
+function Bookbridge:autoCheckForUpdate(reason)
+    reason = reason or "?"
+    if not self:autoUpdateWanted() then return end
+    if auto_update_state.running then return end
+    local now = os.time()
+    local last = auto_update_state.last or tonumber(self.last_auto_update_check) or 0
+    if now - last < AUTO_UPDATE_INTERVAL then return end
+    auto_update_state.running = true
+    auto_update_state.last = now
+    self.last_auto_update_check = now
+    self:saveAllSettings()
+    debugLog("[update] auto (" .. reason .. "): checking " .. tostring(self.update_url))
+    local Trapper = require("ui/trapper")
+    Trapper:wrap(function()
+        local update_url, socks5_proxy = self.update_url, self.socks5_proxy
+        local completed, info, code, err = Trapper:dismissableRunInSubprocess(function()
+            return doCheckForUpdate(update_url, socks5_proxy)
+        end)  -- no widget: nothing on screen while it looks
+        if not completed then auto_update_state.running = false; return end
+        if not info then
+            debugLog("[update] auto (" .. reason .. "): couldn't check: " .. tostring(err or code))
+            auto_update_state.running = false
+            return
+        end
+        if not info.manifest or #info.changed == 0 then
+            debugLog("[update] auto (" .. reason .. "): up to date (build " .. tostring(info.build or info.version or "?") .. ")")
+            auto_update_state.running = false
+            return
+        end
+        debugLog("[update] auto (" .. reason .. "): build " .. tostring(info.build or "?")
+            .. " available (" .. table.concat(info.changed, ", ") .. ") -- installing")
+        self:applyUpdate(info, { auto = true })
+        auto_update_state.running = false
+    end)
 end
 
 -- ===== device-to-device settings transfer (QR code / paste) =====
@@ -7234,6 +7314,17 @@ function Bookbridge:addToMainMenu(menu_items)
                         callback = function()
                             local Trapper = require("ui/trapper")
                             Trapper:wrap(function() self:checkForUpdate() end)
+                        end,
+                    },
+                    {
+                        text = _("Install updates automatically"),
+                        help_text = _("Checks the self-hosted update source quietly when the device wakes, reconnects, or starts (at most every six hours) and installs what it finds. Only the restart is asked about."),
+                        checked_func = function() return self.auto_update and true or false end,
+                        enabled_func = function() return self.update_url and self.update_url ~= "" end,
+                        keep_menu_open = true,
+                        callback = function()
+                            self.auto_update = not self.auto_update
+                            self:saveAllSettings()
                         end,
                     },
                     {
@@ -9492,6 +9583,9 @@ end
 -- pending work only moved on the next close or resume, so progress read on a
 -- plane sat there until you happened to close another book.
 function Bookbridge:onNetworkConnected()
+    if self.auto_update and self.update_url and self.update_url ~= "" then
+        UIManager:scheduleIn(5, function() self:autoCheckForUpdate("network") end)
+    end
     if not self.hardcover_progress_sync then return end
     if not self.hardcover_token or self.hardcover_token == "" then return end
     if next(loadHardcoverPending()) == nil then return end
@@ -9611,6 +9705,11 @@ function Bookbridge:onResume()
     -- Bluetooth keyboard: listen again after a wake, if asked to (Kindle).
     if self.bt_ready_on_wake and self.bt_keyboard_addr and btOnKindle() then
         UIManager:scheduleIn(2, function() self:btReady(true) end)
+    end
+    -- Updates: a quiet look at the self-hosted source once the network has
+    -- had a moment to come back (throttled inside).
+    if self.auto_update and self.update_url and self.update_url ~= "" then
+        UIManager:scheduleIn(10, function() self:autoCheckForUpdate("wake") end)
     end
     -- Push any progress captured on suspend/close. No throttle needed -- at
     -- most one record per book, and processHardcoverPending is a cheap no-op
