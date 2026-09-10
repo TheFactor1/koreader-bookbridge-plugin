@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build 649edf7
+
+- **Send to CWA now handles "Series N_ Title" download names.** A file named
+  like "Author - Series 2_ Actual Title" was searching CWA for the series
+  name, matching book 1 of the same series, and skipping the upload as a
+  possible duplicate — so a book you didn't have never got added. It now
+  reads the real title after the volume number and uploads correctly.
+
 ## 2026-09-10 — build 71c3876
 
 - **Fixed: author search hung silently.** The new author picker crashed
