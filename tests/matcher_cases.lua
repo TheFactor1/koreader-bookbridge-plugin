@@ -32,6 +32,11 @@ expectQ("Sarah J. Maas - Court of Thorns and Roses 2_ A Court Of Mist And Fury",
 -- detection would pick "Nobody Known" as the title, but the "N_ " marker
 -- proves which side is the title, so the real title still wins.
 expectQ("Nobody Known - Some Series 3_ The Real Title", "The Real Title")
+-- Two underscores, and the digit sits before the SECOND one only. Calibre's
+-- colon mangling puts the real title before the FIRST "_", so the volume
+-- rule must not fire here (it did, once, and would have uploaded a duplicate
+-- -- caught by the full dry-run while this suite stayed green).
+expectQ("Matt Dinniman - Carl's Doomsday Scenario_ Dungeon Crawler Carl Book 2_ Book II of the Dungeon Crawler Carl Saga", "Carl's Doomsday Scenario")
 expectQ("Dune Messiah - Frank Herbert", "Dune Messiah")
 expectQ("Fourth Wing (Rebecca Yarros) (z-library.sk, 1lib.sk, z-lib.sk)", "Fourth Wing")
 expectQ("Road, The - Cormac McCarthy", "Road, The")

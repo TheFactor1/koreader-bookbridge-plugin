@@ -2635,10 +2635,26 @@ end
 -- Returns { {id, name, books_count, group}, ... } -- group is "Mine" for the
 -- account's own lists and the owner's username for followed ones -- an empty
 -- table when the account owns and follows nothing, or nil + error.
+-- The four Hardcover status shelves, in Hardcover's own status_id order.
+-- 4 is unused upstream; 5 is "Did Not Finish".
+local HARDCOVER_SHELVES = {
+    { status_id = 1, name = "Want to Read" },
+    { status_id = 2, name = "Currently Reading" },
+    { status_id = 3, name = "Read" },
+    { status_id = 5, name = "Did Not Finish" },
+}
+
+-- Shelves first (they are what people actually mean by "my lists"), then own
+-- lists, then followed. Entries carry kind="status" or kind="list" so the
+-- renderer can dispatch without a second lookup.
 local function doHardcoverListLists(token)
     local data, err = doHardcoverGraphQL(token, [[
         query MyLists {
             me {
+                want_to_read: user_books_aggregate(where: {status_id: {_eq: 1}}) { aggregate { count(columns: [book_id], distinct: true) } }
+                currently_reading: user_books_aggregate(where: {status_id: {_eq: 2}}) { aggregate { count(columns: [book_id], distinct: true) } }
+                read: user_books_aggregate(where: {status_id: {_eq: 3}}) { aggregate { count(columns: [book_id], distinct: true) } }
+                did_not_finish: user_books_aggregate(where: {status_id: {_eq: 5}}) { aggregate { count(columns: [book_id], distinct: true) } }
                 lists(order_by: {name: asc}) { id name books_count }
                 followed_lists {
                     list { id name books_count user { username } }
@@ -2649,11 +2665,21 @@ local function doHardcoverListLists(token)
     if not data then return nil, err end
     local me = data.me and data.me[1]
     if not me then return {} end
-    local seen, out = {}, {}
+    local out = {}
+    local counts = { [1] = me.want_to_read, [2] = me.currently_reading, [3] = me.read, [5] = me.did_not_finish }
+    for _idx, shelf in ipairs(HARDCOVER_SHELVES) do
+        local agg = counts[shelf.status_id]
+        local n = agg and agg.aggregate and agg.aggregate.count
+        out[#out + 1] = {
+            kind = "status", status_id = shelf.status_id, name = _(shelf.name),
+            books_count = type(n) == "number" and n or nil, group = _("Shelves"),
+        }
+    end
+    local seen = {}
     for _idx, l in ipairs(me.lists or {}) do
         if l and l.id and not seen[l.id] then
             seen[l.id] = true
-            out[#out + 1] = { id = l.id, name = l.name, books_count = l.books_count, group = _("Mine") }
+            out[#out + 1] = { kind = "list", id = l.id, name = l.name, books_count = l.books_count, group = _("Mine") }
         end
     end
     for _idx, f in ipairs(me.followed_lists or {}) do
@@ -2661,7 +2687,7 @@ local function doHardcoverListLists(token)
         if l and l.id and not seen[l.id] then
             seen[l.id] = true
             out[#out + 1] = {
-                id = l.id, name = l.name, books_count = l.books_count,
+                kind = "list", id = l.id, name = l.name, books_count = l.books_count,
                 group = (type(l.user) == "table" and l.user.username) or nil,
             }
         end
@@ -4670,11 +4696,27 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- catalog fails to recognise the name. After-separator side
                 -- first (the usual "Author - Series N_ Title" shape), then
                 -- the other, for "Series N_ Title - Author".
-                local real_title = after_sep and after_sep:match("^.-%s+%d+_%s+(.+)$")
-                if not (real_title and real_title ~= "") then
-                    real_title = before_sep and before_sep:match("^.-%s+%d+_%s+(.+)$")
+                --
+                -- Only the FIRST "_ " counts. In Calibre's colon mangling the
+                -- real title is everything before the first underscore, and
+                -- anything after a LATER one is a subtitle or suffix -- so
+                -- "Carl's Doomsday Scenario_ Dungeon Crawler Carl Book 2_ Book
+                -- II of the ... Saga" must keep "Carl's Doomsday Scenario",
+                -- even though a digit sits before its second underscore.
+                -- (Found by the full dry-run: a scan for "digit before ANY _"
+                -- took the wrong side there and would have uploaded a
+                -- duplicate.) So split at the first "_ " and require the head
+                -- to END in a volume number.
+                local function afterVolumeMarker(side)
+                    if type(side) ~= "string" then return nil end
+                    local head, tail = side:match("^(.-)_%s+(.+)$")
+                    if head and tail and tail ~= "" and head:match("%s%d+$") then
+                        return tail
+                    end
+                    return nil
                 end
-                if real_title and real_title ~= "" then
+                local real_title = afterVolumeMarker(after_sep) or afterVolumeMarker(before_sep)
+                if real_title then
                     search_title = real_title
                     series_volume_mangle = true
                 end
@@ -5680,6 +5722,82 @@ function Bookbridge:hardcoverAuthorBibliography(author_id, limit, offset)
     return books, total, author_name, err
 end
 
+-- Shared: turn a Hardcover book node into the record the renderer expects.
+-- Identical to the inline block in doHardcoverListBooks / the bibliography.
+local function hardcoverBookRecord(b)
+    local authors = {}
+    for _idx, bc in ipairs(b.contributions or {}) do
+        if bc.author and bc.author.name then table.insert(authors, bc.author.name) end
+    end
+    local publish_year = nil
+    if type(b.release_year) == "number" then
+        publish_year = b.release_year
+    elseif type(b.release_date) == "string" then
+        local y = b.release_date:match("^(%d%d%d%d)")
+        if y then publish_year = tonumber(y) end
+    end
+    local display_fields = {}
+    if type(b.rating) == "number" then
+        local rating_str = string.format("%.1f", b.rating)
+        if type(b.ratings_count) == "number" and b.ratings_count > 0 then
+            rating_str = rating_str .. " (" .. formatCount(b.ratings_count) .. ")"
+        end
+        table.insert(display_fields, { label = "Rating", value = rating_str })
+    end
+    if type(b.users_count) == "number" and b.users_count > 0 then
+        table.insert(display_fields, { label = "Readers", value = formatCount(b.users_count) })
+    end
+    return {
+        title = b.title, authors = authors, publish_year = publish_year,
+        display_fields = display_fields,
+        cover_url = type(b.cached_image) == "table" and b.cached_image.url or nil,
+        provider = "hardcover", provider_id = tostring(b.id),
+    }
+end
+
+-- One page of the device account's own status shelf, most recently updated
+-- first. Returns books, total, shelf_name, or nil x3 + error.
+local function doHardcoverShelfBooks(token, status_id, limit, offset)
+    local data, err = doHardcoverGraphQL(token, [[
+        query ShelfBooks($status: Int!, $limit: Int!, $offset: Int!) {
+            me {
+                user_books(where: {status_id: {_eq: $status}}, order_by: {updated_at: desc}, limit: $limit, offset: $offset) {
+                    book {
+                        id
+                        title
+                        release_year
+                        release_date
+                        rating
+                        ratings_count
+                        users_count
+                        cached_image
+                        contributions(where: {contribution: {_eq: "Author"}}) { author { name } }
+                    }
+                }
+                user_books_aggregate(where: {status_id: {_eq: $status}}) { aggregate { count(columns: [book_id], distinct: true) } }
+            }
+        }
+    ]], { status = status_id, limit = limit, offset = offset })
+    if not data then return nil, nil, nil, err end
+    local me = data.me and data.me[1]
+    if not me then return nil, nil, nil, _("Hardcover didn't return your shelf.") end
+    local seen_ids, books = {}, {}
+    for _idx, ub in ipairs(me.user_books or {}) do
+        local b = ub and ub.book
+        if b and b.id and not seen_ids[b.id] then
+            seen_ids[b.id] = true
+            books[#books + 1] = hardcoverBookRecord(b)
+        end
+    end
+    local total = me.user_books_aggregate and me.user_books_aggregate.aggregate
+        and me.user_books_aggregate.aggregate.count or #books
+    local shelf_name = nil
+    for _idx, s in ipairs(HARDCOVER_SHELVES) do
+        if s.status_id == status_id then shelf_name = _(s.name) end
+    end
+    return books, total, shelf_name
+end
+
 function Bookbridge:hardcoverListLists()
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
@@ -5688,6 +5806,16 @@ function Bookbridge:hardcoverListLists()
     end, _("Loading your Hardcover lists..."))
     if not completed then return nil, _("Cancelled.") end
     return lists, err
+end
+
+function Bookbridge:hardcoverShelfBooks(status_id, limit, offset)
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, books, total, shelf_name, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverShelfBooks(token, status_id, limit, offset)
+    end, _("Loading shelf..."))
+    if not completed then return nil, nil, nil, _("Cancelled.") end
+    return books, total, shelf_name, err
 end
 
 function Bookbridge:hardcoverListBooks(list_id, limit, offset)
@@ -8293,6 +8421,10 @@ function Bookbridge:browseHardcoverLists()
             text = l.group and T(_("%1  [%2]"), label, l.group) or label,
             list_id = l.id,
             label = l.name,
+            -- "status" (a shelf: Want to Read / Currently Reading / ...) or
+            -- "list"; the renderer fetches each through its own query.
+            kind = l.kind,
+            status_id = l.status_id,
         }
     end
 
@@ -8308,7 +8440,7 @@ function Bookbridge:browseHardcoverLists()
         onMenuSelect = function(_menu_self, item)
             local Trapper = require("ui/trapper")
             Trapper:wrap(function()
-                self:browseHardcoverListBooks(item.list_id, item.label, 0, nil, lists_menu)
+                self:browseHardcoverListBooks(item.list_id, item.label, 0, nil, lists_menu, item.kind, item.status_id)
             end)
         end,
     }
@@ -8322,11 +8454,20 @@ local HARDCOVER_LIST_PAGE_SIZE = 25
 -- browseAuthorBibliography: same paginated menu, same cover prefetch, and a
 -- tap hands the book to browseReleases exactly as an author's bibliography
 -- does, so downloading from a list is unchanged from before.
-function Bookbridge:browseHardcoverListBooks(list_id, list_name, offset, existing_books, caller_menu)
+function Bookbridge:browseHardcoverListBooks(list_id, list_name, offset, existing_books, caller_menu, kind, status_id)
     if caller_menu then UIManager:close(caller_menu) end
 
-    local new_books, total, resolved_name, err = self:hardcoverListBooks(
-        list_id, HARDCOVER_LIST_PAGE_SIZE, offset or 0)
+    -- A status shelf (Want to Read / Currently Reading / Read / DNF) is the
+    -- device owner's user_books, not a list -- different query, same record
+    -- shape, so everything below renders it identically.
+    local new_books, total, resolved_name, err
+    if kind == "status" and status_id then
+        new_books, total, resolved_name, err = self:hardcoverShelfBooks(
+            status_id, HARDCOVER_LIST_PAGE_SIZE, offset or 0)
+    else
+        new_books, total, resolved_name, err = self:hardcoverListBooks(
+            list_id, HARDCOVER_LIST_PAGE_SIZE, offset or 0)
+    end
     if not new_books then
         UIManager:show(InfoMessage:new{ text = err or _("Couldn't load this list.") })
         return
@@ -8376,7 +8517,7 @@ function Bookbridge:browseHardcoverListBooks(list_id, list_name, offset, existin
             local Trapper = require("ui/trapper")
             if item.is_load_more then
                 Trapper:wrap(function()
-                    self:browseHardcoverListBooks(list_id, list_name or resolved_name, #books, books, list_menu)
+                    self:browseHardcoverListBooks(list_id, list_name or resolved_name, #books, books, list_menu, kind, status_id)
                 end)
             else
                 Trapper:wrap(function()
