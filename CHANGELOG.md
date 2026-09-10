@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build 0b7b9a7
+
+- **Hardcover lists are now the device owner's, not the server's.** "Browse a
+  Hardcover list" used to go through the Shelfmark server's own Hardcover
+  account, so every Kindle saw the same person's lists. It now reads the
+  lists (followed and own) with the device's own Hardcover token, and
+  browses a list's books the same way — each Kindle sees its owner's lists.
+  "Most Popular" is global by design and is unchanged.
+
 ## 2026-09-10 — build 5f2b1f3
 
 - **Send to CWA: "Series N_ Title" downloads now upload.** The earlier fix
