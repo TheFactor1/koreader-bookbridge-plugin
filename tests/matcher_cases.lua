@@ -1,6 +1,6 @@
 local function words(t) local l=sortedWordList(normalizeTitleWords(t)) return table.concat(l," ") end
 local catalog = { __authors = {} }
-for _, a in ipairs({"Pierce Brown","Cormac McCarthy","Cixin Liu","Blake Crouch","Matt Dinniman","Rebecca Yarros","Frank Herbert","Stan Lee","Tom Stechschulte"}) do
+for _, a in ipairs({"Pierce Brown","Cormac McCarthy","Cixin Liu","Blake Crouch","Matt Dinniman","Rebecca Yarros","Frank Herbert","Stan Lee","Tom Stechschulte","Sarah J. Maas"}) do
   catalog.__authors[words(a)] = true
 end
 local fails = 0
@@ -24,6 +24,10 @@ expectQ("The Dark Forest (The Three-Body Problem Series Book 2) - Cixin Liu", "T
 expectQ("Pierce Brown - Iron Gold_ Book IV of the Red Rising Saga", "Iron Gold")
 expectQ("The Dungeon Anarchist's Cookbook_ Dungeon Crawler Carl Book 3 - Matt Dinniman", "The Dungeon Anarchist's Cookbook")
 expectQ("Carl's Doomsday Scenario_ Dungeon Crawler Carl Book 2 - Matt Dinniman", "Carl's Doomsday Scenario")
+-- Series-volume mangling ("<Series> <N>_ <Title>"): the real title is AFTER
+-- the number, not before it. A digit right before the "_" is what tells this
+-- apart from the colon mangling above (word before "_", title before it).
+expectQ("Sarah J. Maas - Court of Thorns and Roses 2_ A Court Of Mist And Fury", "A Court Of Mist And Fury")
 expectQ("Dune Messiah - Frank Herbert", "Dune Messiah")
 expectQ("Fourth Wing (Rebecca Yarros) (z-library.sk, 1lib.sk, z-lib.sk)", "Fourth Wing")
 expectQ("Road, The - Cormac McCarthy", "Road, The")

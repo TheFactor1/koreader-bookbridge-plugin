@@ -4529,6 +4529,26 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             else
                 search_title = cleaned_fname
             end
+
+            -- Series-volume mangling: an "<Author> - <Series> <N>_ <Title>"
+            -- download name (a "Book N" collapsed to "N_") leaves the SERIES
+            -- name where the title should be. Searching or matching on it
+            -- collides book N with book 1 of the same series -- they share the
+            -- series name, and the number is the only thing telling them apart
+            -- (found live: an ACOTAR book-2 file skipped as a maybe-duplicate
+            -- of book 1). So take the title from AFTER the number, and drop the
+            -- series+number from the relevance basis too. The digit right
+            -- before the "_" is what separates this from the colon mangling
+            -- ("Cookbook_ subtitle"), where the real title is BEFORE the "_".
+            local relevance_fname = fname
+            if search_title == after_sep and after_sep then
+                local real_title = after_sep:match("^.-%s+%d+_%s+(.+)$")
+                if real_title and real_title ~= "" then
+                    search_title = real_title
+                    relevance_fname = ((before_sep and before_sep ~= "")
+                        and (before_sep .. " ") or "") .. real_title
+                end
+            end
             -- Anna's Archive (and similar sources) can't put a literal
             -- colon in a filename, so it substitutes an underscore, and
             -- can't put a bracket-qualified annotation inline either
@@ -4661,7 +4681,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             local seen_uuids = {}
             local raw_entry_count = 0
             local any_response = false
-            local fname_words = normalizeTitleWords(fname)
+            local fname_words = normalizeTitleWords(relevance_fname)
             -- Volume gate: a filename that names a volume ("Book 2", "02",
             -- "IV", "(1)") can only ever match a candidate that carries the
             -- same number, in its title or as its CWA series index. Applied
