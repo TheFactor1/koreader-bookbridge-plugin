@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build 71c3876
+
+- **Fixed: author search hung silently.** The new author picker crashed
+  internally (a loop variable shadowed gettext), so searching an author
+  showed "Searching Hardcover..." and then nothing. Now it lists matches as
+  intended.
+
 ## 2026-09-10 — build 3a584b9
 
 - **Send text to the Kindle from your phone.** Bookbridge now runs a small
