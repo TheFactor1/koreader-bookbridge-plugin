@@ -2626,6 +2626,131 @@ local function doHardcoverAuthorBibliography(token, author_id, limit, offset)
     return books, total, author.name
 end
 
+-- The lists the DEVICE's Hardcover account owns or follows -- read with the
+-- device's own token, never the Shelfmark server's connection.
+--
+-- The previous browseHardcoverLists went through the server
+-- (/api/metadata/field-options?provider=hardcover&field=hardcover_list), which
+-- resolves with whatever account the server is connected to. On a shared
+-- server that means every Kindle saw the SERVER OWNER's lists, not its own
+-- owner's. Lists are personal in a way "Most Popular" is not, so they follow
+-- the same rule as followed authors: the token in this device's Settings.
+--
+-- Returns { {id, name, books_count, group}, ... } -- group is "Mine" for the
+-- account's own lists and the owner's username for followed ones -- an empty
+-- table when the account owns and follows nothing, or nil + error.
+local function doHardcoverListLists(token)
+    local data, err = doHardcoverGraphQL(token, [[
+        query MyLists {
+            me {
+                lists(order_by: {name: asc}) { id name books_count }
+                followed_lists {
+                    list { id name books_count user { username } }
+                }
+            }
+        }
+    ]], {})
+    if not data then return nil, err end
+    local me = data.me and data.me[1]
+    if not me then return {} end
+    local seen, out = {}, {}
+    for _idx, l in ipairs(me.lists or {}) do
+        if l and l.id and not seen[l.id] then
+            seen[l.id] = true
+            out[#out + 1] = { id = l.id, name = l.name, books_count = l.books_count, group = _("Mine") }
+        end
+    end
+    for _idx, f in ipairs(me.followed_lists or {}) do
+        local l = f and f.list
+        if l and l.id and not seen[l.id] then
+            seen[l.id] = true
+            out[#out + 1] = {
+                id = l.id, name = l.name, books_count = l.books_count,
+                group = (type(l.user) == "table" and l.user.username) or nil,
+            }
+        end
+    end
+    return out
+end
+
+-- One page of a list's books, in the list's own order. Same record shape as
+-- doHardcoverAuthorBibliography so the same renderer and release lookup work
+-- unchanged. Returns books, total, list_name, or nil x3 + error.
+local function doHardcoverListBooks(token, list_id, limit, offset)
+    local data, err = doHardcoverGraphQL(token, [[
+        query ListBooks($id: Int!, $limit: Int!, $offset: Int!) {
+            lists_by_pk(id: $id) {
+                name
+                list_books(order_by: {position: asc}, limit: $limit, offset: $offset) {
+                    book {
+                        id
+                        title
+                        release_year
+                        release_date
+                        rating
+                        ratings_count
+                        users_count
+                        cached_image
+                        contributions(where: {contribution: {_eq: "Author"}}) { author { name } }
+                    }
+                }
+                list_books_aggregate { aggregate { count } }
+            }
+        }
+    ]], { id = list_id, limit = limit, offset = offset })
+    if not data then return nil, nil, nil, err end
+    local list = data.lists_by_pk
+    if not list then return nil, nil, nil, _("List not found on Hardcover.") end
+
+    local seen_ids, books = {}, {}
+    for _idx, lb in ipairs(list.list_books or {}) do
+        local b = lb and lb.book
+        if b and b.id and not seen_ids[b.id] then
+            seen_ids[b.id] = true
+            local authors = {}
+            for _idx, bc in ipairs(b.contributions or {}) do
+                if bc.author and bc.author.name then table.insert(authors, bc.author.name) end
+            end
+
+            local publish_year = nil
+            if type(b.release_year) == "number" then
+                publish_year = b.release_year
+            elseif type(b.release_date) == "string" then
+                local y = b.release_date:match("^(%d%d%d%d)")
+                if y then publish_year = tonumber(y) end
+            end
+
+            local display_fields = {}
+            if type(b.rating) == "number" then
+                local rating_str = string.format("%.1f", b.rating)
+                if type(b.ratings_count) == "number" and b.ratings_count > 0 then
+                    rating_str = rating_str .. " (" .. formatCount(b.ratings_count) .. ")"
+                end
+                table.insert(display_fields, { label = "Rating", value = rating_str })
+            end
+            if type(b.users_count) == "number" and b.users_count > 0 then
+                table.insert(display_fields, { label = "Readers", value = formatCount(b.users_count) })
+            end
+
+            table.insert(books, {
+                title = b.title,
+                authors = authors,
+                publish_year = publish_year,
+                display_fields = display_fields,
+                cover_url = type(b.cached_image) == "table" and b.cached_image.url or nil,
+                provider = "hardcover",
+                provider_id = tostring(b.id),
+            })
+        end
+    end
+
+    local total = list.list_books_aggregate
+        and list.list_books_aggregate.aggregate
+        and list.list_books_aggregate.aggregate.count
+        or #books
+    return books, total, list.name
+end
+
 -- Finds, for each given Hardcover book id, whichever sibling edition
 -- (grouped by canonical_id) actually has the most readers -- some
 -- editions logged as "Currently Reading"/"Read" carry no cover at all or
@@ -5557,6 +5682,26 @@ function Bookbridge:hardcoverAuthorBibliography(author_id, limit, offset)
     end, _("Loading author's books..."))
     if not completed then return nil, nil, nil, _("Cancelled.") end
     return books, total, author_name, err
+end
+
+function Bookbridge:hardcoverListLists()
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, lists, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverListLists(token)
+    end, _("Loading your Hardcover lists..."))
+    if not completed then return nil, _("Cancelled.") end
+    return lists, err
+end
+
+function Bookbridge:hardcoverListBooks(list_id, limit, offset)
+    local Trapper = require("ui/trapper")
+    local token = self.hardcover_token
+    local completed, books, total, list_name, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverListBooks(token, list_id, limit, offset)
+    end, _("Loading list..."))
+    if not completed then return nil, nil, nil, _("Cancelled.") end
+    return books, total, list_name, err
 end
 
 function Bookbridge:hardcoverBestEditions(provider_ids)
@@ -8577,34 +8722,38 @@ function Bookbridge:promptHardcoverFollowAuthorForFile(author_name)
     confirmAndFollowAuthorOnHardcover(self, author_name)
 end
 
--- Browses whatever the Shelfmark server's own connected Hardcover account
--- follows -- this goes through the server's existing Hardcover connection
--- (self:apiRequest, same auth as "Most popular"), not the device's own
--- hardcover_token from Settings above, which is a separate, unrelated
--- credential used only for writing (marking books read, following authors).
--- Nothing to configure here beyond following lists on hardcover.app itself.
+-- Browses the lists the DEVICE OWNER's Hardcover account owns or follows,
+-- read with the device's own hardcover_token from Settings -- the same
+-- credential the author flows use. It deliberately does NOT go through the
+-- Shelfmark server's Hardcover connection: on a shared server that connection
+-- belongs to one person, so every Kindle was seeing the server owner's lists
+-- instead of its own owner's. "Most popular" is the one intentionally global
+-- view and still uses the server path (see the query="*" search above).
 function Bookbridge:browseHardcoverLists()
-    local resp, code, err = self:apiRequest("GET", "/api/metadata/field-options?provider=hardcover&field=hardcover_list")
-    if err then
-        UIManager:show(InfoMessage:new{ text = err })
+    if not self.hardcover_token or self.hardcover_token == "" then
+        UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
     end
-    if code ~= 200 or not resp or not resp.options then
-        local msg = (resp and (resp.message or resp.error)) or _("Couldn't load Hardcover lists.")
-        UIManager:show(InfoMessage:new{ text = msg })
+    local lists, err = self:hardcoverListLists()
+    if not lists then
+        UIManager:show(InfoMessage:new{ text = err or _("Couldn't load Hardcover lists.") })
         return
     end
-    if #resp.options == 0 then
-        UIManager:show(InfoMessage:new{ text = _("No lists found -- follow some on hardcover.app first.") })
+    if #lists == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No lists found -- create or follow some on hardcover.app first.") })
         return
     end
 
     local item_table = {}
-    for i, opt in ipairs(resp.options) do
+    for i, l in ipairs(lists) do
+        local label = l.name or _("Untitled list")
+        if type(l.books_count) == "number" then
+            label = T(_("%1 (%2)"), label, formatCount(l.books_count))
+        end
         item_table[i] = {
-            text = opt.group and T(_("%1  [%2]"), opt.label, opt.group) or opt.label,
-            value = opt.value,
-            label = opt.label,
+            text = l.group and T(_("%1  [%2]"), label, l.group) or label,
+            list_id = l.id,
+            label = l.name,
         }
     end
 
@@ -8620,16 +8769,85 @@ function Bookbridge:browseHardcoverLists()
         onMenuSelect = function(_menu_self, item)
             local Trapper = require("ui/trapper")
             Trapper:wrap(function()
-                self:doSearch({
-                    fields = { hardcover_list = item.value },
-                    limit = 30,
-                    title_override = item.label,
-                    prefer_popular_edition = true,
-                }, nil, lists_menu)
+                self:browseHardcoverListBooks(item.list_id, item.label, 0, nil, lists_menu)
             end)
         end,
     }
     UIManager:show(lists_menu)
+end
+
+-- Page size for browseHardcoverListBooks' "Load more" pagination.
+local HARDCOVER_LIST_PAGE_SIZE = 25
+
+-- Renders one list's books straight from Hardcover, mirroring
+-- browseAuthorBibliography: same paginated menu, same cover prefetch, and a
+-- tap hands the book to browseReleases exactly as an author's bibliography
+-- does, so downloading from a list is unchanged from before.
+function Bookbridge:browseHardcoverListBooks(list_id, list_name, offset, existing_books, caller_menu)
+    if caller_menu then UIManager:close(caller_menu) end
+
+    local new_books, total, resolved_name, err = self:hardcoverListBooks(
+        list_id, HARDCOVER_LIST_PAGE_SIZE, offset or 0)
+    if not new_books then
+        UIManager:show(InfoMessage:new{ text = err or _("Couldn't load this list.") })
+        return
+    end
+
+    local books = existing_books or {}
+    for _idx, book in ipairs(new_books) do
+        table.insert(books, book)
+    end
+
+    if #books == 0 then
+        UIManager:show(InfoMessage:new{ text = _("This list is empty.") })
+        return
+    end
+
+    local first_page_books = {}
+    for i = 1, math.min(#new_books, COVER_ITEMS_PER_PAGE) do
+        first_page_books[i] = new_books[i]
+    end
+    self:prefetchCovers(first_page_books)
+
+    local item_table = {}
+    for i, book in ipairs(books) do
+        item_table[i] = {
+            text = formatBookRowText(book),
+            book_data = book,
+            cover_path = book.cover_path,
+            cover_url = book.cover_url,
+        }
+    end
+    if total and #books < total then
+        item_table[#item_table + 1] = { text = _("-- Load more results --"), is_load_more = true }
+    end
+
+    local menu_title = T(_("%1 (%2)"), list_name or resolved_name or _("List"), #books)
+
+    local list_menu
+    list_menu = Menu:new{
+        title = menu_title,
+        item_table = item_table,
+        multilines_forced = true,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_menu_self, item)
+            local Trapper = require("ui/trapper")
+            if item.is_load_more then
+                Trapper:wrap(function()
+                    self:browseHardcoverListBooks(list_id, list_name or resolved_name, #books, books, list_menu)
+                end)
+            else
+                Trapper:wrap(function()
+                    self:browseReleases(item.book_data, defaultReleaseQuery(item.book_data), list_menu)
+                end)
+            end
+        end,
+    }
+    attachCoverSupport(list_menu, self)
+    UIManager:show(list_menu)
 end
 
 -- Fixed page size for browseAuthorBibliography's "Load more" pagination --
