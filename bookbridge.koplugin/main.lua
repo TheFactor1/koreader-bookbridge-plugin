@@ -160,6 +160,8 @@ function Bookbridge:init()
         UIManager:scheduleIn(30, function() self:autoCheckForUpdate("startup") end)
     end
     self:registerFileDialogButtons()
+    -- Always-on clipboard receiver so a phone can push text into the clipboard.
+    self:startClipboardReceiver()
 end
 
 -- Writes every self.* setting field currently in memory -- shared by both
@@ -9759,7 +9761,133 @@ end
 
 -- Device sleeping: capture now, push on the next resume (a scheduled push
 -- wouldn't survive the sleep). No-op in FileManager (no document).
+-- ===== Clipboard receiver ("Send to Kindle") =====
+-- A tiny always-on HTTP listener that lets a phone push text straight into
+-- KOReader's clipboard, so you can paste instead of typing on the device.
+-- Unlike the debug HTTP inspector, it does exactly one thing -- set the
+-- clipboard -- and exposes nothing else about the device.
+--
+-- Send with a GET whose `text` query parameter carries the URL-encoded text:
+--   GET /clip?text=hello%20scribe%20123
+-- The query form accepts any content -- spaces, punctuation, URLs, slashes --
+-- because the value is parsed here rather than routed through URL path
+-- segments (which split on "/"). Then long-press any input field on the
+-- device -> Clipboard -> paste.
+local CLIPBOARD_RECEIVER_PORT = 8090
+
+function Bookbridge:_clipboardSend(client, code, body)
+    if not self.clipboard_server then return end
+    local status = ({ [200] = "200 OK", [400] = "400 Bad Request", [404] = "404 Not Found" })[code] or "200 OK"
+    body = body or ""
+    local response = table.concat({
+        "HTTP/1.1 " .. status,
+        "Content-Type: text/plain; charset=utf-8",
+        "Content-Length: " .. tostring(#body),
+        "Access-Control-Allow-Origin: *",
+        "Connection: close",
+        "",
+        body,
+    }, "\r\n")
+    pcall(function() self.clipboard_server:send(response, client) end)
+end
+
+function Bookbridge:_onClipboardRequest(data, client)
+    local util = require("util")
+    local uri = data and data:match("^%u+%s+([^%s]+)%s+HTTP/%d%.%d")
+    if not uri then
+        return self:_clipboardSend(client, 400, "Bad request")
+    end
+    local path, query = uri:match("^([^?]*)%??(.*)$")
+    if path == "/" or path == "" then
+        return self:_clipboardSend(client, 200,
+            "Bookbridge clipboard receiver.\nUse: GET /clip?text=<your text>")
+    end
+    if path ~= "/clip" then
+        return self:_clipboardSend(client, 404, "Not found")
+    end
+    local raw
+    for pair in ((query or "") .. "&"):gmatch("([^&]*)&") do
+        local k, v = pair:match("^([^=]*)=(.*)$")
+        if k == "text" then raw = v break end
+    end
+    if not raw or raw == "" then
+        return self:_clipboardSend(client, 400, "Missing text parameter")
+    end
+    -- application/x-www-form-urlencoded: '+' is a space, then decode %XX.
+    local text = util.urlDecode((raw:gsub("%+", " "))) or ""
+    local Device = require("device")
+    if Device.input and Device.input.setClipboardText then
+        Device.input.setClipboardText(text)
+    end
+    debugLog("[clipboard] received " .. tostring(#text) .. " chars")
+    self:_clipboardSend(client, 200, "OK")
+    -- Brief on-device confirmation.
+    local preview = text
+    if #preview > 60 then preview = preview:sub(1, 60) .. "..." end
+    UIManager:nextTick(function()
+        local ok = pcall(function()
+            require("ui/widget/notification"):notify(T(_("Clipboard: %1"), preview))
+        end)
+        if not ok then
+            UIManager:show(InfoMessage:new{ text = T(_("Clipboard: %1"), preview), timeout = 2 })
+        end
+    end)
+end
+
+function Bookbridge:startClipboardReceiver()
+    if self.clipboard_server then return end
+    local Device = require("device")
+    if Device:isKindle() then
+        os.execute("iptables -A INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
+            " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null")
+        os.execute("iptables -A OUTPUT -p tcp --sport " .. CLIPBOARD_RECEIVER_PORT ..
+            " -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null")
+    end
+    local ok_srv, SimpleTCPServer = pcall(require, "ui/message/simpletcpserver")
+    if not ok_srv then
+        debugLog("[clipboard] no simpletcpserver: " .. tostring(SimpleTCPServer))
+        return
+    end
+    local server = SimpleTCPServer:new{
+        host = "*",
+        port = CLIPBOARD_RECEIVER_PORT,
+        receiveCallback = function(d, c) return self:_onClipboardRequest(d, c) end,
+    }
+    local ok, err = server:start()
+    if ok then
+        self.clipboard_server = server
+        self.clipboard_mq = UIManager:insertZMQ(server)
+        debugLog("[clipboard] receiver listening on " .. CLIPBOARD_RECEIVER_PORT)
+    else
+        self.clipboard_server = nil
+        debugLog("[clipboard] failed to start: " .. tostring(err))
+    end
+end
+
+function Bookbridge:stopClipboardReceiver()
+    local Device = require("device")
+    if Device:isKindle() then
+        os.execute("iptables -D INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
+            " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null")
+        os.execute("iptables -D OUTPUT -p tcp --sport " .. CLIPBOARD_RECEIVER_PORT ..
+            " -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null")
+    end
+    if self.clipboard_mq then
+        UIManager:removeZMQ(self.clipboard_mq)
+        self.clipboard_mq = nil
+    end
+    if self.clipboard_server then
+        pcall(function() self.clipboard_server:stop() end)
+        self.clipboard_server = nil
+    end
+end
+
+function Bookbridge:onCloseWidget()
+    self:stopClipboardReceiver()
+end
+
 function Bookbridge:onSuspend()
+    self:stopClipboardReceiver()
     if self.bt_ready_on_wake and self.bt_keyboard_addr and btOnKindle() then
         -- radio off for the sleep; not tracked, so the wake-time "ready" is never blocked by it
         self:btRun("off", nil, nil, nil, { fire_and_forget = true })
@@ -9768,6 +9896,8 @@ function Bookbridge:onSuspend()
 end
 
 function Bookbridge:onResume()
+    -- Bring the clipboard receiver back up after a wake.
+    UIManager:scheduleIn(1, function() self:startClipboardReceiver() end)
     -- Bluetooth keyboard: listen again after a wake, if asked to (Kindle).
     if self.bt_ready_on_wake and self.bt_keyboard_addr and btOnKindle() then
         UIManager:scheduleIn(2, function() self:btReady(true) end)
