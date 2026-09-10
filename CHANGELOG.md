@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build d854622
+
+- **Text shared from your phone now lands straight in the open field.** If a
+  text box is open on the Kindle when you share, the text is typed into it
+  for you (a "Pasted: …" note confirms). Nothing open? It waits in the
+  clipboard as before — long-press → Clipboard → paste.
+- **Bluetooth keyboard removed.** The feature and its menu are gone in favour
+  of sharing text from the phone.
+
 ## 2026-09-10 — build 0b7b9a7
 
 - **Hardcover lists are now the device owner's, not the server's.** "Browse a
