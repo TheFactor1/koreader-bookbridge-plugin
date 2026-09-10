@@ -8486,7 +8486,9 @@ local function confirmAndFollowAuthorOnHardcover(self, author_name)
     -- count disambiguates the real author from summary/study-guide accounts
     -- that Hardcover's search ranks alongside them.
     local item_table = {}
-    for _, a in ipairs(candidates) do
+    -- Not `for _, a` -- `_` is gettext, and shadowing it with the loop index
+    -- would turn the _("...") calls just below into "call a number" errors.
+    for _idx, a in ipairs(candidates) do
         local label = a.name
         if a.books_count and a.books_count > 0 then
             local count = a.books_count == 1
