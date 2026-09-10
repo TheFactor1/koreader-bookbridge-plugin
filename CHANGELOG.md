@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build dcbe3c0
+
+- **Anna's Archive finds a working mirror on its own.** When the current
+  mirror is down, the plugin now switches to a live one and retries without
+  asking — the backend verifies a candidate is really Anna's Archive before
+  switching, so your donator key is never sent to a squatted domain. Falls
+  back to other sources only when every mirror is unreachable.
+
 ## 2026-09-08 — build 0838c07
 
 - **Automatic updates retry sooner.** A check that couldn't reach the update
