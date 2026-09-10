@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build 5f2b1f3
+
+- **Send to CWA: "Series N_ Title" downloads now upload.** The earlier fix
+  never engaged on the device (it depended on the author being recognised),
+  and the search's prefix-shortening then re-found book 1 of the same
+  series anyway. The real title is now read off whichever side carries the
+  volume marker, and a confidently-parsed title skips the shortening, so a
+  book you don't have is uploaded instead of parked in "check manually."
+
 ## 2026-09-10 — build 649edf7
 
 - **Send to CWA now handles "Series N_ Title" download names.** A file named
