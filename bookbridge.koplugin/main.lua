@@ -8034,53 +8034,43 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu)
     if aa_err == _("Cancelled.") then return end
 
     if aa_err_code == "MIRROR_DOWN" then
-        local ConfirmBox = require("ui/widget/confirmbox")
-        -- Hoisted here rather than required inside each callback below:
-        -- both need it, and browseReleases has no Trapper of its own (it
-        -- relies on already running inside its caller's wrap).
-        local Trapper = require("ui/trapper")
-        UIManager:show(ConfirmBox:new{
-            text = _("Anna's Archive's usual address seems to be down. Look for a working mirror, or skip it and search other sources?"),
-            ok_text = _("Find a working mirror"),
-            cancel_text = _("Skip, search other sources"),
-            -- Both callbacks wrapped for the reason given on the AI-review
-            -- ConfirmBox above: they fire from the UI loop, not from the
-            -- coroutine that showed this box, and every branch out of here
-            -- forks -- annasMirrorRefresh directly, browseReleases through
-            -- its own annasSearch, browseReleasesContinue through its
-            -- Prowlarr fallback. Unwrapped, picking either button froze the
-            -- UI for the length of a network round-trip.
-            ok_callback = function()
-              Trapper:wrap(function()
-                local result = self:annasMirrorRefresh()
-                if result and result.switched then
-                    UIManager:show(InfoMessage:new{
-                        text = T(_("Switched to annas-archive.%1 — searching again..."), result.activeTld),
-                        timeout = 2,
-                    })
-                    self:browseReleases(book, manual_query)
-                elseif result and result.allDead then
-                    UIManager:show(InfoMessage:new{
-                        text = _("Every known Anna's Archive mirror is unreachable right now. Searching other sources instead..."),
-                        timeout = 3,
-                    })
-                    self:browseReleasesContinue(book, manual_query, nil)
-                else
-                    UIManager:show(InfoMessage:new{
-                        text = _("That mirror looks fine now — the earlier failure may have been temporary. Try your search again."),
-                    })
-                end
-              end)
-            end,
-            cancel_callback = function()
-                Trapper:wrap(function()
-                    self:browseReleasesContinue(book, manual_query, nil)
-                end)
-            end,
+        -- Automatic mirror recovery (no prompt). The annas-archive-api
+        -- service verifies a candidate is really Anna's Archive before
+        -- switching (see isMirrorAlive in mirror-watch.js), so this never
+        -- silently sends the donator key to a squatted parking page. We are
+        -- already inside the caller's Trapper wrap, so annasMirrorRefresh's
+        -- network round-trip doesn't need its own. A depth guard stops an
+        -- endless switch/retry loop if a "working" mirror keeps failing.
+        local attempt = (self._aa_mirror_attempt or 0) + 1
+        self._aa_mirror_attempt = attempt
+        if attempt <= 3 then
+            local result = self:annasMirrorRefresh()
+            if result and result.switched then
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Anna's Archive mirror was down — switched to annas-archive.%1, searching again..."), result.activeTld),
+                    timeout = 2,
+                })
+                self:browseReleases(book, manual_query)
+                return
+            elseif result and not result.allDead then
+                -- The current mirror tested fine now: the failure was a blip.
+                -- Retry the same search rather than bothering the user.
+                self:browseReleases(book, manual_query)
+                return
+            end
+        end
+        -- Every known mirror is unreachable, or we have retried enough:
+        -- fall through to the other sources rather than dead-ending.
+        self._aa_mirror_attempt = nil
+        UIManager:show(InfoMessage:new{
+            text = _("Anna's Archive is unreachable right now — searching other sources."),
+            timeout = 3,
         })
+        self:browseReleasesContinue(book, manual_query, nil)
         return
     end
 
+    self._aa_mirror_attempt = nil
     self:browseReleasesContinue(book, manual_query, aa_results)
 end
 
