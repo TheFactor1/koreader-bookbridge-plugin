@@ -4,6 +4,18 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build 44057c8
+
+- **Following an author now lets you choose.** Instead of following whatever
+  Hardcover ranked first — often a "summary of" or study-guide account rather
+  than the real author — the plugin lists the matches (each with its book
+  count, so a 102-book author stands out from a 1-book imitator) and lets you
+  pick. A single clear match still confirms in one tap.
+  (Note: Hardcover only lets a token follow authors if it carries the
+  `write:social` scope; a token without it gets an HTTP 403 at the follow
+  step. Regenerate the token with social/write access at
+  hardcover.app/account/api if following fails.)
+
 ## 2026-09-10 — build dcbe3c0
 
 - **Anna's Archive finds a working mirror on its own.** When the current
