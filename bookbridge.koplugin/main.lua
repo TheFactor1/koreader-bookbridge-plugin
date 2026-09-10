@@ -2307,28 +2307,59 @@ local function doHardcoverFindBook(token, title, author, lang, identifiers)
 end
 -- END HARDCOVER MATCH BLOCK
 
-local function doHardcoverFindAuthor(token, name)
+-- How many author matches to offer the reader to choose from. Hardcover's
+-- search ranks by relevance, so the real author is usually first, but the
+-- top hit is often a study-guide/"summary of" account instead -- letting the
+-- reader pick (with a book count to tell a 102-book author from a 1-book
+-- imitator) is far more forgiving than blindly following hit #1.
+local HARDCOVER_AUTHOR_MATCH_LIMIT = 12
+
+-- Returns an ordered list of { id, name, books_count } candidates (relevance
+-- order preserved), an empty list when nothing matched, or nil + an error.
+local function doHardcoverFindAuthors(token, name, limit)
+    limit = limit or HARDCOVER_AUTHOR_MATCH_LIMIT
     local search_data, err = doHardcoverGraphQL(token, [[
-        query Search($q: String!) {
-            search(query: $q, query_type: "Author", per_page: 1) { ids }
+        query Search($q: String!, $n: Int!) {
+            search(query: $q, query_type: "Author", per_page: $n) { ids }
         }
-    ]], { q = name })
-    if not search_data then return nil, nil, err end
+    ]], { q = name, n = limit })
+    if not search_data then return nil, err end
     local ids = search_data.search and search_data.search.ids
     if not ids or not ids[1] then
-        return nil, nil, _("No matching author found on Hardcover.")
+        return {}, nil
     end
-    local author_id = ids[1]
+    -- Search may hand ids back as strings or numbers; the authors query wants
+    -- Ints. Coerce and cap to the limit, keeping the relevance order.
+    local id_list = {}
+    for _, v in ipairs(ids) do
+        local n = tonumber(v)
+        if n then
+            id_list[#id_list + 1] = n
+            if #id_list >= limit then break end
+        end
+    end
+    if not id_list[1] then return {}, nil end
 
-    local author_data, lookup_err = doHardcoverGraphQL(token, [[
-        query AuthorById($id: Int!) {
-            authors_by_pk(id: $id) { name }
+    -- One round trip for display names plus a disambiguating book count.
+    local detail, lookup_err = doHardcoverGraphQL(token, [[
+        query AuthorsByIds($ids: [Int!]!) {
+            authors(where: { id: { _in: $ids } }) { id name books_count }
         }
-    ]], { id = author_id })
-    if not author_data or not author_data.authors_by_pk then
-        return nil, nil, lookup_err or _("Found a match but couldn't fetch its details.")
+    ]], { ids = id_list })
+    if not detail or not detail.authors then
+        return nil, lookup_err or _("Found matches but couldn't fetch their details.")
     end
-    return author_id, author_data.authors_by_pk.name
+    local by_id = {}
+    for _, a in ipairs(detail.authors) do by_id[a.id] = a end
+
+    local results = {}
+    for _, id in ipairs(id_list) do
+        local a = by_id[id]
+        if a and a.name and a.name ~= "" then
+            results[#results + 1] = { id = id, name = a.name, books_count = a.books_count or 0 }
+        end
+    end
+    return results, nil
 end
 
 local function doHardcoverSetStatus(token, book_id, status_id, edition_id)
@@ -5450,14 +5481,14 @@ function Bookbridge:hardcoverSetStatus(book_id, status_id)
     return ok, err
 end
 
-function Bookbridge:hardcoverFindAuthor(name)
+function Bookbridge:hardcoverFindAuthors(name)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
-    local completed, id, found_name, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverFindAuthor(token, name)
+    local completed, list, err = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverFindAuthors(token, name)
     end, _("Searching Hardcover..."))
-    if not completed then return nil, nil, _("Cancelled.") end
-    return id, found_name, err
+    if not completed then return nil, _("Cancelled.") end
+    return list, err
 end
 
 function Bookbridge:hardcoverFollowAuthor(author_id)
@@ -8415,28 +8446,65 @@ end
 -- Shared by the manual "Follow an author..." menu flow and the long-press
 -- action below -- same search/confirm/write shape as the function above.
 local function confirmAndFollowAuthorOnHardcover(self, author_name)
-    local id, found_name, err = self:hardcoverFindAuthor(author_name)
-    if not id then
+    local candidates, err = self:hardcoverFindAuthors(author_name)
+    if not candidates then
         UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
         return
     end
-    local ConfirmBox = require("ui/widget/confirmbox")
-    UIManager:show(ConfirmBox:new{
-        text = T(_("Found \"%1\" on Hardcover. Follow this author?"), found_name),
-        ok_text = _("Follow"),
-        -- Wrapped for the reason given on confirmAndLogBookOnHardcover's own
-        -- ok_callback above.
-        ok_callback = function()
-            local Trapper = require("ui/trapper")
-            Trapper:wrap(function()
-                local ok, follow_err = self:hardcoverFollowAuthor(id)
-                UIManager:show(InfoMessage:new{
-                    text = ok and T(_("Now following %1 on Hardcover."), found_name) or (follow_err or _("Failed to follow.")),
-                    timeout = ok and 2 or nil,
-                })
-            end)
+    if #candidates == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No matching author found on Hardcover.") })
+        return
+    end
+
+    local function followById(id, name)
+        local Trapper = require("ui/trapper")
+        Trapper:wrap(function()
+            local ok, follow_err = self:hardcoverFollowAuthor(id)
+            UIManager:show(InfoMessage:new{
+                text = ok and T(_("Now following %1 on Hardcover."), name) or (follow_err or _("Failed to follow.")),
+                timeout = ok and 2 or nil,
+            })
+        end)
+    end
+
+    -- A lone match keeps the old one-tap confirm; no point showing a
+    -- single-row picker.
+    if #candidates == 1 then
+        local a = candidates[1]
+        local ConfirmBox = require("ui/widget/confirmbox")
+        UIManager:show(ConfirmBox:new{
+            text = T(_("Found \"%1\" on Hardcover. Follow this author?"), a.name),
+            ok_text = _("Follow"),
+            ok_callback = function() followById(a.id, a.name) end,
+        })
+        return
+    end
+
+    -- Several matches: let the reader choose instead of guessing. The book
+    -- count disambiguates the real author from summary/study-guide accounts
+    -- that Hardcover's search ranks alongside them.
+    local item_table = {}
+    for _, a in ipairs(candidates) do
+        local label = a.name
+        if a.books_count and a.books_count > 0 then
+            local count = a.books_count == 1
+                and T(_("%1 book"), tostring(a.books_count))
+                or T(_("%1 books"), tostring(a.books_count))
+            label = T(_("%1  (%2)"), a.name, count)
+        end
+        item_table[#item_table + 1] = { text = label, author_id = a.id, author_name = a.name }
+    end
+
+    local menu
+    menu = Menu:new{
+        title = T(_("Authors matching \"%1\""), author_name),
+        item_table = item_table,
+        onMenuSelect = function(_menu_self, item)
+            UIManager:close(menu)
+            followById(item.author_id, item.author_name)
         end,
-    })
+    }
+    UIManager:show(menu)
 end
 
 -- Long-press-on-cover entry point (see registerFileDialogButtons below) --
