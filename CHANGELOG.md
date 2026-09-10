@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build 3a584b9
+
+- **Send text to the Kindle from your phone.** Bookbridge now runs a small
+  always-on receiver (port 8090). Send `http://<kindle>:8090/clip?text=...`
+  (e.g. from a phone share-sheet shortcut) and the text lands in KOReader's
+  clipboard — long-press any input field → Clipboard → paste, instead of
+  typing on the device. It does only this one thing (it does not expose the
+  device like the debug HTTP inspector), starts on launch and after wake, and
+  a brief on-screen note confirms each receipt.
+
 ## 2026-09-10 — build 44057c8
 
 - **Following an author now lets you choose.** Instead of following whatever
