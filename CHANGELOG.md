@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-10 — build 5d6a711
+
+- **Your reading shelves are back in "Browse a Hardcover list."** Want to
+  Read / Currently Reading / Read / Did Not Finish appear first, for the
+  device owner's own account, with counts.
+- **Fixed a Send-to-CWA parse edge case** that could upload a duplicate of a
+  book named with two underscores (e.g. "…Book 2_ Book II of the … Saga").
+
 ## 2026-09-10 — build d854622
 
 - **Text shared from your phone now lands straight in the open field.** If a
