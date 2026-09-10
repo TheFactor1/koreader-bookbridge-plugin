@@ -28,6 +28,10 @@ expectQ("Carl's Doomsday Scenario_ Dungeon Crawler Carl Book 2 - Matt Dinniman",
 -- the number, not before it. A digit right before the "_" is what tells this
 -- apart from the colon mangling above (word before "_", title before it).
 expectQ("Sarah J. Maas - Court of Thorns and Roses 2_ A Court Of Mist And Fury", "A Court Of Mist And Fury")
+-- Same shape with an author the CWA catalog does NOT know: the author-side
+-- detection would pick "Nobody Known" as the title, but the "N_ " marker
+-- proves which side is the title, so the real title still wins.
+expectQ("Nobody Known - Some Series 3_ The Real Title", "The Real Title")
 expectQ("Dune Messiah - Frank Herbert", "Dune Messiah")
 expectQ("Fourth Wing (Rebecca Yarros) (z-library.sk, 1lib.sk, z-lib.sk)", "Fourth Wing")
 expectQ("Road, The - Cormac McCarthy", "Road, The")

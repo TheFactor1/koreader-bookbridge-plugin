@@ -4540,13 +4540,22 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- series+number from the relevance basis too. The digit right
             -- before the "_" is what separates this from the colon mangling
             -- ("Cookbook_ subtitle"), where the real title is BEFORE the "_".
-            local relevance_fname = fname
-            if search_title == after_sep and after_sep then
-                local real_title = after_sep:match("^.-%s+%d+_%s+(.+)$")
+            local series_volume_mangle = false
+            do
+                -- Whichever side carries the "<number>_ " marker IS the title
+                -- side -- an author name never does -- so this deliberately
+                -- does not trust the author-side detection above, which picks
+                -- the AUTHOR as the search title whenever the CWA author
+                -- catalog fails to recognise the name. After-separator side
+                -- first (the usual "Author - Series N_ Title" shape), then
+                -- the other, for "Series N_ Title - Author".
+                local real_title = after_sep and after_sep:match("^.-%s+%d+_%s+(.+)$")
+                if not (real_title and real_title ~= "") then
+                    real_title = before_sep and before_sep:match("^.-%s+%d+_%s+(.+)$")
+                end
                 if real_title and real_title ~= "" then
                     search_title = real_title
-                    relevance_fname = ((before_sep and before_sep ~= "")
-                        and (before_sep .. " ") or "") .. real_title
+                    series_volume_mangle = true
                 end
             end
             -- Anna's Archive (and similar sources) can't put a literal
@@ -4652,7 +4661,14 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- false-positive.
             local words = {}
             for w in query:gmatch("%S+") do words[#words + 1] = w end
-            for count = #words - 1, 1, -1 do
+            -- A confidently-parsed "Series N_ Title" name (above) needs no
+            -- prefix ladder: if the full real title isn't in CWA, the book
+            -- genuinely isn't there. Shortening it only reaches a generic
+            -- prefix that collides with a sibling volume (the series name
+            -- book 1 shares) and blocks the upload as a maybe-duplicate. A
+            -- 0..1 range with a -1 step is an empty loop.
+            local shorten_from = series_volume_mangle and 0 or (#words - 1)
+            for count = shorten_from, 1, -1 do
                 local prefix = table.concat(words, " ", 1, count)
                 -- Skip a prefix that is nothing but stopwords. "The Road"
                 -- shortens to "The", which CWA happily answers with 28
@@ -4681,7 +4697,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             local seen_uuids = {}
             local raw_entry_count = 0
             local any_response = false
-            local fname_words = normalizeTitleWords(relevance_fname)
+            local fname_words = normalizeTitleWords(fname)
             -- Volume gate: a filename that names a volume ("Book 2", "02",
             -- "IV", "(1)") can only ever match a candidate that carries the
             -- same number, in its title or as its CWA series index. Applied
