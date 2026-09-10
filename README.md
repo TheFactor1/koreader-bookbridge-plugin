@@ -42,27 +42,6 @@ Adds a **Bookbridge** entry to KOReader's main menu.
 - **Hardcover settings** — API token (from hardcover.app/account/api) and
   the edition language to prefer (default English).
 
-### Bluetooth keyboard (Kindle only)
-On a jailbroken MediaTek Kindle (Paperwhite 5 / 11th gen and later) a phone
-running a Bluetooth-keyboard app — or any Classic Bluetooth keyboard — can
-type into KOReader, through Amazon's own Bluetooth stack (no replacement
-stack, Audible keeps working). **Bookbridge → Bluetooth keyboard**:
-- **Pair the phone** — one tap: the keyboard rule is installed the first
-  time (two small files; reversible), the phone's Bluetooth address is asked
-  once (Settings → About phone → Status), the Kindle initiates, you tap
-  *Pair* on the phone, and it finishes the moment the bond lands — already
-  listening. Then choose "Kindle" in the phone's keyboard app; KOReader's
-  external-keyboard plugin picks it up by itself.
-- **Ready for keyboard now** — radio on and listening in about six seconds,
-  and it stays listening for as long as the Kindle is awake. The link is
-  always started by the phone's app; the Kindle can't.
-- **Keep Bluetooth ready when the Kindle wakes** — the radio goes off when
-  the Kindle sleeps and is back listening a few seconds after it wakes, so
-  reconnecting is just choosing Kindle in the app: the keyboard is typically
-  attached within ten seconds of waking (small battery cost while awake).
-- Status, Bluetooth off, Forget the paired phone, Install/Uninstall rule.
-Mouse movement is not supported: KOReader has no pointer input on e-ink.
-
 ### Settings
 - **Connections** — Shelfmark server, CWA, Anna's Archive, AI match
   suggestions, and a connection-status screen that says what is reachable.
