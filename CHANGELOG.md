@@ -4,6 +4,18 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-11 — build bf07a69
+
+- **Send to CWA recognises more filename shapes.** A browser's re-download
+  suffix ("Title - Author (1)") no longer counts as "volume 1"; titles that
+  end in a number ("Fahrenheit 451: A Novel") aren't mistaken for a series
+  tag; bracket tags ("[Series 02]", "[Kindle Edition]"), "Title by Author"
+  and en/em-dash separators are understood; and a new volume named
+  "Series III: Title", "Author - Series 2 - Title" or "Series 02 - Title -
+  Author" is uploaded instead of being held back as a possible duplicate
+  of book 1. Two of these shapes used to upload a duplicate of a book CWA
+  already had.
+
 ## 2026-09-10 — build 5d6a711
 
 - **Your reading shelves are back in "Browse a Hardcover list."** Want to
