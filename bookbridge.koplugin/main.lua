@@ -3674,7 +3674,9 @@ end
 -- copied on manually) get matched against CWA or uploaded as new: books
 -- already tracked get checked against CWA for changes and re-pulled.
 
-local SYNC_STOPWORDS = { the = true, a = true, an = true, of = true, ["and"] = true, novel = true }
+-- "by": a "Title by Author" filename would otherwise carry one word no
+-- candidate's title or author could ever explain, and fail to match itself.
+local SYNC_STOPWORDS = { the = true, a = true, an = true, of = true, ["and"] = true, novel = true, by = true }
 
 -- Structural scaffolding that shows up around a series volume number in a
 -- filename ("Red Rising Book 2", "Vol. 2", "Part 3"). Deliberately NOT added
@@ -3814,6 +3816,15 @@ end
 
 local function normalizeTitleWords(text)
     if not text then return {} end
+    -- Square brackets are tags in every source seen -- "[Series 02]",
+    -- "[Crouch, Blake]", "[Kindle Edition]", "[2013]" -- never title
+    -- content, so they get exactly the parenthesis treatment below (marker
+    -- groups dropped, trailing groups stripped). Left alone, "[Kindle
+    -- Edition]" was two unexplainable words and a permanent non-match.
+    text = text:gsub("%[", "("):gsub("%]", ")")
+    -- A spaced en/em dash is the " - " separator (doSyncLibrary normalises
+    -- it the same way), and must be before the rule below sees it.
+    text = text:gsub("%s+\xE2\x80[\x93\x94]%s+", " - ")
     -- A "(...)" group directly before the " - author" separator is trailing
     -- on the TITLE, even though it isn't at the end of the whole filename.
     -- stripTrailingParenGroups only looks at the very end, so
@@ -3823,7 +3834,10 @@ local function normalizeTitleWords(text)
     -- never be explained, so the book never matched itself and was uploaded
     -- again on every sync. Found by generating filename shapes for every
     -- book in the library and checking each still matches itself.
+    -- " by " is the same separator in a "Title by Author" name ("Pines
+    -- (Wayward Pines) by Blake Crouch" -- found by the dry-run sweep).
     text = text:gsub("%s*%b()%s*(%s%-%s)", "%1")
+    text = text:gsub("%s*%b()%s*(%s[Bb]y%s)", "%1")
     -- A parenthetical that names a series, volume or edition is annotation
     -- wherever it sits, not title content -- "(The Three-Body Problem Series
     -- Book 2)", "(Harry Potter, Book 6)", "(Royal Elite Special Edition)".
@@ -4563,6 +4577,23 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- catalog, which is what actually caused the fresh "Fourth
             -- Wing" duplicate this fixes.
             local cleaned_fname = stripTrailingParenGroups(fname)
+            -- A spaced en/em dash is the same separator typed fancier
+            -- ("Frank Herbert – Dune Messiah"). It used to reach the right
+            -- book only by luck: the prefix ladder eventually searched the
+            -- bare author name and CWA's search happens to match its author
+            -- field -- four wasted requests, and a sibling-blocking miss for
+            -- a new book of a known author.
+            cleaned_fname = cleaned_fname:gsub("%s+\xE2\x80[\x93\x94]%s+", " - ")
+            -- Bracket groups are tags wherever they sit ("[Series 02]",
+            -- "[2013]"), and a leading one broke everything: the query
+            -- truncation at "[" matched nothing, the whole name went to CWA
+            -- verbatim, found nothing, and the book was uploaded again. The
+            -- volume number a tag carries still counts -- fname_vols below
+            -- reads the untouched filename.
+            cleaned_fname = cleaned_fname:gsub("%s*%b[]%s*", " ")
+            cleaned_fname = cleaned_fname:gsub("(%s+%-%s+)%-%s+", "%1")   -- "a -  - b" left by a removed middle tag
+            cleaned_fname = cleaned_fname:gsub("^%s*%-%s+", ""):gsub("%s+%-%s*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if cleaned_fname == "" then cleaned_fname = fname end
             -- Search on the title alone, not "Title - Author" combined --
             -- CWA's own OPDS search does an exact substring/phrase match
             -- against its stored title (confirmed live -- see the note
@@ -4655,10 +4686,89 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 return false
             end
 
+            -- "Title by Author", no dash separator at all. Only trusted when
+            -- the catalog recognises what follows the "by", so "Death by
+            -- Chocolate" stays a title. ("by" is a stopword, so the word-level
+            -- match is unaffected either way; this just saves the ladder.)
+            if not before_sep then
+                -- Greedy: split at the LAST " by ", since a title can contain
+                -- one ("Death by Chocolate by Some Author") and an author can't.
+                local by_title, by_author = cleaned_fname:match("^(.+)%s+[Bb]y%s+(.-)$")
+                if by_title and by_title ~= "" and by_author
+                        and (authorKeyOf(by_author) or containsKnownAuthor(by_author)) then
+                    before_sep, after_sep = by_title, by_author
+                end
+            end
+
+            -- Does this segment end in a series volume marker -- "Red Rising
+            -- 2", "Mistborn #2", "Dune Chronicles III", "Wool Book 12"? Bare
+            -- digits are only trusted up to 99: "Fahrenheit 451" is a title.
+            -- A lone roman letter needs a structure word in front of it
+            -- ("Book I"); "The Dark Tower I" is left to the existing paths,
+            -- which handle it. Shared by the three-part parse and the "N_ "
+            -- rule below.
+            local function endsInVolumeNumber(text)
+                if type(text) ~= "string" then return false end
+                if text:match("#%d+$") then return true end
+                local bare = text:match("%s(%d+)$")
+                if bare then
+                    local label = text:match("(%a+)%.?%s+%d+$")
+                    if label and SERIES_STRUCTURE_WORDS[label:lower()] then return true end
+                    return tonumber(bare) <= 99
+                end
+                local prev, tok = text:match("(%a*)%.?%s+(%a+)$")
+                if tok and romanToNumber(tok:lower()) then
+                    return #tok >= 2 or SERIES_STRUCTURE_WORDS[(prev or ""):lower()] == true
+                end
+                return false
+            end
+
+            -- Three-part names carry the series tag as its own segment:
+            -- "Author - Series N - Title", "Series N - Title - Author",
+            -- "Author - Title - Series N". The two-part split below hands
+            -- "Series N - Title" (or "Series N") to the search as the title,
+            -- and the prefix ladder then finds book 1 of the series -- which
+            -- blocks a NEW volume as a maybe-duplicate. Found by probing: a
+            -- "Red Rising 6 - Light Bringer" file could never be uploaded.
+            -- The segment ending in a volume number is the series; of the
+            -- other two, the one the catalog does NOT know as an author is
+            -- the title. With the author unknown, the title is taken to sit
+            -- next to the series tag (author-first is the common order).
+            local three_part_title, three_part_series
+            do
+                local parts, rest = {}, cleaned_fname
+                while true do
+                    local head, tail = rest:match("^(.-)%s+%-%s+(.+)$")
+                    if not head then parts[#parts + 1] = rest break end
+                    parts[#parts + 1] = head
+                    rest = tail
+                end
+                if #parts == 3 then
+                    local function isAuthorPart(p)
+                        return authorKeyOf(p) ~= nil or containsKnownAuthor(p) or p:find(",") ~= nil
+                    end
+                    local series_i
+                    for i = 1, 3 do
+                        if endsInVolumeNumber(parts[i]) and not isAuthorPart(parts[i]) then series_i = i break end
+                    end
+                    if series_i then
+                        local a, b = (series_i == 1) and 2 or 1, (series_i == 3) and 2 or 3
+                        local title_i
+                        if isAuthorPart(parts[a]) and not isAuthorPart(parts[b]) then title_i = b
+                        elseif isAuthorPart(parts[b]) and not isAuthorPart(parts[a]) then title_i = a
+                        elseif series_i == 2 then title_i = 3
+                        else title_i = 2 end
+                        three_part_title, three_part_series = parts[title_i], parts[series_i]
+                    end
+                end
+            end
+
             local before_is_author = before_sep and authorKeyOf(before_sep) ~= nil
             local after_is_author = after_sep and authorKeyOf(after_sep) ~= nil
 
-            if before_sep and after_sep and after_sep ~= "" and after_is_author and not before_is_author then
+            if three_part_title then
+                search_title = three_part_title
+            elseif before_sep and after_sep and after_sep ~= "" and after_is_author and not before_is_author then
                 -- "Title - Author". Checked FIRST, and it is what makes
                 -- calibre's own default export work: its title_sort moves
                 -- leading articles to the end, producing "Road, The - Cormac
@@ -4688,6 +4798,9 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- before the "_" is what separates this from the colon mangling
             -- ("Cookbook_ subtitle"), where the real title is BEFORE the "_".
             local series_volume_mangle = false
+            -- The series-tag segment when one was recognised, kept for one
+            -- last full-string search (see the queries list below).
+            local series_side = nil
             do
                 -- Whichever side carries the "<number>_ " marker IS the title
                 -- side -- an author name never does -- so this deliberately
@@ -4706,19 +4819,36 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- (Found by the full dry-run: a scan for "digit before ANY _"
                 -- took the wrong side there and would have uploaded a
                 -- duplicate.) So split at the first "_ " and require the head
-                -- to END in a volume number.
+                -- to END in a volume number (digits, "#N", or a roman "III" --
+                -- "Dune Chronicles III_ Children of Dune" was blocked as a
+                -- maybe-duplicate of "Dune" until roman counted too).
+                --
+                -- A tail with no real words ("Fahrenheit 451_ A Novel" -- "a"
+                -- and "novel" are stopwords) is a subtitle, not a title: the
+                -- flip is skipped and the head stays the title. A head that
+                -- ends in a number can still be a plain title ("Apollo 13_
+                -- The Untold Story"), which is what the series_side fallback
+                -- query below exists for.
                 local function afterVolumeMarker(side)
                     if type(side) ~= "string" then return nil end
                     local head, tail = side:match("^(.-)_%s+(.+)$")
-                    if head and tail and tail ~= "" and head:match("%s%d+$") then
-                        return tail
+                    if head and tail and tail ~= "" and endsInVolumeNumber(head)
+                            and next(normalizeTitleWords(tail)) ~= nil then
+                        return tail, head
                     end
                     return nil
                 end
-                local real_title = afterVolumeMarker(after_sep) or afterVolumeMarker(before_sep)
-                if real_title then
-                    search_title = real_title
+                if three_part_title then
                     series_volume_mangle = true
+                    series_side = three_part_series
+                else
+                    local real_title, head = afterVolumeMarker(after_sep)
+                    if not real_title then real_title, head = afterVolumeMarker(before_sep) end
+                    if real_title then
+                        search_title = real_title
+                        series_volume_mangle = true
+                        series_side = head
+                    end
                 end
             end
             -- Anna's Archive (and similar sources) can't put a literal
@@ -4809,6 +4939,23 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 end
             end
 
+            -- The series-tag segment, whole and never shortened, as the last
+            -- resort. It is what the volume-marker rules above may have
+            -- misread: a title that merely ends in a number ("Slaughterhouse
+            -- 5_ A Novel", "Apollo 13_ The Untold Story") looks exactly like
+            -- "Series N_ Title", and its real title is then the HEAD -- so
+            -- the probe found "Fahrenheit 451_ A Novel" uploading a
+            -- duplicate. One extra request finds such a book. For a real
+            -- series tag ("Court of Thorns and Roses 2") the exact substring
+            -- matches nothing but this very volume, so unlike the prefix
+            -- ladder it can't drag a sibling in.
+            if series_side then
+                local s = (series_side:match("^([^_%[%(]+)") or series_side):gsub("%s+$", "")
+                if s ~= "" and s ~= query and next(normalizeTitleWords(s)) ~= nil then
+                    queries[#queries + 1] = s
+                end
+            end
+
             -- No attempt cap here (there used to be one, capped at 3): a
             -- source that appends a long multi-mirror tag -- confirmed live,
             -- "z-library.sk, 1lib.sk, z-lib.sk" splits into 3 extra words on
@@ -4869,7 +5016,12 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             -- wrong volume lands in "check manually" instead of registering
             -- as its sibling (the "Dungeon Crawler Carl Book 2" -> book 1
             -- case). A filename with no volume number is unaffected.
-            local fname_vols, fname_vol_tokens = volumeNumbersOf(fname)
+            -- A browser's re-download suffix -- "Dune - Frank Herbert (1)" --
+            -- is not volume 1. Read as one, the gate refused every candidate
+            -- that isn't series index 1, and the file sat in "check manually"
+            -- on every sync (found by probing; "1984 - George Orwell (1)").
+            -- Only a bare trailing "(digits)" is dropped; "(Book 2)" counts.
+            local fname_vols, fname_vol_tokens = volumeNumbersOf((fname:gsub("%s*%(%d+%)%s*$", "")))
             local function volumeCompatible(e)
                 if next(fname_vols) == nil then return true end
                 local cand_vols = volumeNumbersOf(e.title)

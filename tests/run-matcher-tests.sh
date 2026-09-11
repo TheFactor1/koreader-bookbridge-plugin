@@ -28,7 +28,7 @@ Q_END=$(ln 'local query = search_title:match(')
   sed -n "${H_START},${H_END}p" "$MAIN"
   echo 'local function deriveQuery(fname, catalog)'
   sed -n "${Q_START},${Q_END}p" "$MAIN"
-  echo 'return query, search_title end'
+  echo 'return query, search_title, series_side end'
   cat tests/matcher_cases.lua
 } > "$OUT/test.lua"
 

@@ -9,10 +9,14 @@ wrong = [p for p, u in regp.items() if p in exp and exp[p] != u]
 extra = [p for p in regp if p not in exp]
 missing = [p for p in exp if p not in regp]
 wu = sum("couldn't open local file to upload" in l for l in rep); am = sum('ambiguous' in l for l in rep); cm = sum('check manually' in l for l in rep)
-bad = wrong or extra or missing or (exp and wu)
+must_upload = open(expf).readline().startswith('#must-upload')   # every file must reach upload, not merely avoid registering
+bad = wrong or extra or missing or (exp and wu) or (must_upload and (am or cm))
 print(f"{'FAIL' if bad else 'ok  '} {tag:26s} registered={len(regp)} wrong-uuid={len(wrong)} not-matched={len(missing)} unexpected-registration={len(extra)} would-upload={wu} ambiguous={am} check-manually={cm}")
 for p in wrong[:5]: print("      WRONG UUID:", os.path.basename(p))
 for p in extra[:5]: print("      UNEXPECTED REGISTRATION:", os.path.basename(p))
+if must_upload:
+    for l in rep:
+        if 'check manually' in l or 'ambiguous' in l: print("      NOT UPLOADED:", l.strip()[:110])
 for p in missing[:8]:
     line = [l.strip().split('] ', 1)[1] for l in rep if l.strip().startswith('[' + os.path.basename(p)[:-5] + ']')]
     print("      NOT MATCHED:", os.path.basename(p)[:60], "->", (line or ['?'])[0][:70])

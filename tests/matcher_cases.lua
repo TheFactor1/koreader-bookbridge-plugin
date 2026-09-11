@@ -1,6 +1,6 @@
 local function words(t) local l=sortedWordList(normalizeTitleWords(t)) return table.concat(l," ") end
 local catalog = { __authors = {} }
-for _, a in ipairs({"Pierce Brown","Cormac McCarthy","Cixin Liu","Blake Crouch","Matt Dinniman","Rebecca Yarros","Frank Herbert","Stan Lee","Tom Stechschulte","Sarah J. Maas"}) do
+for _, a in ipairs({"Pierce Brown","Cormac McCarthy","Cixin Liu","Blake Crouch","Matt Dinniman","Rebecca Yarros","Frank Herbert","Stan Lee","Tom Stechschulte","Sarah J. Maas","Ray Bradbury","Jim Lovell","Stephen King"}) do
   catalog.__authors[words(a)] = true
 end
 local fails = 0
@@ -9,6 +9,14 @@ local function expectQ(fname, want)
   local ok = (q and q:gsub("%s+$", "") == want)  -- trailing space is harmless: CWA strips it (verified live)
   if not ok then fails = fails + 1 end
   print((ok and "PASS" or "FAIL") .. "  query  " .. fname .. "  ->  [" .. tostring(q) .. "]" .. (ok and "" or ("  expected [" .. want .. "]")))
+end
+-- The series-tag segment set aside for the last-resort full-string search
+-- (nil when the name carried none).
+local function expectS(fname, want)
+  local _q, _st, s = deriveQuery(fname, catalog)
+  local ok = (s == want)
+  if not ok then fails = fails + 1 end
+  print((ok and "PASS" or "FAIL") .. "  series " .. fname .. "  ->  [" .. tostring(s) .. "]" .. (ok and "" or ("  expected [" .. tostring(want) .. "]")))
 end
 local function expectW(a, b, same)
   local wa, wb = words(a), words(b)
@@ -37,6 +45,42 @@ expectQ("Nobody Known - Some Series 3_ The Real Title", "The Real Title")
 -- rule must not fire here (it did, once, and would have uploaded a duplicate
 -- -- caught by the full dry-run while this suite stayed green).
 expectQ("Matt Dinniman - Carl's Doomsday Scenario_ Dungeon Crawler Carl Book 2_ Book II of the Dungeon Crawler Carl Saga", "Carl's Doomsday Scenario")
+-- A title that merely ENDS in a number must not be mistaken for a series
+-- tag. "A Novel" is all stopwords, so the flip is skipped outright; a
+-- tail with real words still flips, but the head is kept as the fallback
+-- series_side query so the real title is still searched once, in full.
+expectQ("Ray Bradbury - Fahrenheit 451_ A Novel", "Fahrenheit 451")
+expectS("Ray Bradbury - Fahrenheit 451_ A Novel", nil)
+expectQ("Jim Lovell - Apollo 13_ The Untold Story", "The Untold Story")
+expectS("Jim Lovell - Apollo 13_ The Untold Story", "Apollo 13")
+expectQ("Stephen King - 11_22_63_ A Novel", "11")
+-- Roman and "#N" volume markers before the "_" count like digits do.
+expectQ("Frank Herbert - Dune Chronicles III_ Children of Dune", "Children of Dune")
+expectS("Frank Herbert - Dune Chronicles III_ Children of Dune", "Dune Chronicles III")
+expectQ("Brandon Sanderson - Mistborn #2_ The Well of Ascension", "The Well of Ascension")
+-- A lone roman "I" after a non-structure word is NOT a marker (unchanged).
+expectQ("The Dark Tower I_ The Gunslinger - Stephen King", "The Dark Tower I")
+expectS("The Dark Tower I_ The Gunslinger - Stephen King", nil)
+-- Three-part names: the segment ending in a volume number is the series,
+-- the non-author remainder is the title, whichever order they come in.
+expectQ("Pierce Brown - Red Rising 2 - Golden Son", "Golden Son")
+expectS("Pierce Brown - Red Rising 2 - Golden Son", "Red Rising 2")
+expectQ("Golden Son - Red Rising #2 - Pierce Brown", "Golden Son")
+expectQ("Dune Chronicles 03 - Children of Dune - Frank Herbert", "Children of Dune")
+expectQ("Frank Herbert - Dune Messiah - Dune Chronicles 2", "Dune Messiah")
+expectQ("Nobody Known - Some Series 3 - The Real Title", "The Real Title")
+expectQ("Wayward Pines - 02 Wayward - Blake Crouch", "Wayward Pines")       -- no segment ends in a number: unchanged
+expectQ("Fahrenheit 451 - Ray Bradbury - Some Narrator", "Fahrenheit 451")  -- 451 is a title, not a volume
+-- Bracket groups are tags wherever they sit.
+expectQ("Frank Herbert - [Dune Chronicles 02] - Dune Messiah", "Dune Messiah")
+expectQ("Dune Messiah - Frank Herbert [Kindle Edition]", "Dune Messiah")
+expectQ("[2013] Dune Messiah - Frank Herbert", "Dune Messiah")
+-- Spaced en/em dashes are the " - " separator; "Title by Author" splits
+-- only when the catalog knows the author.
+expectQ("Frank Herbert \226\128\147 Dune Messiah", "Dune Messiah")
+expectQ("Frank Herbert \226\128\148 Dune Messiah", "Dune Messiah")
+expectQ("Dune Messiah by Frank Herbert", "Dune Messiah")
+expectQ("Death by Chocolate", "Death by Chocolate")
 expectQ("Dune Messiah - Frank Herbert", "Dune Messiah")
 expectQ("Fourth Wing (Rebecca Yarros) (z-library.sk, 1lib.sk, z-lib.sk)", "Fourth Wing")
 expectQ("Road, The - Cormac McCarthy", "Road, The")
@@ -54,6 +98,11 @@ expectW("Spider-Man", "Spider Man", true)
 expectW("Carl's Doomsday Scenario: Dungeon Crawler Carl Book 2", "Carl's Doomsday Scenario_ Dungeon Crawler Carl (Book 2) - Matt Dinniman", false)  -- author words differ, but title side must be a subset (checked below)
 expectW("The Book Thief", "The Thief", false)
 expectW("Wool Book 12", "Wool Book 13", false)
+-- Browser re-download suffix, bracket tags and "by" leave no stray words.
+expectW("Dune - Frank Herbert (1)", "Dune - Frank Herbert", true)
+expectW("Dune Messiah - Frank Herbert [Kindle Edition]", "Dune Messiah - Frank Herbert", true)
+expectW("Frank Herbert - [Dune Chronicles 02] - Dune Messiah", "Frank Herbert - Dune Messiah", true)
+expectW("Dune Messiah by Frank Herbert", "Dune Messiah - Frank Herbert", true)
 -- Volume numbers are deliberately NOT words (see volumeNumbersOf); the
 -- compatibility gate in doSyncLibrary handles them. These pin its parsing.
 local function expectVols(text, want)
