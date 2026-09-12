@@ -30,6 +30,12 @@ bash "$HERE/build-harness.sh" "$REPO/bookbridge.koplugin/main.lua" "$W/dryrun.lu
 python3 "$HERE/scenarios.py" "$W"
 cd /home/matthew/Desktop/homeserver-configs
 set -a; eval "$(sops -d --input-type dotenv --output-type dotenv scripts/shelfmark-kindle-sync/.env.sops)"; set +a
+# Which CWA answers the searches. Override to point the same suite at a
+# candidate server -- e.g. a Calibre-Web-NextGen container on a spare port,
+# against a COPY of the library -- and compare the scenario table:
+#   CWA_TEST_URL=http://localhost:8099 bash tests/sync-dry-run/run.sh
+# Still read-only: uploads are stubbed to error whatever this points at.
+CWA_TEST_URL=${CWA_TEST_URL:-http://localhost:8083}
 dryrun() { # tag files dir registry
   for i in $(seq 1 40); do
     rm -f "$W/cache/MISSING"
@@ -39,7 +45,7 @@ dryrun() { # tag files dir registry
     [ -s "$W/cache/MISSING" ] || return 0
     sort -u "$W/cache/MISSING" | while IFS= read -r p; do
       key=$(python3 -c "import sys,re;print(re.sub(r'[^A-Za-z0-9]',lambda m:'_%02x'%ord(m.group()),sys.argv[1]))" "$p")
-      code=$(curl -s -o "$W/cache/.body" -w '%{http_code}' -u "$CWA_USERNAME:$CWA_PASSWORD" "http://localhost:8083$p")
+      code=$(curl -s -o "$W/cache/.body" -w '%{http_code}' -u "$CWA_USERNAME:$CWA_PASSWORD" "$CWA_TEST_URL$p")
       { echo "$code"; cat "$W/cache/.body"; } > "$W/cache/$key"
     done
   done
