@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-12 — build 539040c
+
+- **Menus now say "Calibre-Web" instead of "CWA."** *Sync library with
+  Calibre-Web*, *Send to Calibre-Web*, *Calibre-Web settings*, and so on.
+  "CWA" was short for Calibre-Web-Automated specifically; the plugin works
+  with any Calibre-Web server, so it now says that. Your settings are
+  untouched — only the wording changed.
+
 ## 2026-09-12 — build 0bc2e8c
 
 - **Library sync is faster, especially the first one on a new device.** The
