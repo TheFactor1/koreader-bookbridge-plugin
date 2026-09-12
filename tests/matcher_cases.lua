@@ -89,6 +89,15 @@ expectQ("Dark Age - Pierce Brown", "Dark Age")
 expectQ("Recursion Blake Crouch Z-Library", "Recursion Blake Crouch Z-Library")
 print("--- word normalization (diacritics, curly quotes, underscore, non-Latin)")
 expectW("The Handmaid\226\128\153s Tale", "The Handmaid's Tale", true)
+-- A source that cannot put U+2019 in a filename substitutes "?" for it, so
+-- the local file reads "The Handmaid?s Tale" while CWA stores the curly form.
+-- Exact-substring search can never bridge that (the apostrophe-truncation
+-- fallback only knows ' and backtick), so the ladder found nothing and this
+-- book was queued for a DUPLICATE upload on every cold sync -- found on the
+-- real device library while measuring the catalog-first fast path, which
+-- matches it because word normalization drops the punctuation entirely.
+expectW("The Handmaid?s Tale", "The Handmaid\226\128\153s Tale", true)
+expectW("Margaret Atwood - The Handmaid?s Tale", "The Handmaid's Tale - Margaret Atwood", true)
 expectW("Ender\226\128\153s Game", "Ender's Game", true)
 expectW("Les Mis\195\169rables", "Les Miserables", true)
 expectW("Red Rising 4_ Iron Gold", "Red Rising 4: Iron Gold", true)
