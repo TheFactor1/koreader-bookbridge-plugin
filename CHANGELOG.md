@@ -4,6 +4,20 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-12 — build 0bc2e8c
+
+- **Library sync is faster, especially the first one on a new device.** The
+  book list Bookbridge already downloads at the start of every sync is now
+  used to recognise your books directly, instead of asking CWA to search for
+  each one. On a 40-book device that is 111 requests down to 72; the effect is
+  largest on a first sync, where nothing is tracked yet. Books it cannot
+  recognise that way are searched for exactly as before.
+- **Fixed a book that was re-uploaded on every sync.** A file whose name had a
+  "?" where the apostrophe should be (some download sources substitute it) —
+  for example "The Handmaid?s Tale" — could never be found in CWA by search,
+  so it was treated as missing and uploaded again each time. It now matches
+  the copy you already have.
+
 ## 2026-09-11 — build bf07a69
 
 - **Send to CWA recognises more filename shapes.** A browser's re-download
