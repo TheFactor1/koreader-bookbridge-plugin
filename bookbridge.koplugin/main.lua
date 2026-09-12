@@ -246,11 +246,11 @@ end
 
 function Bookbridge:editCwaSettings()
     self.cwa_settings_dialog = MultiInputDialog:new{
-        title = _("CWA settings"),
+        title = _("Calibre-Web settings"),
         fields = {
-            { text = self.cwa_url, hint = _("CWA URL, optional -- e.g. http://cwa:8083 (for 'My requests' download)") },
-            { text = self.cwa_username, hint = _("CWA username (optional)") },
-            { text = self.cwa_password, text_type = "password", hint = _("CWA password (optional)") },
+            { text = self.cwa_url, hint = _("Calibre-Web URL, optional -- e.g. http://cwa:8083 (for 'My requests' download)") },
+            { text = self.cwa_username, hint = _("Calibre-Web username (optional)") },
+            { text = self.cwa_password, text_type = "password", hint = _("Calibre-Web password (optional)") },
         },
         buttons = {
             {
@@ -1085,7 +1085,7 @@ end
 local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting")
-        return nil, nil, _("CWA URL isn't set -- add it under Bookbridge > Settings.")
+        return nil, nil, _("Calibre-Web URL isn't set -- add it under Bookbridge > Settings.")
     end
     local headers = {}
     if username and username ~= "" then
@@ -1112,11 +1112,11 @@ local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
 
     if not ok then
         debugLog("[cwa] <- connection error: " .. tostring(code))
-        return nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
+        return nil, nil, _("Couldn't reach Calibre-Web -- check the Calibre-Web URL in Settings.")
     end
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
         debugLog("[cwa] <- timed out: " .. tostring(code))
-        return nil, nil, _("Request to CWA timed out.")
+        return nil, nil, _("Request to Calibre-Web timed out.")
     end
     debugLog("[cwa] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#table.concat(sink_table)))
     return table.concat(sink_table), code
@@ -1145,7 +1145,7 @@ end
 local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy, save_path)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting download")
-        return nil, nil, _("CWA URL isn't set -- add it under Bookbridge > Settings.")
+        return nil, nil, _("Calibre-Web URL isn't set -- add it under Bookbridge > Settings.")
     end
     local headers = {}
     if username and username ~= "" then
@@ -1180,18 +1180,18 @@ local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy
     if not ok then
         debugLog("[cwa] <- connection error: " .. tostring(code))
         os.remove(temp_path)
-        return nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
+        return nil, nil, _("Couldn't reach Calibre-Web -- check the Calibre-Web URL in Settings.")
     end
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
         debugLog("[cwa] <- timed out: " .. tostring(code))
         os.remove(temp_path)
-        return nil, nil, _("Download from CWA timed out.")
+        return nil, nil, _("Download from Calibre-Web timed out.")
     end
     if type(code) ~= "number" or code >= 400 then
         debugLog("[cwa] <- HTTP " .. tostring(code) .. ", discarded -- left any existing file at "
             .. tostring(save_path) .. " untouched")
         os.remove(temp_path)
-        return nil, code, T(_("Download from CWA failed (HTTP %1)."), tostring(code))
+        return nil, code, T(_("Download from Calibre-Web failed (HTTP %1)."), tostring(code))
     end
 
     if not os.rename(temp_path, save_path) then
@@ -2960,7 +2960,7 @@ function Bookbridge:registerFileDialogButtons()
         -- against otherwise.
         if self_ref.cwa_url and self_ref.cwa_url ~= "" then
             table.insert(row, {
-                text = _("Refresh from CWA"),
+                text = _("Refresh from Calibre-Web"),
                 callback = function()
                     self_ref:refreshBookMetadata(file)
                 end,
@@ -2971,7 +2971,7 @@ function Bookbridge:registerFileDialogButtons()
         -- the library without running a whole-library sync.
         if self_ref.cwa_url and self_ref.cwa_url ~= "" then
             table.insert(row, {
-                text = _("Send to CWA"),
+                text = _("Send to Calibre-Web"),
                 callback = function()
                     local Trapper = require("ui/trapper")
                     Trapper:wrap(function()
@@ -3380,7 +3380,7 @@ local function doCwaRawFormRequest(cwa_url, cookie, method, path, form_fields, e
 
     if not ok then
         debugLog("[cwa] <- connection error: " .. tostring(code))
-        return nil, nil, nil, _("Couldn't reach CWA -- check the CWA URL in Settings.")
+        return nil, nil, nil, _("Couldn't reach Calibre-Web -- check the Calibre-Web URL in Settings.")
     end
     local content = table.concat(sink_table)
     debugLog("[cwa] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#content))
@@ -3395,14 +3395,14 @@ end
 -- every subsequent doCwaRawFormRequest/upload call in this same process.
 local function doCwaLogin(cwa_url, username, password, socks5_proxy)
     local login_page, code1, headers1 = doCwaRawFormRequest(cwa_url, nil, "GET", "/login", nil, nil, socks5_proxy)
-    if not login_page then return nil, _("Couldn't reach CWA's login page.") end
+    if not login_page then return nil, _("Couldn't reach Calibre-Web's login page.") end
     -- Flask-WTF ties the csrf_token to the specific pre-login session it
     -- was issued under -- confirmed live: posting the token back without
     -- also carrying this cookie forward gets a 400, not an auth failure.
     local pre_login_cookie = extractSessionCookie(headers1)
     local csrf_token = extractCsrfToken(login_page)
     if not csrf_token then
-        return nil, _("Couldn't find CWA's login form -- its page layout may have changed.")
+        return nil, _("Couldn't find Calibre-Web's login form -- its page layout may have changed.")
     end
 
     local body, code2, headers2 = doCwaRawFormRequest(cwa_url, pre_login_cookie, "POST", "/login", {
@@ -3411,10 +3411,10 @@ local function doCwaLogin(cwa_url, username, password, socks5_proxy)
         password = password or "",
         submit = "Login",
     }, nil, socks5_proxy)
-    if not body then return nil, _("Couldn't reach CWA's login page.") end
+    if not body then return nil, _("Couldn't reach Calibre-Web's login page.") end
     local cookie = extractSessionCookie(headers2)
     if not cookie or (code2 ~= 200 and code2 ~= 302) then
-        return nil, _("CWA login failed -- check the CWA username/password in Settings.")
+        return nil, _("Calibre-Web login failed -- check the Calibre-Web username/password in Settings.")
     end
     return cookie
 end
@@ -3428,7 +3428,7 @@ local function doCwaMultipartUpload(cwa_url, cookie, filename, file_bytes, socks
     local home_body = doCwaRawFormRequest(cwa_url, cookie, "GET", "/", nil, nil, socks5_proxy)
     local csrf_token = home_body and extractCsrfToken(home_body)
     if not csrf_token then
-        return nil, nil, _("Couldn't get a fresh CSRF token from CWA.")
+        return nil, nil, _("Couldn't get a fresh CSRF token from Calibre-Web.")
     end
 
     local boundary = "----shelfmarkkoplugin" .. tostring(os.time())
@@ -3463,7 +3463,7 @@ local function doCwaMultipartUpload(cwa_url, cookie, filename, file_bytes, socks
     socketutil:reset_timeout()
     if not ok then
         debugLog("[cwa] <- connection error: " .. tostring(code))
-        return nil, nil, _("Upload to CWA failed -- connection error.")
+        return nil, nil, _("Upload to Calibre-Web failed -- connection error.")
     end
     debugLog("[cwa] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#table.concat(sink_table)))
     return true, code
@@ -4013,7 +4013,7 @@ local function doAiSuggest(relay_url, relay_token, filename, candidates, socks5_
         return nil, _("Match suggestions aren't set up -- add a relay URL under Settings.")
     end
     if type(candidates) ~= "table" or #candidates == 0 then
-        return nil, _("No CWA candidates to compare against.")
+        return nil, _("No Calibre-Web candidates to compare against.")
     end
 
     -- The relay caps this at 10; trim here too so an oversized request is
@@ -4030,7 +4030,7 @@ local function doAiSuggest(relay_url, relay_token, filename, candidates, socks5_
         end
     end
     if #trimmed == 0 then
-        return nil, _("No usable CWA candidates to compare against.")
+        return nil, _("No usable Calibre-Web candidates to compare against.")
     end
 
     local body_json = JSON.encode({ filename = filename, candidates = trimmed })
@@ -4280,7 +4280,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     local unmatched = {}
 
     if not cwa_url or cwa_url == "" then
-        return { _("CWA URL isn't set -- add it under Bookbridge > Settings.") }
+        return { _("Calibre-Web URL isn't set -- add it under Bookbridge > Settings.") }
     end
 
     if lfs.attributes(download_dir, "mode") ~= "directory" then
@@ -4375,7 +4375,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         end
     end
     if tracked_count > 0 then
-        addLine(T(_("Checking %1 tracked book(s) for CWA-side changes..."), tracked_count))
+        addLine(T(_("Checking %1 tracked book(s) for Calibre-Web-side changes..."), tracked_count))
     end
     -- Pre-filter: one paginated catalog fetch replaces a per-book request for
     -- every book that hasn't changed. Deliberately SKIP-ONLY -- a uuid absent
@@ -4410,9 +4410,9 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
             end
             if status == "synced" then
                 replaced_paths[#replaced_paths + 1] = entry.path
-                addLine(T(_("  [%1] changed in CWA -- re-downloaded."), entry.title or uuid))
+                addLine(T(_("  [%1] changed in Calibre-Web -- re-downloaded."), entry.title or uuid))
             elseif status == "failed" then
-                addLine(T(_("  [%1] changed in CWA but re-download failed."), entry.title or uuid))
+                addLine(T(_("  [%1] changed in Calibre-Web but re-download failed."), entry.title or uuid))
             elseif status == "gone" then
                 -- Dropping the row here deliberately hands this book's local
                 -- file to the untracked pass below, in this same run: it
@@ -4420,7 +4420,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- either re-registered (a metadata edit that moved it to a
                 -- new id) or re-uploaded (genuinely deleted from CWA).
                 registry[uuid] = nil
-                addLine(T(_("  [%1] no longer in CWA under its tracked ID -- re-checking it below."), entry.title or uuid))
+                addLine(T(_("  [%1] no longer in Calibre-Web under its tracked ID -- re-checking it below."), entry.title or uuid))
             end
             -- "unchanged" and "unreachable" both report nothing here -- the
             -- per-tracked-book loop is meant to be quiet unless something
@@ -4430,7 +4430,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         end
     end
     if skipped_unchanged > 0 then
-        addLine(T(_("  (%1 unchanged in CWA -- checked in one request)"), skipped_unchanged))
+        addLine(T(_("  (%1 unchanged in Calibre-Web -- checked in one request)"), skipped_unchanged))
     end
 
     local known_paths = {}
@@ -5491,7 +5491,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                         registry[m.uuid] = { path = path, title = m.title, last_modified = last_modified }
                         pending_uploads[path] = nil
                         replaced_paths[#replaced_paths + 1] = path
-                        addLine(T(_("  [%1] matched existing CWA book \"%2\" -- downloaded current copy, registered."), fname, m.title))
+                        addLine(T(_("  [%1] matched existing Calibre-Web book \"%2\" -- downloaded current copy, registered."), fname, m.title))
                     else
                         -- Couldn't confirm/pull a fresh copy (CWA unreachable
                         -- just for this one extra request, etc) -- still
@@ -5502,13 +5502,13 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                         -- leaving a confirmed match unregistered.
                         registry[m.uuid] = { path = path, title = m.title }
                         pending_uploads[path] = nil
-                        addLine(T(_("  [%1] matched existing CWA book \"%2\" -- registered (couldn't confirm it's the current copy)."), fname, m.title))
+                        addLine(T(_("  [%1] matched existing Calibre-Web book \"%2\" -- registered (couldn't confirm it's the current copy)."), fname, m.title))
                     end
                 end
             elseif #matches > 1 then
                 local titles = {}
                 for _, m in ipairs(matches) do table.insert(titles, m.title) end
-                addLine(T(_("  [%1] matched more than one CWA book (%2) -- ambiguous, skipped."), fname, table.concat(titles, ", ")))
+                addLine(T(_("  [%1] matched more than one Calibre-Web book (%2) -- ambiguous, skipped."), fname, table.concat(titles, ", ")))
             elseif raw_entry_count > 0 then
                 -- CWA's search found something for this query, just nothing
                 -- the strict word-matcher trusted as the same book -- safer
@@ -5527,7 +5527,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- review then asked about the identical title three times in
                 -- a row. Confirmed live.
                 if allow_upload then
-                    addLine(T(_("  [%1] CWA search returned %2 result(s) for this query but none matched confidently -- skipped, check manually."), fname, tostring(raw_entry_count)))
+                    addLine(T(_("  [%1] Calibre-Web search returned %2 result(s) for this query but none matched confidently -- skipped, check manually."), fname, tostring(raw_entry_count)))
                     -- Keep only plain strings: this table crosses the fork
                     -- boundary back to the parent, and anything else (notably
                     -- a rapidjson null sentinel) does not survive
@@ -5561,7 +5561,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                 -- well already be there -- exactly the duplicate this
                 -- whole path exists to avoid. Left untracked so the next
                 -- sync retries it normally.
-                addLine(T(_("  [%1] couldn't reach CWA to check -- skipped, will retry next sync."), fname))
+                addLine(T(_("  [%1] couldn't reach Calibre-Web to check -- skipped, will retry next sync."), fname))
             elseif allow_upload then
                 if pending_uploads[path] then
                     -- Pushed on an earlier run and still not matched back --
@@ -5569,7 +5569,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                     -- the filename. Re-uploading would just make a duplicate,
                     -- the exact failure this guards; keep retrying the match
                     -- instead, and never upload a second copy.
-                    addLine(T(_("  [%1] already uploaded earlier -- CWA hasn't matched it back yet (its embedded author may differ from the filename); not re-uploading."), fname))
+                    addLine(T(_("  [%1] already uploaded earlier -- Calibre-Web hasn't matched it back yet (its embedded author may differ from the filename); not re-uploading."), fname))
                 else
                     table.insert(to_upload, path)
                 end
@@ -5582,7 +5582,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     end
 
     if #unregistered > 0 then
-        addLine(T(_("Checking %1 untracked book(s) against CWA..."), #unregistered))
+        addLine(T(_("Checking %1 untracked book(s) against Calibre-Web..."), #unregistered))
         -- Not "for _, path" -- that shadows gettext's _() for the rest of
         -- this loop body, which does call it (confirmed live: "attempt to
         -- call local '_' (a number value)" the first time this ran for
@@ -5604,10 +5604,10 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
 
     local uploaded = {}
     if #to_upload > 0 then
-        addLine(T(_("Uploading %1 new book(s) to CWA..."), #to_upload))
+        addLine(T(_("Uploading %1 new book(s) to Calibre-Web..."), #to_upload))
         local cookie, login_err = doCwaLogin(cwa_url, cwa_username, cwa_password, socks5_proxy)
         if not cookie then
-            addLine(T(_("  couldn't log in to CWA to upload: %1"), tostring(login_err)))
+            addLine(T(_("  couldn't log in to Calibre-Web to upload: %1"), tostring(login_err)))
         else
             for _idx, path in ipairs(to_upload) do -- see note above on why not "_"
                 reportProgress(phasePct(PCT_UPLOAD_START, PCT_UPLOAD_END, _idx - 1, #to_upload))
@@ -5654,7 +5654,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     -- simply registers on the next sync exactly as it always did -- this is
     -- an optimization on top of the old behavior, never a new requirement.
     if #uploaded > 0 then
-        addLine(T(_("Waiting for CWA to import %1 upload(s)..."), #uploaded))
+        addLine(T(_("Waiting for Calibre-Web to import %1 upload(s)..."), #uploaded))
         local still_pending = uploaded
         for attempt = 1, 3 do
             ffiUtil.sleep(attempt == 1 and 4 or 5)
@@ -5691,7 +5691,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         end
         for _idx, path in ipairs(still_pending) do
             local fname = path:match("([^/]+)$") or path
-            addLine(T(_("  [%1] uploaded, but CWA hadn't imported it yet -- it'll register on the next sync."), fname))
+            addLine(T(_("  [%1] uploaded, but Calibre-Web hadn't imported it yet -- it'll register on the next sync."), fname))
         end
         saveSyncRegistry(registry)
         savePendingUploads(pending_uploads)
@@ -5826,7 +5826,7 @@ function Bookbridge:cwaRequest(path, progress_text)
 
     local completed, body, code, err = Trapper:dismissableRunInSubprocess(function()
         return doCwaRequest(cwa_url, cwa_username, cwa_password, path, socks5_proxy)
-    end, progress_text or _("Searching CWA..."))
+    end, progress_text or _("Searching Calibre-Web..."))
 
     if not completed then return nil, nil, _("Cancelled.") end
     return body, code, err
@@ -6163,7 +6163,7 @@ function Bookbridge:syncLibrary()
         or self:defaultDownloadDir()
 
     local completed, report, replaced_paths, unmatched = runSyncWithProgress(
-        _("Syncing library with CWA..."), _("Checking books against CWA"),
+        _("Syncing library with Calibre-Web..."), _("Checking books against Calibre-Web"),
         { cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, nil })
 
     if not completed then return end
@@ -6263,7 +6263,7 @@ function Bookbridge:sendBookToCwa(file)
         or self:defaultDownloadDir()
 
     local completed, report, replaced_paths = runSyncWithProgress(
-        _("Sending to CWA..."), file:match("([^/]+)$") or file,
+        _("Sending to Calibre-Web..."), file:match("([^/]+)$") or file,
         { cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, file })
 
     if not completed then return end
@@ -6282,7 +6282,7 @@ function Bookbridge:sendBookToCwa(file)
 
     local TextViewer = require("ui/widget/textviewer")
     UIManager:show(TextViewer:new{
-        title = _("Send to CWA"),
+        title = _("Send to Calibre-Web"),
         text = (type(report) == "table" and #report > 0)
             and table.concat(report, "\n") or _("Nothing to report."),
         justified = false,
@@ -6337,11 +6337,11 @@ function Bookbridge:suggestMatchForFile(file)
             if #out > 0 then break end
         end
         return out
-    end, _("Searching CWA for candidates..."))
+    end, _("Searching Calibre-Web for candidates..."))
 
     if not completed then return end
     if type(candidates) ~= "table" or #candidates == 0 then
-        UIManager:show(InfoMessage:new{ text = _("CWA returned no candidates for this book.") })
+        UIManager:show(InfoMessage:new{ text = _("Calibre-Web returned no candidates for this book.") })
         return
     end
 
@@ -6394,7 +6394,7 @@ function Bookbridge:applyConfirmedMatch(path, uuid, title)
     if not completed then return false end
     if refused_path then
         UIManager:show(InfoMessage:new{
-            text = T(_("That CWA book is already tracked for a different local file:\n%1\n\nNot changing it."),
+            text = T(_("That Calibre-Web book is already tracked for a different local file:\n%1\n\nNot changing it."),
                 refused_path:match("([^/]+)$") or refused_path),
         })
         return false
@@ -6457,7 +6457,7 @@ function Bookbridge:reviewUnmatched(list, index)
 
     local ConfirmBox = require("ui/widget/confirmbox")
     UIManager:show(ConfirmBox:new{
-        text = T(_("%1\n\nSuggested match:\n%2%3\n\nConfidence: %4\n%5\n\nRegister this as the same book and download CWA's copy?"),
+        text = T(_("%1\n\nSuggested match:\n%2%3\n\nConfidence: %4\n%5\n\nRegister this as the same book and download Calibre-Web's copy?"),
             fname,
             suggestion.title or "?",
             (suggestion.author and suggestion.author ~= "") and ("\n" .. suggestion.author) or "",
@@ -6481,7 +6481,7 @@ function Bookbridge:reviewUnmatched(list, index)
                 local applied = self_ref:applyConfirmedMatch(item.path, suggestion.uuid, suggestion.title)
                 UIManager:show(InfoMessage:new{
                     text = applied and T(_("Registered \"%1\"."), suggestion.title or fname)
-                        or _("Couldn't download CWA's copy -- left unregistered."),
+                        or _("Couldn't download Calibre-Web's copy -- left unregistered."),
                     timeout = 2,
                 })
                 self_ref:reviewUnmatched(list, index + 1)
@@ -6504,7 +6504,7 @@ function Bookbridge:refreshBookMetadata(file)
 
     local completed, status, title = Trapper:dismissableRunInSubprocess(function()
         return doRefreshOneBook(cwa_url, cwa_username, cwa_password, socks5_proxy, file)
-    end, _("Checking CWA for changes..."))
+    end, _("Checking Calibre-Web for changes..."))
 
     if not completed then return end
 
@@ -6519,17 +6519,17 @@ function Bookbridge:refreshBookMetadata(file)
             pcall(function() FileManager.instance:onRefresh() end)
         end
         UIManager:setDirty("all", "full")
-        UIManager:show(InfoMessage:new{ text = T(_("Updated \"%1\" from CWA."), label) })
+        UIManager:show(InfoMessage:new{ text = T(_("Updated \"%1\" from Calibre-Web."), label) })
     elseif status == "unchanged" then
-        UIManager:show(InfoMessage:new{ text = T(_("No changes in CWA for \"%1\"."), label) })
+        UIManager:show(InfoMessage:new{ text = T(_("No changes in Calibre-Web for \"%1\"."), label) })
     elseif status == "failed" then
-        UIManager:show(InfoMessage:new{ text = T(_("\"%1\" changed in CWA but the re-download failed."), label) })
+        UIManager:show(InfoMessage:new{ text = T(_("\"%1\" changed in Calibre-Web but the re-download failed."), label) })
     elseif status == "gone" then
-        UIManager:show(InfoMessage:new{ text = T(_("\"%1\" is no longer found in CWA under its tracked ID -- run a full sync to re-link it."), label) })
+        UIManager:show(InfoMessage:new{ text = T(_("\"%1\" is no longer found in Calibre-Web under its tracked ID -- run a full sync to re-link it."), label) })
     elseif status == "untracked" then
         UIManager:show(InfoMessage:new{ text = T(_("\"%1\" isn't tracked yet -- run a full library sync once to register it, then Refresh works for it here."), label) })
     else
-        UIManager:show(InfoMessage:new{ text = _("Couldn't reach CWA to check.") })
+        UIManager:show(InfoMessage:new{ text = _("Couldn't reach Calibre-Web to check.") })
     end
 end
 
@@ -6612,7 +6612,10 @@ function Bookbridge:showConnectionStatus()
         if url and url ~= "" then services[#services + 1] = { url = url, name = name, enables = enables } end
     end
     add(self.server_url, _("Shelfmark server"), _("search & requests"))
-    add(self.cwa_url, _("Calibre-Web-Automated"), _("library sync"))
+    -- Not "Calibre-Web-Automated": this talks to whichever Calibre-Web fork
+    -- the URL points at (plain Calibre-Web, CWA, NextGen), and naming one of
+    -- them is wrong for everybody running the others.
+    add(self.cwa_url, _("Calibre-Web"), _("library sync"))
     add(self.annas_url, _("Anna's Archive API"), _("Anna's Archive as primary source"))
     add(self.ai_relay_url, _("AI relay"), _("match suggestions"))
     if #services == 0 then
@@ -6874,7 +6877,7 @@ function Bookbridge:showSetupQrCode()
 
     local ConfirmBox = require("ui/widget/confirmbox")
     UIManager:show(ConfirmBox:new{
-        text = _("This shows a QR code carrying your Shelfmark and CWA settings (encrypted, but visible to anyone who can see or photograph the screen while it's open). It expires in 5 minutes either way. Continue?"),
+        text = _("This shows a QR code carrying your Shelfmark and Calibre-Web settings (encrypted, but visible to anyone who can see or photograph the screen while it's open). It expires in 5 minutes either way. Continue?"),
         ok_text = _("Show it"),
         ok_callback = function()
             local Trapper = require("ui/trapper")
@@ -7019,7 +7022,7 @@ function Bookbridge:applyPairingText(pairing_text)
 
     local ConfirmBox = require("ui/widget/confirmbox")
     UIManager:show(ConfirmBox:new{
-        text = T(_("Import these settings?\n\nServer: %1\nCWA: %2\n\nThis overwrites your current Server settings and CWA settings on this device. Your download folder is left alone -- that stays per-device."),
+        text = T(_("Import these settings?\n\nServer: %1\nCalibre-Web: %2\n\nThis overwrites your current Server settings and Calibre-Web settings on this device. Your download folder is left alone -- that stays per-device."),
             tostring(settings_tbl.server_url), tostring(settings_tbl.cwa_url)),
         ok_text = _("Import"),
         ok_callback = function()
@@ -7050,7 +7053,7 @@ function Bookbridge:downloadFromCwa(title, caller_menu)
 
     if not self.cwa_url or self.cwa_url == "" then
         UIManager:show(InfoMessage:new{
-            text = _("Add a CWA URL under Shelfmark Settings to enable downloading from here."),
+            text = _("Add a Calibre-Web URL under Shelfmark Settings to enable downloading from here."),
         })
         return
     end
@@ -7061,14 +7064,14 @@ function Bookbridge:downloadFromCwa(title, caller_menu)
         return
     end
     if code ~= 200 or not body then
-        UIManager:show(InfoMessage:new{ text = T(_("CWA search failed (HTTP %1)"), tostring(code)) })
+        UIManager:show(InfoMessage:new{ text = T(_("Calibre-Web search failed (HTTP %1)"), tostring(code)) })
         return
     end
 
     local entries = parseOpdsEntries(body)
     if #entries == 0 then
         UIManager:show(InfoMessage:new{
-            text = _("No matching book found in CWA yet -- it may still be importing."),
+            text = _("No matching book found in Calibre-Web yet -- it may still be importing."),
             timeout = 3,
         })
         return
@@ -7085,7 +7088,7 @@ function Bookbridge:downloadFromCwa(title, caller_menu)
 
     local results_menu
     results_menu = Menu:new{
-        title = _("Matches in CWA -- tap to download"),
+        title = _("Matches in Calibre-Web -- tap to download"),
         item_table = item_table,
         multilines_forced = true,
         covers_fullscreen = true,
@@ -7205,7 +7208,7 @@ function Bookbridge:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Sync library with CWA"),
+                text = _("Sync library with Calibre-Web"),
                 keep_menu_open = true,
                 -- Trapper:wrap, like every other network entry point in this
                 -- menu. This one was missing it, which meant syncLibrary ran
@@ -7351,7 +7354,7 @@ function Bookbridge:addToMainMenu(menu_items)
                                 callback = function() self:editServerSettings() end,
                             },
                             {
-                                text = _("CWA settings"),
+                                text = _("Calibre-Web settings"),
                                 keep_menu_open = true,
                                 callback = function() self:editCwaSettings() end,
                             },
