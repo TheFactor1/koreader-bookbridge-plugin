@@ -29,13 +29,19 @@ would have been found by guessing.
 @module koplugin.shelfmark
 ]]
 
+local Blitbuffer = require("ffi/blitbuffer")
 local DataStorage = require("datastorage")
+local Font = require("ui/font")
+local FrameContainer = require("ui/widget/container/framecontainer")
+local Geom = require("ui/geometry")
 local InfoMessage = require("ui/widget/infomessage")
 local JSON = require("json")
 local bit = require("bit")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
+local Size = require("ui/size")
+local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
@@ -9473,9 +9479,9 @@ function Bookbridge:processHardcoverPending()
             if completed and ok then
                 pending[md5] = nil
                 entry.last_percent = rec.percent; map[md5] = entry; saveHardcoverMap(map)
-                -- Silent on success: this fires on every book close, and the
-                -- page number is already visible on Hardcover itself.
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
+                self:showAfterCloseNotice(T(_("Hardcover: \"%1\" -- page %2 of %3 (%4%)."),
+                    tostring(entry.title), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
             else
                 debugLog("[hc] push failed for " .. tostring(entry.title) .. ": " .. tostring(a))
                 if completed and not hardcoverErrorIsTransient(a) then
@@ -9554,8 +9560,47 @@ function Bookbridge:showAfterCloseNotice(text)
         if ok_t then debugLog("[hc] notice: system toast"); return end
         debugLog("[hc] notice: system toast failed (" .. tostring(terr) .. "); in-app notice instead")
     end
-    local msg = InfoMessage:new{ text = text, timeout = 6 }
-    UIManager:show(msg, "ui")
+    -- A small toast pinned to the bottom-left corner, not a centred
+    -- full-width InfoMessage: this fires on every book close, so a box
+    -- parked mid-screen for 6 seconds became the thing you noticed about
+    -- closing a book, not the sync itself. Requires Device.screen, which the
+    -- pcall above already resolved for the Android branch; fall back to the
+    -- old centred message if that require ever fails (kept working exactly
+    -- as before rather than showing nothing).
+    local Screen = ok_dev and Device and Device.screen
+    if not Screen then
+        local msg = InfoMessage:new{ text = text, timeout = 6 }
+        UIManager:show(msg, "ui")
+        return
+    end
+    -- Only one notice on screen at a time: a new one replaces whatever the
+    -- last one left up rather than stacking in the corner.
+    if self._hc_notice_widget then
+        pcall(function() UIManager:close(self._hc_notice_widget) end)
+        self._hc_notice_widget = nil
+    end
+    local frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = Size.border.default,
+        radius = 0,
+        margin = 0,
+        padding = Size.padding.small,
+        TextWidget:new{
+            text = text,
+            face = Font:getFace("x_smallinfofont"),
+            max_width = math.floor(Screen:getWidth() * 0.55),
+        },
+    }
+    local fsize = frame:getSize()
+    local x, y = Size.margin.default, Screen:getHeight() - fsize.h - Size.margin.default
+    local region = Geom:new{ x = x, y = y, w = fsize.w, h = fsize.h }
+    self._hc_notice_widget = frame
+    UIManager:show(frame, "ui", region, x, y)
+    UIManager:scheduleIn(6, function()
+        if self._hc_notice_widget == frame then self._hc_notice_widget = nil end
+        UIManager:close(frame, "ui", region)
+    end)
+    local msg = frame
     if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
     local function still_up()
         return type(UIManager.isWidgetShown) ~= "function" or UIManager:isWidgetShown(msg)
@@ -9637,9 +9682,9 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
         if completed and ok then
             self:clearHardcoverPending(md5)
             map[md5].last_percent = rec.percent; saveHardcoverMap(map)
-            -- Silent: the book linked itself and synced, which is the expected
-            -- outcome, not news.
             debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(ft), tostring(a), tostring(b)))
+            self:showAfterCloseNotice(T(_("Hardcover: synced as \"%1\" by %2 -- page %3 of %4 (%5%)."),
+                ft, tostring(fa), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
         else
             debugLog("[hc] push failed for " .. tostring(ft) .. ": " .. tostring(a))   -- stays pending; retried later
             if completed and not hardcoverErrorIsTransient(a) then
