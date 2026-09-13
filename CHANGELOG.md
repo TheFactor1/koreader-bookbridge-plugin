@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 0e52652
+
+- **Finishing a book now shows a QR code straight to its Hardcover page.**
+  Right after a book syncs as Read, a tap-to-dismiss QR code pops up (15s,
+  or tap/any key to close sooner) linking to that book's own page on
+  hardcover.app -- scan it with your phone to leave a fuller review than
+  KOReader's Book Status note field gives room for. If Hardcover can't be
+  reached for the extra lookup this needs, it's skipped silently -- the
+  Read status and rating/review already went through by that point either
+  way.
+
 ## 2026-09-13 — build d6aa67b
 
 - **Ratings and reviews now come straight from KOReader's own Book Status
