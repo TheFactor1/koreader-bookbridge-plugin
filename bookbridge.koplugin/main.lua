@@ -2460,6 +2460,80 @@ local function doHardcoverPushProgress(token, book_id, percent, edition_id)
     return true, progress_pages, pages
 end
 
+-- Marks a book Read and records when -- and optionally how -- it was rated,
+-- in one call. Deliberately separate from doHardcoverPushProgress: that
+-- function only ever ratchets forward (never downgrades, never touches
+-- finished_at) and is reached on every ordinary sync. This one is reached
+-- only after KOReader's own "Book status: Finished" action (see
+-- captureReadingProgress), which is a real statement of intent the plugin
+-- should not try to infer from a percent threshold.
+--
+-- A genuine re-read is handled for free: Hardcover models each read-through
+-- as its own user_book_read row, and the one already on file has its own
+-- finished_at set from the PREVIOUS completion, so this falls through to
+-- inserting a new row rather than overwriting it -- the caller only needs to
+-- avoid calling this twice for the SAME completion (see finished_date /
+-- finished_synced_date at the call site).
+--
+-- rating: 1-5 or nil, matching KOReader's own summary.rating scale.
+--
+-- NEEDS LIVE VERIFICATION (device was offline this session): the
+-- update_user_book/rating mutation below has not been round-tripped against
+-- api.hardcover.app. Every other mutation in this file was shaped by live
+-- introspection or trial against the real schema first -- this one was not,
+-- and should not be trusted until it has been.
+local function doHardcoverMarkFinished(token, book_id, edition_id, finished_date, rating)
+    local ub, err = doHardcoverGetUserBook(token, book_id)
+    if err then return false, err end
+    if not ub or ub.status_id ~= 3 then
+        local ok, serr = doHardcoverSetStatus(token, book_id, 3, edition_id)
+        if not ok then return false, serr end
+        -- Same read-after-write lag as doHardcoverPushProgress's first-sync
+        -- path -- see its comment for the measured numbers.
+        local util = require("ffi/util")
+        for attempt = 1, 3 do
+            ub = doHardcoverGetUserBook(token, book_id)
+            if ub then break end
+            if attempt < 3 then util.sleep(1) end
+        end
+        if not ub then return false, _("Couldn't mark the book Read on Hardcover.") end
+    end
+    local edition = ub.edition
+    local pages = edition and tonumber(edition.pages)
+    local d = (type(finished_date) == "string" and finished_date ~= "") and finished_date or os.date("!%Y-%m-%d")
+    local read = ub.user_book_reads and ub.user_book_reads[1]
+    if read and not read.finished_at then
+        local data, uerr = doHardcoverGraphQL(token, [[
+            mutation FinishRead($id: Int!, $p: Int, $d: date!) {
+                update_user_book_read(id: $id, object: { progress_pages: $p, finished_at: $d }) { id error }
+            }
+        ]], { id = read.id, p = pages, d = d })
+        local r = data and data.update_user_book_read
+        if not r or r.error then return false, (r and r.error) or uerr or _("Hardcover didn't confirm the finish date.") end
+    elseif edition then
+        local data, ierr = doHardcoverGraphQL(token, [[
+            mutation FinishNewRead($ubid: Int!, $eid: Int!, $p: Int, $d1: date!, $d2: date!) {
+                insert_user_book_read(user_book_id: $ubid, user_book_read: { edition_id: $eid, progress_pages: $p, started_at: $d1, finished_at: $d2 }) { id error }
+            }
+        ]], { ubid = ub.id, eid = edition.id, p = pages, d1 = d, d2 = d })
+        local r = data and data.insert_user_book_read
+        if not r or r.error then return false, (r and r.error) or ierr or _("Hardcover didn't confirm the finish date.") end
+    end
+    if rating then
+        local data, rerr = doHardcoverGraphQL(token, [[
+            mutation RateBook($id: Int!, $r: numeric!) {
+                update_user_book(id: $id, object: { rating: $r }) { id error }
+            }
+        ]], { id = ub.id, r = rating })
+        local r = data and data.update_user_book
+        -- A rating failure does not undo the Read status/date above -- that
+        -- part is already confirmed good -- so this is reported back, not
+        -- returned as an overall failure.
+        if not r or r.error then return true, (r and r.error) or rerr or _("Marked Read, but the rating didn't save.") end
+    end
+    return true
+end
+
 local function doHardcoverFollowAuthor(token, author_id)
     local data, err = doHardcoverGraphQL(token, [[
         mutation FollowAuthor($id: Int!) {
@@ -9420,8 +9494,26 @@ function Bookbridge:captureReadingProgress()
             shown * 100, ratio * 100))
     end
     local props = (ui.document.getProps and ui.document:getProps()) or {}
+    -- KOReader's own "Book status" (long-press a book -> Book status, or the
+    -- end-of-document prompt) is a real, deliberate statement that this book
+    -- is finished -- a far better signal than inferring it from percent, and
+    -- it is the same action that lets a re-read be told apart from a normal
+    -- resync (status flips back to "reading" and later "complete" again,
+    -- with a newer summary.modified each time). No event fires when these
+    -- change (checked against KOReader's own source), so this reads the
+    -- current value at the same point position is already captured, rather
+    -- than trying to hook one. Field names match
+    -- frontend/ui/widget/bookstatuswidget.lua exactly: status/rating/modified
+    -- under the doc_settings "summary" key.
+    local summary = ui.doc_settings:readSetting("summary") or {}
     local pending = loadHardcoverPending()
-    pending[md5] = { title = props.title, author = props.authors, identifiers = props.identifiers, percent = percent, at = os.time() }
+    pending[md5] = {
+        title = props.title, author = props.authors, identifiers = props.identifiers,
+        percent = percent, at = os.time(),
+        finished = (summary.status == "complete"),
+        finished_date = summary.modified,
+        koreader_rating = summary.rating,
+    }
     saveHardcoverPending(pending)
     debugLog(string.format("[hc] captured %d%% for %s", math.floor((percent or 0) * 100 + 0.5), tostring(props.title)))
 end
@@ -9429,6 +9521,74 @@ end
 function Bookbridge:clearHardcoverPending(md5)
     local pending = loadHardcoverPending()
     if pending[md5] ~= nil then pending[md5] = nil; saveHardcoverPending(pending) end
+end
+
+-- Finds ONE pending book KOReader has marked Finished that this hasn't told
+-- Hardcover about yet, and prompts for a rating before marking it Read.
+-- entry.finished_synced + entry.finished_synced_date together decide
+-- "already handled": no flag at all means never synced (prompt); the flag
+-- set but the date different from rec.finished_date means status flipped
+-- reading -> complete AGAIN with a newer summary.modified -- a genuine
+-- re-read, which Hardcover models as its own user_book_read row (see
+-- doHardcoverMarkFinished) -- so this prompts again; the flag set with a
+-- missing rec.finished_date (summary.modified absent, unlikely but not
+-- guaranteed) falls back to trusting the flag alone rather than re-prompting
+-- forever over a date it can never match.
+--
+-- Deliberately at most one per call: several finished books queued at once
+-- (offline for a while, say) would otherwise stack dialogs. Whatever's left
+-- is picked up the next time this runs, same as the unmatched-book confirm
+-- below.
+--
+-- Shows the dialog directly (synchronous, returns immediately -- no
+-- coroutine conflict with the Trapper:wrap this whole function already runs
+-- inside) and only opens ITS OWN fresh Trapper:wrap from inside the button
+-- callback, which fires later from the main loop once the original call has
+-- long since returned -- the same shape confirmAndLogBookOnHardcover already
+-- uses for exactly this reason.
+function Bookbridge:checkHardcoverFinishedBook(pending, map)
+    local token = self.hardcover_token
+    for md5, rec in pairs(pending) do
+        local entry = map[md5]
+        local already_synced = entry and entry.finished_synced
+            and (entry.finished_synced_date == rec.finished_date or not rec.finished_date)
+        if entry and entry.decision == "sync" and entry.book_id and rec.finished and not already_synced then
+            local SpinWidget = require("ui/widget/spinwidget")
+            local title = entry.title or rec.title or _("this book")
+            local starting = tonumber(rec.koreader_rating) or 3
+            local function finish(rating)
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function()
+                    local ok, err = doHardcoverMarkFinished(token, entry.book_id, entry.edition_id, rec.finished_date, rating)
+                    if ok then
+                        entry.finished_synced = true
+                        entry.finished_synced_date = rec.finished_date
+                        map[md5] = entry; saveHardcoverMap(map)
+                        local p = loadHardcoverPending(); p[md5] = nil; saveHardcoverPending(p)
+                        debugLog(string.format("[hc] marked finished: %s (rating=%s)", tostring(title), tostring(rating)))
+                        self:showAfterCloseNotice(rating
+                            and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(rating))
+                            or T(_("Hardcover: \"%1\" marked Read."), title))
+                    else
+                        debugLog("[hc] mark-finished failed for " .. tostring(title) .. ": " .. tostring(err))
+                        if err then self:showAfterCloseNotice(T(_("Hardcover: couldn't mark \"%1\" Read -- %2"), title, tostring(err))) end
+                    end
+                end)
+            end
+            UIManager:show(SpinWidget:new{
+                title_text = _("Rate this book?"),
+                info_text = T(_("\"%1\" -- finished, ready to mark Read on Hardcover."), title),
+                value = starting, value_min = 1, value_max = 5, value_step = 1,
+                precision = "%d",
+                ok_text = _("Rate & mark Read"),
+                callback = function(spin) finish(spin.value) end,
+                cancel_text = _("Skip rating"),
+                cancel_callback = function() finish(nil) end,
+            })
+            return true
+        end
+    end
+    return false
 end
 
 -- Pushes every pending record it can: known books silently, and the FIRST
@@ -9442,6 +9602,13 @@ function Bookbridge:processHardcoverPending()
         debugLog("[hc] process: nothing pending"); return
     end
     local map = loadHardcoverMap()
+    -- Checked first, before the main loop below: a finished book sitting at
+    -- an unchanged percent (it would be, once it hits 100%) is exactly what
+    -- that loop's "same position as last push, nothing to tell Hardcover"
+    -- shortcut is designed to drop silently -- which is correct for an
+    -- ordinary resync, but would mean a finished book never gets marked Read
+    -- if this ran after it instead of before.
+    if self:checkHardcoverFinishedBook(pending, map) then return end
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
     local n = 0; for _ in pairs(pending) do n = n + 1 end
