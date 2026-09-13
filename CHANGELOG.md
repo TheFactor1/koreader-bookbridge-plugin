@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 9e378af
+
+- **Fixed: the finish/rating prompt kept popping back up on every book
+  close, not just the finished one.** A network hiccup mid-write ("HTTP
+  wantread" -- a transport-level blip, not anything Hardcover actually
+  said) threw away the star rating and review you'd already given and left
+  the book stuck asking again, on every subsequent close, regardless of
+  what book that close was for. Your answer is now kept: if a write fails,
+  it retries quietly in the background using what you already chose,
+  without asking a second time.
+
 ## 2026-09-13 — build 9838843
 
 - **Fixed: the rating prompt still didn't show up for some finished books.**
