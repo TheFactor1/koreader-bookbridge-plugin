@@ -9670,8 +9670,70 @@ local function showHardcoverReviewPrompt(title, on_submit)
     dialog:onShowKeyboard()
 end
 
-function Bookbridge:checkHardcoverFinishedBook(pending, map)
+-- Shared by checkHardcoverFinishedBook (an ALREADY-mapped book reaching
+-- Finished on some later sync) and resolveHardcoverMatch (a book that gets
+-- auto-matched to Hardcover for the first time on the SAME sync that also
+-- finished it -- a short book read start to finish before this device ever
+-- talked to Hardcover about it at all, which turned out to be common, not
+-- an edge case: two of the first three real books hit exactly this. The
+-- finish-check used to run once, before either caller creates the map
+-- entry, so a book matched-and-finished in one pass had no entry yet at
+-- that point and was silently skipped -- confirmed live from the debug log,
+-- "decision=nil has_book_id=nil" on the very sync that needed it.
+--
+-- Requires md5/rec/entry/map already resolved -- entry.book_id in
+-- particular MUST be set already; neither caller may call this before it is.
+function Bookbridge:promptHardcoverFinish(md5, rec, entry, map)
+    -- Three entry points can now reach this (an already-mapped book, and
+    -- two different first-time-match paths), and none of them clear the
+    -- pending record until the prompt is actually answered -- so a retry
+    -- timer or a network-back event firing while this book's star picker
+    -- is still open and unanswered would otherwise find the same candidate
+    -- again and stack a second one on top. One flag, checked at every entry
+    -- point, is simpler than trying to make three call sites agree on
+    -- locking a single md5.
+    if self._hc_finish_prompt_open then
+        debugLog("[hc] finish-check: prompt already open, not stacking another for " .. tostring(rec.title or entry.title))
+        return
+    end
+    self._hc_finish_prompt_open = true
     local token = self.hardcover_token
+    local title = entry.title or rec.title or _("this book")
+    local function finish(rating, review)
+        self._hc_finish_prompt_open = nil
+        local Trapper = require("ui/trapper")
+        Trapper:wrap(function()
+            local ok, err = doHardcoverMarkFinished(token, entry.book_id, entry.edition_id, rec.finished_date, rating, review)
+            if ok then
+                entry.finished_synced = true
+                entry.finished_synced_date = rec.finished_date
+                map[md5] = entry; saveHardcoverMap(map)
+                self:clearHardcoverPending(md5)
+                debugLog(string.format("[hc] marked finished: %s (rating=%s, review=%s)",
+                    tostring(title), tostring(rating), review and "yes" or "no"))
+                self:showAfterCloseNotice(rating
+                    and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(rating))
+                    or T(_("Hardcover: \"%1\" marked Read."), title))
+            else
+                debugLog("[hc] mark-finished failed for " .. tostring(title) .. ": " .. tostring(err))
+                if err then self:showAfterCloseNotice(T(_("Hardcover: couldn't mark \"%1\" Read -- %2"), title, tostring(err))) end
+            end
+        end)
+    end
+    -- Star picker first, then the review prompt, then the actual write --
+    -- two short taps in sequence rather than one crowded screen, and each
+    -- step reuses a widget already proven elsewhere (the star row's own
+    -- construction is new, but built from Button fields confirmed against
+    -- KOReader's real source; MultiInputDialog is the exact widget this
+    -- plugin's own settings dialogs already use).
+    showHardcoverStarPicker(title, function(rating)
+        showHardcoverReviewPrompt(title, function(review)
+            finish(rating, review)
+        end)
+    end)
+end
+
+function Bookbridge:checkHardcoverFinishedBook(pending, map)
     for md5, rec in pairs(pending) do
         local entry = map[md5]
         local already_synced = entry and entry.finished_synced
@@ -9685,39 +9747,7 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
                 tostring(already_synced), tostring(entry and entry.decision), tostring(entry and entry.book_id ~= nil)))
         end
         if entry and entry.decision == "sync" and entry.book_id and rec.finished and not already_synced then
-            local title = entry.title or rec.title or _("this book")
-            local function finish(rating, review)
-                local Trapper = require("ui/trapper")
-                Trapper:wrap(function()
-                    local ok, err = doHardcoverMarkFinished(token, entry.book_id, entry.edition_id, rec.finished_date, rating, review)
-                    if ok then
-                        entry.finished_synced = true
-                        entry.finished_synced_date = rec.finished_date
-                        map[md5] = entry; saveHardcoverMap(map)
-                        local p = loadHardcoverPending(); p[md5] = nil; saveHardcoverPending(p)
-                        debugLog(string.format("[hc] marked finished: %s (rating=%s, review=%s)",
-                            tostring(title), tostring(rating), review and "yes" or "no"))
-                        self:showAfterCloseNotice(rating
-                            and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(rating))
-                            or T(_("Hardcover: \"%1\" marked Read."), title))
-                    else
-                        debugLog("[hc] mark-finished failed for " .. tostring(title) .. ": " .. tostring(err))
-                        if err then self:showAfterCloseNotice(T(_("Hardcover: couldn't mark \"%1\" Read -- %2"), title, tostring(err))) end
-                    end
-                end)
-            end
-            -- Star picker first, then the review prompt, then the actual
-            -- write -- two short taps in sequence rather than one crowded
-            -- screen, and each step reuses a widget already proven
-            -- elsewhere (the star row's own construction is new, but built
-            -- from Button fields confirmed against KOReader's real source;
-            -- MultiInputDialog is the exact widget this plugin's own
-            -- settings dialogs already use).
-            showHardcoverStarPicker(title, function(rating)
-                showHardcoverReviewPrompt(title, function(review)
-                    finish(rating, review)
-                end)
-            end)
+            self:promptHardcoverFinish(md5, rec, entry, map)
             return true
         end
     end
@@ -10034,6 +10064,19 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
     if book_id and confident then
         map[md5] = { book_id = book_id, title = ft, decision = "sync", edition_id = edition and edition.id }; saveHardcoverMap(map)
         debugLog(string.format("[hc] auto-matched %s -> %s by %s", tostring(rec.title), tostring(ft), tostring(fa)))
+        -- A book matched for the first time on the SAME sync that finished
+        -- it (a short book read start to finish, say) must go through the
+        -- same mark-Read prompt as any other finished book -- confirmed
+        -- live this was missing entirely: this used to fall straight
+        -- through to the ordinary progress push below every time, because
+        -- the finish-check that runs elsewhere only ever sees books that
+        -- were ALREADY mapped before this sync started, and map[md5] is
+        -- created right above, this call, too late for that check to have
+        -- found it.
+        if rec.finished then
+            self:promptHardcoverFinish(md5, rec, map[md5], map)
+            return
+        end
         local edition_id = edition and edition.id
         local completed, ok, a, b = Trapper:dismissableRunInSubprocess(function()
             return doHardcoverPushProgress(token, book_id, rec.percent, edition_id)
@@ -10135,7 +10178,13 @@ function Bookbridge:pickHardcoverCandidate(md5, rec, candidates, token)
                 UIManager:close(dialog)
                 debugLog("[hc] picked " .. tostring(c.id) .. " (" .. tostring(c.title) .. ") for " .. tostring(rec.title))
                 map[md5] = { book_id = c.id, title = c.title, decision = "sync" }; saveHardcoverMap(map)
-                if rec.percent then
+                -- Same gap as resolveHardcoverMatch and for the same reason:
+                -- this is the first time map[md5] exists, so a book that was
+                -- ALSO already finished when it landed in Review matches
+                -- needs the same mark-Read prompt, not the ordinary push.
+                if rec.finished then
+                    self:promptHardcoverFinish(md5, rec, map[md5], map)
+                elseif rec.percent then
                     local Trapper = require("ui/trapper")
                     Trapper:wrap(function()
                         Trapper:dismissableRunInSubprocess(function()
