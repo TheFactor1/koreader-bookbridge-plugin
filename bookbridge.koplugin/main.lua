@@ -36,7 +36,9 @@ local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
+local HorizontalSpan = require("ui/widget/horizontalspan")
 local InfoMessage = require("ui/widget/infomessage")
+local InputText = require("ui/widget/inputtext")
 local JSON = require("json")
 local bit = require("bit")
 local LuaSettings = require("luasettings")
@@ -9588,7 +9590,27 @@ end
 -- no redraw logic at all, at the cost of no live preview before committing.
 -- All five icons show filled from the start for the same reason -- an
 -- empty/full split implies a live current value there isn't one yet.
-local function showHardcoverStarPicker(title, on_choose)
+-- One compact dialog: tappable stars that update in place (tap changes
+-- which show filled, dialog stays open) plus a review field below, one
+-- Save/Skip pair at the bottom. Replaces two separate dialogs shown one
+-- after the other -- confirmed almost certainly the cause of the review
+-- step never appearing at all: two KOReader modals opening and closing in
+-- the same tick, one closing exactly as the next opens, with no yield to
+-- the event loop in between. It was also slower for the same reason: two
+-- full show/close/repaint cycles (each with its own keyboard toggle) where
+-- one now does.
+--
+-- Redrawing the star row in place needed checking, not assuming: KOReader's
+-- own VerticalGroup/HorizontalGroup cache their measured size and child
+-- offsets (_size/_offsets) and only recompute them via resetLayout() --
+-- read directly from KOReader's source rather than guessed, after the
+-- SpinWidget field-naming miss earlier this session. Swapping a child
+-- reference without that call would silently keep painting the OLD cached
+-- geometry. Every icon is the same size (only which icon -- star.full vs
+-- star.empty -- changes), so the cached size was never actually wrong here,
+-- but resetLayout() is called anyway rather than relying on that happening
+-- to be harmless.
+local function showHardcoverFinishDialog(title, on_submit)
     local CenterContainer = require("ui/widget/container/centercontainer")
     local MovableContainer = require("ui/widget/container/movablecontainer")
     local VerticalGroup = require("ui/widget/verticalgroup")
@@ -9596,78 +9618,83 @@ local function showHardcoverStarPicker(title, on_choose)
     local Device = require("device")
     local Screen = Device.screen
 
-    local popup
-    local function choose(rating)
+    local popup, frame, body, star_row, input_widget
+    local rating = 0
+
+    local function buildStarRow()
+        local row = HorizontalGroup:new{ align = "center" }
+        for i = 1, 5 do
+            table.insert(row, Button:new{
+                icon = (i <= rating) and "star.full" or "star.empty",
+                icon_width = Screen:scaleBySize(24),
+                icon_height = Screen:scaleBySize(24),
+                bordersize = 0,
+                padding = Size.padding.small,
+                callback = function()
+                    rating = i
+                    star_row = buildStarRow()
+                    body[2] = star_row
+                    body:resetLayout()
+                    UIManager:setDirty(popup, "ui")
+                end,
+            })
+        end
+        return row
+    end
+    star_row = buildStarRow()
+
+    -- parent CANNOT be set here to the popup local: popup is still nil at
+    -- this point (it's assigned below, after the container it belongs to is
+    -- built, and this table constructor captures whatever popup's value IS
+    -- right now, not a live reference to it later) -- caught before it
+    -- shipped, not after. Set once popup actually exists, below.
+    input_widget = InputText:new{
+        hint = _("Write a review (optional)..."),
+        width = Screen:scaleBySize(280),
+        height = Screen:scaleBySize(90),
+    }
+
+    local function finish(chosen_rating, review)
         UIManager:close(popup)
-        on_choose(rating)
+        on_submit(chosen_rating, review)
+    end
+    local function submit()
+        local review = input_widget:getText()
+        review = review and review:gsub("^%s+", ""):gsub("%s+$", "") or ""
+        finish(rating > 0 and rating or nil, review ~= "" and review or nil)
     end
 
-    local star_group = HorizontalGroup:new{ align = "center" }
-    for i = 1, 5 do
-        table.insert(star_group, Button:new{
-            icon = "star.full",
-            icon_width = Screen:scaleBySize(28),
-            icon_height = Screen:scaleBySize(28),
-            bordersize = 0,
-            padding = Size.padding.small,
-            callback = function() choose(i) end,
-        })
-    end
-
-    local frame = FrameContainer:new{
+    body = VerticalGroup:new{
+        align = "center",
+        TextBoxWidget:new{
+            text = title, face = Font:getFace("x_smallinfofont"),
+            width = Screen:scaleBySize(280), alignment = "center",
+        },
+        star_row,
+        VerticalSpan:new{ width = Size.padding.default },
+        input_widget,
+        VerticalSpan:new{ width = Size.padding.default },
+        HorizontalGroup:new{
+            align = "center",
+            Button:new{ text = _("Skip"), callback = function() finish(nil, nil) end },
+            HorizontalSpan:new{ width = Size.padding.default },
+            Button:new{ text = _("Save"), callback = submit },
+        },
+    }
+    frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = Size.border.window,
         radius = 0,
         padding = Size.padding.large,
-        VerticalGroup:new{
-            align = "center",
-            TextBoxWidget:new{
-                text = title,
-                face = Font:getFace("x_smallinfofont"),
-                width = Screen:scaleBySize(280),
-                alignment = "center",
-            },
-            VerticalSpan:new{ width = Size.padding.large },
-            star_group,
-            VerticalSpan:new{ width = Size.padding.default },
-            Button:new{ text = _("Skip rating"), callback = function() choose(nil) end },
-        },
+        body,
     }
     popup = CenterContainer:new{
         dimen = Screen:getSize(),
         MovableContainer:new{ frame },
     }
+    input_widget.parent = popup
     UIManager:show(popup)
-end
-
--- MultiInputDialog, matching the exact pattern this plugin already uses for
--- its own settings dialogs (see editSettings et al.) rather than a
--- different widget for this one case. allow_newline is what actually makes
--- this usable for more than one line -- MultiInputDialog's input fields are
--- single-line otherwise.
-local function showHardcoverReviewPrompt(title, on_submit)
-    local dialog
-    dialog = MultiInputDialog:new{
-        title = _("Write a review? (optional)"),
-        fields = {
-            { hint = T(_("Your thoughts on \"%1\"..."), title), allow_newline = true },
-        },
-        buttons = {
-            {
-                { text = _("Skip review"), id = "close", callback = function()
-                    UIManager:close(dialog); on_submit(nil)
-                end },
-                { text = _("Save"), callback = function()
-                    local fields = dialog:getFields()
-                    local text = fields[1] and fields[1]:gsub("^%s+", ""):gsub("%s+$", "")
-                    UIManager:close(dialog)
-                    on_submit(text ~= "" and text or nil)
-                end },
-            },
-        },
-    }
-    UIManager:show(dialog)
-    dialog:onShowKeyboard()
+    input_widget:onShowKeyboard()
 end
 
 -- The actual Hardcover write, given an answer the user has ALREADY
@@ -9744,23 +9771,15 @@ function Bookbridge:promptHardcoverFinish(md5, rec, entry, map)
     end
     self._hc_finish_prompt_open = true
     local title = entry.title or rec.title or _("this book")
-    -- Star picker first, then the review prompt, then the actual write --
-    -- two short taps in sequence rather than one crowded screen, and each
-    -- step reuses a widget already proven elsewhere (the star row's own
-    -- construction is new, but built from Button fields confirmed against
-    -- KOReader's real source; MultiInputDialog is the exact widget this
-    -- plugin's own settings dialogs already use).
-    showHardcoverStarPicker(title, function(rating)
-        showHardcoverReviewPrompt(title, function(review)
-            self._hc_finish_prompt_open = nil
-            -- Recorded BEFORE the write is attempted, not after it
-            -- succeeds: the whole point is that the user's answer survives
-            -- a failed write and is never asked for again.
-            entry.finish_answer = { rating = rating, review = review }
-            entry.finish_answer_date = rec.finished_date
-            map[md5] = entry; saveHardcoverMap(map)
-            self:writeHardcoverFinish(md5, rec, entry, map)
-        end)
+    showHardcoverFinishDialog(title, function(rating, review)
+        self._hc_finish_prompt_open = nil
+        -- Recorded BEFORE the write is attempted, not after it succeeds:
+        -- the whole point is that the user's answer survives a failed
+        -- write and is never asked for again.
+        entry.finish_answer = { rating = rating, review = review }
+        entry.finish_answer_date = rec.finished_date
+        map[md5] = entry; saveHardcoverMap(map)
+        self:writeHardcoverFinish(md5, rec, entry, map)
     end)
 end
 
