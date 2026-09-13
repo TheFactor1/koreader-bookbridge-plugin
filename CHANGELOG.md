@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-14 — build a308ef6
+
+- **The finish-a-book prompt is now one compact dialog instead of two.**
+  Stars and the review field show together, with one Save/Skip pair --
+  tapping a star no longer closes the box, it just updates which stars are
+  filled. Should also fix the review step never appearing at all: that was
+  very likely caused by two separate dialogs opening and closing back to
+  back with no pause in between, which this removes entirely by combining
+  them.
+
 ## 2026-09-13 — build 9e378af
 
 - **Fixed: the finish/rating prompt kept popping back up on every book
