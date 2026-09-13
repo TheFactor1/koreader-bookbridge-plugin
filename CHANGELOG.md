@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 1779c14
+
+- **Hardcover now syncs quietly.** Closing a book no longer pops a box
+  reporting the page it just recorded — that sync happens in the background
+  and the page number is on Hardcover anyway. A notice appears only when
+  Hardcover genuinely could not record your progress; a push that failed
+  because the device had no network stays silent and retries on its own.
+  Books that need you to confirm a match still say so.
+
 ## 2026-09-12 — build 539040c
 
 - **Menus now say "Calibre-Web" instead of "CWA."** *Sync library with
