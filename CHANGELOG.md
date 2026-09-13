@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-14 — build fc9464a
+
+- **Fixed: the "mark as Read" prompt never showed up.** It was keyed on
+  KOReader's own "Book status: Finished" flag, which turns out not to get
+  set just by reading to the end and closing a book -- confirmed live on two
+  books that both reached 100% and were pushed the ordinary way instead.
+  Reaching the end of a book now triggers it too.
+
 ## 2026-09-14 — build 5cd4767
 
 - **Marking a book Finished in KOReader can now mark it Read on Hardcover
