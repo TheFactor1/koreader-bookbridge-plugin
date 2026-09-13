@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build d6aa67b
+
+- **Ratings and reviews now come straight from KOReader's own Book Status
+  screen, instead of a dialog Bookbridge showed itself.** Set a star rating
+  or write a review there (the same screen used to mark a book Finished)
+  and it syncs to Hardcover along with the Read status -- no separate popup.
+  This removes the risk that came with building that popup from scratch,
+  but it also means nothing prompts for a rating anymore: skip Book Status
+  and Hardcover just gets the Read status with no rating, same as any book
+  synced without one.
+
 ## 2026-09-14 — build a308ef6
 
 - **The finish-a-book prompt is now one compact dialog instead of two.**
