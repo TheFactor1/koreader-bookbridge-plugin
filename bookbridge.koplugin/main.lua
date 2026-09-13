@@ -30,15 +30,11 @@ would have been found by guessing.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
-local Button = require("ui/widget/button")
 local DataStorage = require("datastorage")
 local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
-local HorizontalGroup = require("ui/widget/horizontalgroup")
-local HorizontalSpan = require("ui/widget/horizontalspan")
 local InfoMessage = require("ui/widget/infomessage")
-local InputText = require("ui/widget/inputtext")
 local JSON = require("json")
 local bit = require("bit")
 local LuaSettings = require("luasettings")
@@ -9546,6 +9542,15 @@ function Bookbridge:captureReadingProgress()
         finished = finished_by_status or finished_by_percent,
         finished_date = summary.modified,
         koreader_rating = summary.rating,
+        -- KOReader's OWN "Book status" screen already has a free-text
+        -- review field (summary.note, written via its own openReviewDialog)
+        -- right next to the star rating -- confirmed by reading
+        -- bookstatuswidget.lua directly, not assumed. Reusing it instead of
+        -- Bookbridge showing its own separate prompt for the same two
+        -- pieces of information: no new UI to learn, no new dialog to get
+        -- wrong, and it works whether or not this device has network at
+        -- the moment the book is actually marked finished.
+        koreader_review = (type(summary.note) == "string" and summary.note ~= "") and summary.note or nil,
     }
     saveHardcoverPending(pending)
     debugLog(string.format("[hc] captured %d%% for %s%s", math.floor((percent or 0) * 100 + 0.5), tostring(props.title),
@@ -9558,152 +9563,32 @@ function Bookbridge:clearHardcoverPending(md5)
 end
 
 -- Finds ONE pending book KOReader has marked Finished that this hasn't told
--- Hardcover about yet, and prompts for a rating before marking it Read.
+-- Hardcover about yet, and syncs it as Read using whatever rating/review
+-- KOReader's own Book Status screen already holds. No separate prompt: Matt
+-- asked to reuse KOReader's native rating (summary.rating, the star row on
+-- Book Status) and review (summary.note, via "Add review") instead of a
+-- custom dialog built for this plugin -- both are already captured onto
+-- rec.koreader_rating/rec.koreader_review in captureReadingProgress. If he
+-- never sets either, Hardcover just gets the Read status with no rating,
+-- same as any other book synced with none entered.
+--
 -- entry.finished_synced + entry.finished_synced_date together decide
--- "already handled": no flag at all means never synced (prompt); the flag
--- set but the date different from rec.finished_date means status flipped
+-- "already handled": no flag at all means never synced; the flag set but
+-- the date different from rec.finished_date means status flipped
 -- reading -> complete AGAIN with a newer summary.modified -- a genuine
 -- re-read, which Hardcover models as its own user_book_read row (see
--- doHardcoverMarkFinished) -- so this prompts again; the flag set with a
+-- doHardcoverMarkFinished) -- so this syncs again; the flag set with a
 -- missing rec.finished_date (summary.modified absent, unlikely but not
--- guaranteed) falls back to trusting the flag alone rather than re-prompting
+-- guaranteed) falls back to trusting the flag alone rather than re-syncing
 -- forever over a date it can never match.
---
--- Deliberately at most one per call: several finished books queued at once
--- (offline for a while, say) would otherwise stack dialogs. Whatever's left
--- is picked up the next time this runs, same as the unmatched-book confirm
--- below.
---
--- Shows the dialog directly (synchronous, returns immediately -- no
--- coroutine conflict with the Trapper:wrap this whole function already runs
--- inside) and only opens ITS OWN fresh Trapper:wrap from inside the button
--- callback, which fires later from the main loop once the original call has
--- long since returned -- the same shape confirmAndLogBookOnHardcover already
--- uses for exactly this reason.
--- A row of 5 tappable stars, matching the icon names KOReader's own
--- bookstatuswidget.lua uses (star.full/star.empty) so this looks like the
--- native rating UI rather than a different visual language. Each tap is
--- terminal -- it picks that rating and closes immediately -- rather than a
--- live fill-up-to-N preview (which is what the native widget does): that
--- would mean rebuilding and redrawing the row in place on every tap, which
--- needs testing this session has no way to do. A plain tap-to-commit needs
--- no redraw logic at all, at the cost of no live preview before committing.
--- All five icons show filled from the start for the same reason -- an
--- empty/full split implies a live current value there isn't one yet.
--- One compact dialog: tappable stars that update in place (tap changes
--- which show filled, dialog stays open) plus a review field below, one
--- Save/Skip pair at the bottom. Replaces two separate dialogs shown one
--- after the other -- confirmed almost certainly the cause of the review
--- step never appearing at all: two KOReader modals opening and closing in
--- the same tick, one closing exactly as the next opens, with no yield to
--- the event loop in between. It was also slower for the same reason: two
--- full show/close/repaint cycles (each with its own keyboard toggle) where
--- one now does.
---
--- Redrawing the star row in place needed checking, not assuming: KOReader's
--- own VerticalGroup/HorizontalGroup cache their measured size and child
--- offsets (_size/_offsets) and only recompute them via resetLayout() --
--- read directly from KOReader's source rather than guessed, after the
--- SpinWidget field-naming miss earlier this session. Swapping a child
--- reference without that call would silently keep painting the OLD cached
--- geometry. Every icon is the same size (only which icon -- star.full vs
--- star.empty -- changes), so the cached size was never actually wrong here,
--- but resetLayout() is called anyway rather than relying on that happening
--- to be harmless.
-local function showHardcoverFinishDialog(title, on_submit)
-    local CenterContainer = require("ui/widget/container/centercontainer")
-    local MovableContainer = require("ui/widget/container/movablecontainer")
-    local VerticalGroup = require("ui/widget/verticalgroup")
-    local VerticalSpan = require("ui/widget/verticalspan")
-    local Device = require("device")
-    local Screen = Device.screen
 
-    local popup, frame, body, star_row, input_widget
-    local rating = 0
-
-    local function buildStarRow()
-        local row = HorizontalGroup:new{ align = "center" }
-        for i = 1, 5 do
-            table.insert(row, Button:new{
-                icon = (i <= rating) and "star.full" or "star.empty",
-                icon_width = Screen:scaleBySize(24),
-                icon_height = Screen:scaleBySize(24),
-                bordersize = 0,
-                padding = Size.padding.small,
-                callback = function()
-                    rating = i
-                    star_row = buildStarRow()
-                    body[2] = star_row
-                    body:resetLayout()
-                    UIManager:setDirty(popup, "ui")
-                end,
-            })
-        end
-        return row
-    end
-    star_row = buildStarRow()
-
-    -- parent CANNOT be set here to the popup local: popup is still nil at
-    -- this point (it's assigned below, after the container it belongs to is
-    -- built, and this table constructor captures whatever popup's value IS
-    -- right now, not a live reference to it later) -- caught before it
-    -- shipped, not after. Set once popup actually exists, below.
-    input_widget = InputText:new{
-        hint = _("Write a review (optional)..."),
-        width = Screen:scaleBySize(280),
-        height = Screen:scaleBySize(90),
-    }
-
-    local function finish(chosen_rating, review)
-        UIManager:close(popup)
-        on_submit(chosen_rating, review)
-    end
-    local function submit()
-        local review = input_widget:getText()
-        review = review and review:gsub("^%s+", ""):gsub("%s+$", "") or ""
-        finish(rating > 0 and rating or nil, review ~= "" and review or nil)
-    end
-
-    body = VerticalGroup:new{
-        align = "center",
-        TextBoxWidget:new{
-            text = title, face = Font:getFace("x_smallinfofont"),
-            width = Screen:scaleBySize(280), alignment = "center",
-        },
-        star_row,
-        VerticalSpan:new{ width = Size.padding.default },
-        input_widget,
-        VerticalSpan:new{ width = Size.padding.default },
-        HorizontalGroup:new{
-            align = "center",
-            Button:new{ text = _("Skip"), callback = function() finish(nil, nil) end },
-            HorizontalSpan:new{ width = Size.padding.default },
-            Button:new{ text = _("Save"), callback = submit },
-        },
-    }
-    frame = FrameContainer:new{
-        background = Blitbuffer.COLOR_WHITE,
-        bordersize = Size.border.window,
-        radius = 0,
-        padding = Size.padding.large,
-        body,
-    }
-    popup = CenterContainer:new{
-        dimen = Screen:getSize(),
-        MovableContainer:new{ frame },
-    }
-    input_widget.parent = popup
-    UIManager:show(popup)
-    input_widget:onShowKeyboard()
-end
-
--- The actual Hardcover write, given an answer the user has ALREADY
--- provided (entry.finish_answer). Shared by the moment right after they
--- answer the prompt and by a later silent retry -- confirmed live this
+-- The actual Hardcover write, given an answer already recorded in
+-- entry.finish_answer. Shared by the moment right after syncHardcoverFinish
+-- records that answer and by a later silent retry -- confirmed live this
 -- split was missing entirely: a transient failure (an SSL "wantread" --
 -- a mid-handshake network blip, not anything Hardcover said) left NOTHING
--- recorded, so the book stayed permanently eligible and the full star ->
--- review prompt fired again on every single subsequent close, for
+-- recorded, so the book stayed permanently eligible and the whole write
+-- was reattempted from scratch on every single subsequent close, for
 -- whatever book happened to be closed next -- not just the finished one.
 --
 -- Only notifies for a NON-transient error (hardcoverErrorIsTransient),
@@ -9756,31 +9641,11 @@ end
 --
 -- Requires md5/rec/entry/map already resolved -- entry.book_id in
 -- particular MUST be set already; neither caller may call this before it is.
-function Bookbridge:promptHardcoverFinish(md5, rec, entry, map)
-    -- Three entry points can now reach this (an already-mapped book, and
-    -- two different first-time-match paths), and none of them clear the
-    -- pending record until the prompt is actually answered -- so a retry
-    -- timer or a network-back event firing while this book's star picker
-    -- is still open and unanswered would otherwise find the same candidate
-    -- again and stack a second one on top. One flag, checked at every entry
-    -- point, is simpler than trying to make three call sites agree on
-    -- locking a single md5.
-    if self._hc_finish_prompt_open then
-        debugLog("[hc] finish-check: prompt already open, not stacking another for " .. tostring(rec.title or entry.title))
-        return
-    end
-    self._hc_finish_prompt_open = true
-    local title = entry.title or rec.title or _("this book")
-    showHardcoverFinishDialog(title, function(rating, review)
-        self._hc_finish_prompt_open = nil
-        -- Recorded BEFORE the write is attempted, not after it succeeds:
-        -- the whole point is that the user's answer survives a failed
-        -- write and is never asked for again.
-        entry.finish_answer = { rating = rating, review = review }
-        entry.finish_answer_date = rec.finished_date
-        map[md5] = entry; saveHardcoverMap(map)
-        self:writeHardcoverFinish(md5, rec, entry, map)
-    end)
+function Bookbridge:syncHardcoverFinish(md5, rec, entry, map)
+    entry.finish_answer = { rating = rec.koreader_rating, review = rec.koreader_review }
+    entry.finish_answer_date = rec.finished_date
+    map[md5] = entry; saveHardcoverMap(map)
+    self:writeHardcoverFinish(md5, rec, entry, map)
 end
 
 function Bookbridge:checkHardcoverFinishedBook(pending, map)
@@ -9788,25 +9653,16 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
         local entry = map[md5]
         local already_synced = entry and entry.finished_synced
             and (entry.finished_synced_date == rec.finished_date or not rec.finished_date)
-        local already_answered = entry and entry.finish_answer
-            and (entry.finish_answer_date == rec.finished_date or not rec.finished_date)
         -- One line per candidate, always -- silence here is exactly what
         -- made the first miss (percent-only completions never setting
         -- summary.status) unreadable from the debug log alone.
         if rec.finished then
-            debugLog(string.format("[hc] finish-check: %s finished=true already_synced=%s already_answered=%s decision=%s has_book_id=%s",
+            debugLog(string.format("[hc] finish-check: %s finished=true already_synced=%s decision=%s has_book_id=%s",
                 tostring(entry and (entry.title or rec.title) or rec.title),
-                tostring(already_synced), tostring(already_answered), tostring(entry and entry.decision), tostring(entry and entry.book_id ~= nil)))
+                tostring(already_synced), tostring(entry and entry.decision), tostring(entry and entry.book_id ~= nil)))
         end
         if entry and entry.decision == "sync" and entry.book_id and rec.finished and not already_synced then
-            if already_answered then
-                -- The user has already picked a rating/review for this
-                -- exact completion; a prior write attempt just hasn't
-                -- landed yet. Retry the write only -- no UI at all.
-                self:writeHardcoverFinish(md5, rec, entry, map)
-            else
-                self:promptHardcoverFinish(md5, rec, entry, map)
-            end
+            self:syncHardcoverFinish(md5, rec, entry, map)
             return true
         end
     end
@@ -10125,7 +9981,7 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
         debugLog(string.format("[hc] auto-matched %s -> %s by %s", tostring(rec.title), tostring(ft), tostring(fa)))
         -- A book matched for the first time on the SAME sync that finished
         -- it (a short book read start to finish, say) must go through the
-        -- same mark-Read prompt as any other finished book -- confirmed
+        -- same mark-Read sync as any other finished book -- confirmed
         -- live this was missing entirely: this used to fall straight
         -- through to the ordinary progress push below every time, because
         -- the finish-check that runs elsewhere only ever sees books that
@@ -10133,7 +9989,7 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
         -- created right above, this call, too late for that check to have
         -- found it.
         if rec.finished then
-            self:promptHardcoverFinish(md5, rec, map[md5], map)
+            self:syncHardcoverFinish(md5, rec, map[md5], map)
             return
         end
         local edition_id = edition and edition.id
@@ -10240,9 +10096,9 @@ function Bookbridge:pickHardcoverCandidate(md5, rec, candidates, token)
                 -- Same gap as resolveHardcoverMatch and for the same reason:
                 -- this is the first time map[md5] exists, so a book that was
                 -- ALSO already finished when it landed in Review matches
-                -- needs the same mark-Read prompt, not the ordinary push.
+                -- needs the same mark-Read sync, not the ordinary push.
                 if rec.finished then
-                    self:promptHardcoverFinish(md5, rec, map[md5], map)
+                    self:syncHardcoverFinish(md5, rec, map[md5], map)
                 elseif rec.percent then
                     local Trapper = require("ui/trapper")
                     Trapper:wrap(function()
