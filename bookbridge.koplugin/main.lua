@@ -40,6 +40,7 @@ local bit = require("bit")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
+local QRMessage = require("ui/widget/qrmessage")
 local Size = require("ui/size")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local UIManager = require("ui/uimanager")
@@ -2552,6 +2553,22 @@ local function doHardcoverMarkFinished(token, book_id, edition_id, finished_date
     end
     if soft_err then return true, T(_("Marked Read, but %1."), soft_err) end
     return true
+end
+
+-- One-field lookup for the public book page's URL, used only to build the
+-- "scan to review" QR code shown after a book is marked Read. Kept separate
+-- from doHardcoverFindBook: the search index results it scores candidates
+-- from carry no slug at all, and no other caller of book_id has ever needed
+-- one before this.
+local function doHardcoverGetBookSlug(token, book_id)
+    local data, err = doHardcoverGraphQL(token, [[
+        query BookSlug($id: Int!) {
+            books(where: { id: { _eq: $id } }, limit: 1) { slug }
+        }
+    ]], { id = book_id })
+    if not data then return nil, err end
+    local b = data.books and data.books[1]
+    return b and b.slug, nil
 end
 
 local function doHardcoverFollowAuthor(token, author_id)
@@ -7033,7 +7050,6 @@ function Bookbridge:generateAndShowPairingQr()
     -- one-time pad rather than security theater.
     local pairing_text = "shelfmark-pair:" .. pair_code .. ":" .. key_b64
 
-    local QRMessage = require("ui/widget/qrmessage")
     local Screen = require("device").screen
     UIManager:show(QRMessage:new{
         text = pairing_text,
@@ -9616,6 +9632,7 @@ function Bookbridge:writeHardcoverFinish(md5, rec, entry, map)
             self:showAfterCloseNotice(answer.rating
                 and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(answer.rating))
                 or T(_("Hardcover: \"%1\" marked Read."), title))
+            self:showHardcoverReviewQR(entry.book_id, title)
         else
             debugLog("[hc] mark-finished failed for " .. tostring(title) .. ": " .. tostring(err) ..
                 " (transient=" .. tostring(hardcoverErrorIsTransient(err)) .. ")")
@@ -9626,6 +9643,44 @@ function Bookbridge:writeHardcoverFinish(md5, rec, entry, map)
             end
         end
     end)
+end
+
+-- A one-tap-to-dismiss QR code straight to the book's own Hardcover page,
+-- shown right after a book is confirmed marked Read -- Matt's idea, so a
+-- fuller review (written on Hardcover's own page, not KOReader's Book
+-- Status field) is one phone-camera scan away instead of typing the title
+-- into the Hardcover app by hand. Fired exactly once per genuine finish:
+-- writeHardcoverFinish only reaches its "ok" branch (where this is called
+-- from) the first time a given rec.finished_date syncs, never on a retry
+-- of one already marked finished_synced.
+--
+-- Silent on any failure to find a slug (offline by the time this second
+-- request goes out, a Hardcover hiccup, whatever): the Read status and any
+-- rating/review already landed by this point regardless, so a missing QR
+-- is a bonus not delivered, never worth an error notice of its own.
+--
+-- 15s timeout rather than none: this is a modal (tap or any key dismisses
+-- it) fired asynchronously after the book was already closed, so with no
+-- timeout at all it would sit blocking whatever Matt does next -- opening
+-- another book, say -- for as long as he doesn't happen to notice it.
+function Bookbridge:showHardcoverReviewQR(book_id, title)
+    if not book_id then return end
+    local token = self.hardcover_token
+    local slug, err = doHardcoverGetBookSlug(token, book_id)
+    if not slug then
+        debugLog("[hc] review-QR: no slug for book_id " .. tostring(book_id) .. " (" .. tostring(err) .. ")")
+        return
+    end
+    local url = "https://hardcover.app/books/" .. slug
+    debugLog("[hc] review-QR: " .. url .. " for " .. tostring(title))
+    local Screen = require("device").screen
+    local side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.7)
+    UIManager:show(QRMessage:new{
+        text = url,
+        width = side,
+        height = side,
+        timeout = 15,
+    })
 end
 
 -- Shared by checkHardcoverFinishedBook (an ALREADY-mapped book reaching
