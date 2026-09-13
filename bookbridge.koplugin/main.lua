@@ -9670,6 +9670,52 @@ local function showHardcoverReviewPrompt(title, on_submit)
     dialog:onShowKeyboard()
 end
 
+-- The actual Hardcover write, given an answer the user has ALREADY
+-- provided (entry.finish_answer). Shared by the moment right after they
+-- answer the prompt and by a later silent retry -- confirmed live this
+-- split was missing entirely: a transient failure (an SSL "wantread" --
+-- a mid-handshake network blip, not anything Hardcover said) left NOTHING
+-- recorded, so the book stayed permanently eligible and the full star ->
+-- review prompt fired again on every single subsequent close, for
+-- whatever book happened to be closed next -- not just the finished one.
+--
+-- Only notifies for a NON-transient error (hardcoverErrorIsTransient),
+-- matching the exact rule the ordinary progress-push path already uses,
+-- and only once per distinct error message (finish_notified_error) -- a
+-- retry that keeps failing the same way stays silent after the first
+-- notice; a DIFFERENT error is still worth surfacing. Never gives up
+-- retrying, transient or not -- same philosophy as every other sync retry
+-- in this file; it just stops repeating itself about it.
+function Bookbridge:writeHardcoverFinish(md5, rec, entry, map)
+    local token = self.hardcover_token
+    local title = entry.title or rec.title or _("this book")
+    local answer = entry.finish_answer or {}
+    local Trapper = require("ui/trapper")
+    Trapper:wrap(function()
+        local ok, err = doHardcoverMarkFinished(token, entry.book_id, entry.edition_id, rec.finished_date, answer.rating, answer.review)
+        if ok then
+            entry.finished_synced = true
+            entry.finished_synced_date = rec.finished_date
+            entry.finish_notified_error = nil
+            map[md5] = entry; saveHardcoverMap(map)
+            self:clearHardcoverPending(md5)
+            debugLog(string.format("[hc] marked finished: %s (rating=%s, review=%s)",
+                tostring(title), tostring(answer.rating), answer.review and "yes" or "no"))
+            self:showAfterCloseNotice(answer.rating
+                and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(answer.rating))
+                or T(_("Hardcover: \"%1\" marked Read."), title))
+        else
+            debugLog("[hc] mark-finished failed for " .. tostring(title) .. ": " .. tostring(err) ..
+                " (transient=" .. tostring(hardcoverErrorIsTransient(err)) .. ")")
+            if not hardcoverErrorIsTransient(err) and entry.finish_notified_error ~= err then
+                entry.finish_notified_error = err
+                map[md5] = entry; saveHardcoverMap(map)
+                self:showAfterCloseNotice(T(_("Hardcover: couldn't mark \"%1\" Read -- %2"), title, tostring(err)))
+            end
+        end
+    end)
+end
+
 -- Shared by checkHardcoverFinishedBook (an ALREADY-mapped book reaching
 -- Finished on some later sync) and resolveHardcoverMatch (a book that gets
 -- auto-matched to Hardcover for the first time on the SAME sync that also
@@ -9697,29 +9743,7 @@ function Bookbridge:promptHardcoverFinish(md5, rec, entry, map)
         return
     end
     self._hc_finish_prompt_open = true
-    local token = self.hardcover_token
     local title = entry.title or rec.title or _("this book")
-    local function finish(rating, review)
-        self._hc_finish_prompt_open = nil
-        local Trapper = require("ui/trapper")
-        Trapper:wrap(function()
-            local ok, err = doHardcoverMarkFinished(token, entry.book_id, entry.edition_id, rec.finished_date, rating, review)
-            if ok then
-                entry.finished_synced = true
-                entry.finished_synced_date = rec.finished_date
-                map[md5] = entry; saveHardcoverMap(map)
-                self:clearHardcoverPending(md5)
-                debugLog(string.format("[hc] marked finished: %s (rating=%s, review=%s)",
-                    tostring(title), tostring(rating), review and "yes" or "no"))
-                self:showAfterCloseNotice(rating
-                    and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(rating))
-                    or T(_("Hardcover: \"%1\" marked Read."), title))
-            else
-                debugLog("[hc] mark-finished failed for " .. tostring(title) .. ": " .. tostring(err))
-                if err then self:showAfterCloseNotice(T(_("Hardcover: couldn't mark \"%1\" Read -- %2"), title, tostring(err))) end
-            end
-        end)
-    end
     -- Star picker first, then the review prompt, then the actual write --
     -- two short taps in sequence rather than one crowded screen, and each
     -- step reuses a widget already proven elsewhere (the star row's own
@@ -9728,7 +9752,14 @@ function Bookbridge:promptHardcoverFinish(md5, rec, entry, map)
     -- plugin's own settings dialogs already use).
     showHardcoverStarPicker(title, function(rating)
         showHardcoverReviewPrompt(title, function(review)
-            finish(rating, review)
+            self._hc_finish_prompt_open = nil
+            -- Recorded BEFORE the write is attempted, not after it
+            -- succeeds: the whole point is that the user's answer survives
+            -- a failed write and is never asked for again.
+            entry.finish_answer = { rating = rating, review = review }
+            entry.finish_answer_date = rec.finished_date
+            map[md5] = entry; saveHardcoverMap(map)
+            self:writeHardcoverFinish(md5, rec, entry, map)
         end)
     end)
 end
@@ -9738,16 +9769,25 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
         local entry = map[md5]
         local already_synced = entry and entry.finished_synced
             and (entry.finished_synced_date == rec.finished_date or not rec.finished_date)
+        local already_answered = entry and entry.finish_answer
+            and (entry.finish_answer_date == rec.finished_date or not rec.finished_date)
         -- One line per candidate, always -- silence here is exactly what
         -- made the first miss (percent-only completions never setting
         -- summary.status) unreadable from the debug log alone.
         if rec.finished then
-            debugLog(string.format("[hc] finish-check: %s finished=true already_synced=%s decision=%s has_book_id=%s",
+            debugLog(string.format("[hc] finish-check: %s finished=true already_synced=%s already_answered=%s decision=%s has_book_id=%s",
                 tostring(entry and (entry.title or rec.title) or rec.title),
-                tostring(already_synced), tostring(entry and entry.decision), tostring(entry and entry.book_id ~= nil)))
+                tostring(already_synced), tostring(already_answered), tostring(entry and entry.decision), tostring(entry and entry.book_id ~= nil)))
         end
         if entry and entry.decision == "sync" and entry.book_id and rec.finished and not already_synced then
-            self:promptHardcoverFinish(md5, rec, entry, map)
+            if already_answered then
+                -- The user has already picked a rating/review for this
+                -- exact completion; a prior write attempt just hasn't
+                -- landed yet. Retry the write only -- no UI at all.
+                self:writeHardcoverFinish(md5, rec, entry, map)
+            else
+                self:promptHardcoverFinish(md5, rec, entry, map)
+            end
             return true
         end
     end
