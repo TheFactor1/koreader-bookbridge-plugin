@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build a9ad4d4
+
+- **Hardcover corner notices now wrap and stay out of your way while
+  reading.** Longer messages no longer get cut off mid-sentence, and a tap
+  anywhere on the screen dismisses the notice while still doing whatever
+  that tap was already going to do (turn the page, and so on).
+
 ## 2026-09-13 — build 21eacec
 
 - **Hardcover notices in the bottom-left corner now stack instead of
