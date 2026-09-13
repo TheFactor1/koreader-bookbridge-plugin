@@ -9473,11 +9473,15 @@ function Bookbridge:processHardcoverPending()
             if completed and ok then
                 pending[md5] = nil
                 entry.last_percent = rec.percent; map[md5] = entry; saveHardcoverMap(map)
+                -- Silent on success: this fires on every book close, and the
+                -- page number is already visible on Hardcover itself.
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
-                self:showAfterCloseNotice(T(_("Hardcover: \"%1\" -- page %2 of %3 (%4%)."),
-                    tostring(entry.title), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
             else
                 debugLog("[hc] push failed for " .. tostring(entry.title) .. ": " .. tostring(a))
+                if completed and not hardcoverErrorIsTransient(a) then
+                    self:showAfterCloseNotice(T(_("Hardcover couldn't record \"%1\": %2"),
+                        tostring(entry.title), tostring(a)))
+                end
             end
         elseif not unmapped then
             unmapped = { md5 = md5, rec = rec }
@@ -9515,6 +9519,23 @@ end
 -- and +3 s after waiting for the panel's own refresh to finish: a widget
 -- painted on top and refreshed alone did not reach either device's panel,
 -- while a repaint from the home screen up always did.
+-- A push that failed because the device simply had no network is not worth a
+-- dialog: the record stays pending and the next close/resume retries it. Only
+-- an error Hardcover itself reported (a missing edition page count, a rejected
+-- token) means something a person has to act on. Without this split, the
+-- "tell me when it can't sync" behaviour turns into one popup per book every
+-- time Wi-Fi is asleep -- which is most of the time on this device.
+local function hardcoverErrorIsTransient(err)
+    if type(err) ~= "string" then return true end
+    local e = err:lower()
+    return e:find("request failed", 1, true) ~= nil
+        or e:find("unreachable", 1, true) ~= nil
+        or e:find("resolution", 1, true) ~= nil
+        or e:find("timed out", 1, true) ~= nil
+        or e:find("timeout", 1, true) ~= nil
+        or e:find("connection", 1, true) ~= nil
+end
+
 function Bookbridge:showAfterCloseNotice(text)
     local ok_dev, Device = pcall(require, "device")
     -- Android: the OS's own toast. It is drawn by Android's window manager on
@@ -9616,12 +9637,14 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
         if completed and ok then
             self:clearHardcoverPending(md5)
             map[md5].last_percent = rec.percent; saveHardcoverMap(map)
+            -- Silent: the book linked itself and synced, which is the expected
+            -- outcome, not news.
             debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(ft), tostring(a), tostring(b)))
-            self:showAfterCloseNotice(T(_("Hardcover: synced as \"%1\" by %2 -- page %3 of %4 (%5%)."),
-                ft, tostring(fa), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
         else
             debugLog("[hc] push failed for " .. tostring(ft) .. ": " .. tostring(a))   -- stays pending; retried later
-            self:showAfterCloseNotice(T(_("Hardcover: matched \"%1\"; progress will sync when Hardcover answers."), ft))
+            if completed and not hardcoverErrorIsTransient(a) then
+                self:showAfterCloseNotice(T(_("Hardcover couldn't record \"%1\": %2"), ft, tostring(a)))
+            end
         end
         return
     end
