@@ -41,7 +41,7 @@ local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local Size = require("ui/size")
-local TextWidget = require("ui/widget/textwidget")
+local TextBoxWidget = require("ui/widget/textboxwidget")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
@@ -9586,16 +9586,23 @@ function Bookbridge:showAfterCloseNotice(text)
         UIManager:show(msg, "ui")
         return
     end
+    -- TextBoxWidget, not TextWidget: TextWidget is single-line and TRUNCATES
+    -- anything past max_width, which is exactly why longer messages ("synced
+    -- as ... by ... -- page N of M (P%).") were losing their tail end.
+    -- TextBoxWidget wraps instead, and with no explicit height it grows to
+    -- fit however many lines that takes rather than scrolling or cutting off
+    -- -- the whole point is that all the info is visible, not that the box
+    -- stays a fixed size.
     local frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = Size.border.default,
         radius = 0,
         margin = 0,
         padding = Size.padding.small,
-        TextWidget:new{
+        TextBoxWidget:new{
             text = text,
             face = Font:getFace("x_smallinfofont"),
-            max_width = math.floor(Screen:getWidth() * 0.55),
+            width = math.floor(Screen:getWidth() * 0.55),
         },
     }
     local fsize = frame:getSize()
@@ -9616,15 +9623,42 @@ function Bookbridge:showAfterCloseNotice(text)
     local x = Size.margin.default
     local y = Screen:getHeight() - Size.margin.default - fsize.h - stacked_below
     local region = Geom:new{ x = x, y = y, w = fsize.w, h = fsize.h }
-    -- The authoritative close signal, regardless of what triggers it (the
-    -- scheduled timeout below is the only path today, but this is where any
-    -- future one would land too) -- so the stack can never get stuck
-    -- thinking a widget is still up after it's gone.
+    -- toast = true is KOReader's own mechanism for exactly what was asked:
+    -- click-through (a tap still reaches the page/reader underneath -- see
+    -- UIManager:sendEvent, which dispatches every event to every toast
+    -- widget on its way down the stack but never lets one stop the event
+    -- there) plus dismiss-on-any-input (any gesture or key closes it). This
+    -- is copied from how KOReader's own Notification widget implements its
+    -- toast mode, not reinvented -- onIgnoreTouchInput in particular exists
+    -- because leaving it to InputContainer's default caused real problems
+    -- for a widget that must never claim the input focus a normal (modal)
+    -- dialog would.
+    frame.toast = true
+    frame.onIgnoreTouchInput = function() return true end
+    -- Both a dismissing tap and the scheduled timeout below can reach this,
+    -- and it must only ever actually close the frame once: closing calls
+    -- CloseWidget down through the frame's children, and the TextBoxWidget
+    -- inside frees its render buffer on that (confirmed live elsewhere in
+    -- this file, in showResilientConfirmBox -- re-showing or re-closing an
+    -- already-freed TextBoxWidget is what crashed the whole app there,
+    -- "attempt to index field '_bb' (a nil value)", uncatchable by any
+    -- pcall in this file since it escapes from inside UIManager's own
+    -- repaint loop). slot.open is already the correct single source of
+    -- truth for "has this actually been closed", so gate on it here too.
+    local function dismissNotice()
+        if not slot.open then return false end
+        UIManager:close(frame, "ui", region)
+        return false
+    end
+    frame.onGesture = dismissNotice
+    frame.onKeyPress = dismissNotice
+    frame.onKeyRepeat = dismissNotice
+    -- The authoritative close signal, regardless of what triggers it -- so
+    -- the stack can never get stuck thinking a widget is still up after
+    -- it's gone.
     frame.onCloseWidget = function() slot.open = false end
     UIManager:show(frame, "ui", region, x, y)
-    UIManager:scheduleIn(6, function()
-        UIManager:close(frame, "ui", region)
-    end)
+    UIManager:scheduleIn(6, dismissNotice)
     local msg = frame
     if not ok_dev or not Device or (Device.isDesktop and Device:isDesktop()) then return end
     local function still_up()
