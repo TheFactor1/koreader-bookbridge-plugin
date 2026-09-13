@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 9838843
+
+- **Fixed: the rating prompt still didn't show up for some finished books.**
+  It only worked for a book Bookbridge had already synced with Hardcover
+  before. A book reaching Hardcover for the very first time already
+  finished -- a short book, or one read start to finish in one sitting --
+  fell through to the ordinary sync instead. Confirmed live: two of the
+  first three books tested hit exactly this.
+
 ## 2026-09-14 — build a6ae41b
 
 - **The Read-marking prompt is now a row of tappable stars, plus an
