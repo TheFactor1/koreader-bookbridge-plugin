@@ -9496,26 +9496,36 @@ function Bookbridge:captureReadingProgress()
     local props = (ui.document.getProps and ui.document:getProps()) or {}
     -- KOReader's own "Book status" (long-press a book -> Book status, or the
     -- end-of-document prompt) is a real, deliberate statement that this book
-    -- is finished -- a far better signal than inferring it from percent, and
-    -- it is the same action that lets a re-read be told apart from a normal
-    -- resync (status flips back to "reading" and later "complete" again,
-    -- with a newer summary.modified each time). No event fires when these
-    -- change (checked against KOReader's own source), so this reads the
-    -- current value at the same point position is already captured, rather
-    -- than trying to hook one. Field names match
-    -- frontend/ui/widget/bookstatuswidget.lua exactly: status/rating/modified
-    -- under the doc_settings "summary" key.
+    -- is finished, and the strong signal when it's there: it is what lets a
+    -- re-read be told apart from a normal resync (status flips back to
+    -- "reading" and later "complete" again, with a newer summary.modified
+    -- each time). But it is NOT set just by reading to the end and closing
+    -- -- confirmed live, the hard way: two books reached 100% and pushed
+    -- through the ordinary silent path, summary.status stayed "reading" both
+    -- times, and the rating prompt never fired. Setting it needs either the
+    -- end-of-document dialog answered a specific way or a KOReader setting
+    -- (end_document_auto_mark) most people don't have on -- reaching the end
+    -- of a book is not that. So percent >= 99% is ALSO treated as finished,
+    -- with the flag as the strong signal when present, the percent as the
+    -- fallback: this is the actually-common case; the flag stays worth
+    -- checking first because it is the only one of the two that identifies a
+    -- re-read (see checkHardcoverFinishedBook -- without it, a re-read of an
+    -- already-marked-finished book will not automatically re-prompt; rate it
+    -- again via Hardcover > Log a book if that ever comes up).
     local summary = ui.doc_settings:readSetting("summary") or {}
+    local finished_by_status = (summary.status == "complete")
+    local finished_by_percent = (type(percent) == "number" and percent >= 0.99)
     local pending = loadHardcoverPending()
     pending[md5] = {
         title = props.title, author = props.authors, identifiers = props.identifiers,
         percent = percent, at = os.time(),
-        finished = (summary.status == "complete"),
+        finished = finished_by_status or finished_by_percent,
         finished_date = summary.modified,
         koreader_rating = summary.rating,
     }
     saveHardcoverPending(pending)
-    debugLog(string.format("[hc] captured %d%% for %s", math.floor((percent or 0) * 100 + 0.5), tostring(props.title)))
+    debugLog(string.format("[hc] captured %d%% for %s%s", math.floor((percent or 0) * 100 + 0.5), tostring(props.title),
+        finished_by_status and " (KOReader: finished)" or (finished_by_percent and " (finished: reached 100%)" or "")))
 end
 
 function Bookbridge:clearHardcoverPending(md5)
@@ -9552,6 +9562,14 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
         local entry = map[md5]
         local already_synced = entry and entry.finished_synced
             and (entry.finished_synced_date == rec.finished_date or not rec.finished_date)
+        -- One line per candidate, always -- silence here is exactly what
+        -- made the first miss (percent-only completions never setting
+        -- summary.status) unreadable from the debug log alone.
+        if rec.finished then
+            debugLog(string.format("[hc] finish-check: %s finished=true already_synced=%s decision=%s has_book_id=%s",
+                tostring(entry and (entry.title or rec.title) or rec.title),
+                tostring(already_synced), tostring(entry and entry.decision), tostring(entry and entry.book_id ~= nil)))
+        end
         if entry and entry.decision == "sync" and entry.book_id and rec.finished and not already_synced then
             local SpinWidget = require("ui/widget/spinwidget")
             local title = entry.title or rec.title or _("this book")
