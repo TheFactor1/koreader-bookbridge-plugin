@@ -30,10 +30,12 @@ would have been found by guessing.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
+local Button = require("ui/widget/button")
 local DataStorage = require("datastorage")
 local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
+local HorizontalGroup = require("ui/widget/horizontalgroup")
 local InfoMessage = require("ui/widget/infomessage")
 local JSON = require("json")
 local bit = require("bit")
@@ -2476,13 +2478,19 @@ end
 -- finished_synced_date at the call site).
 --
 -- rating: 1-5 or nil, matching KOReader's own summary.rating scale.
+-- review: a string or nil.
 --
--- NEEDS LIVE VERIFICATION (device was offline this session): the
--- update_user_book/rating mutation below has not been round-tripped against
--- api.hardcover.app. Every other mutation in this file was shaped by live
--- introspection or trial against the real schema first -- this one was not,
--- and should not be trusted until it has been.
-local function doHardcoverMarkFinished(token, book_id, edition_id, finished_date, rating)
+-- NEEDS LIVE VERIFICATION (device was offline this session): neither the
+-- update_user_book/rating mutation nor the review field below has been
+-- round-tripped against api.hardcover.app -- the review field name in
+-- particular is a plain guess, with zero prior schema signal, unlike
+-- rating (at least inferable from the app's own UI). Every other mutation
+-- in this file was shaped by live introspection or trial against the real
+-- schema first; these two were not. Kept as two SEPARATE calls rather than
+-- one combined mutation on purpose: if one field name is wrong, the other
+-- can still succeed and say so independently, which is more useful signal
+-- from a live test than an all-or-nothing failure.
+local function doHardcoverMarkFinished(token, book_id, edition_id, finished_date, rating, review)
     local ub, err = doHardcoverGetUserBook(token, book_id)
     if err then return false, err end
     if not ub or ub.status_id ~= 3 then
@@ -2519,6 +2527,10 @@ local function doHardcoverMarkFinished(token, book_id, edition_id, finished_date
         local r = data and data.insert_user_book_read
         if not r or r.error then return false, (r and r.error) or ierr or _("Hardcover didn't confirm the finish date.") end
     end
+    -- Neither of these undoes the Read status/date above -- that part is
+    -- already confirmed good -- so a failure here is reported back, not
+    -- returned as an overall failure. Both are attempted even if one fails.
+    local soft_err
     if rating then
         local data, rerr = doHardcoverGraphQL(token, [[
             mutation RateBook($id: Int!, $r: numeric!) {
@@ -2526,11 +2538,21 @@ local function doHardcoverMarkFinished(token, book_id, edition_id, finished_date
             }
         ]], { id = ub.id, r = rating })
         local r = data and data.update_user_book
-        -- A rating failure does not undo the Read status/date above -- that
-        -- part is already confirmed good -- so this is reported back, not
-        -- returned as an overall failure.
-        if not r or r.error then return true, (r and r.error) or rerr or _("Marked Read, but the rating didn't save.") end
+        if not r or r.error then soft_err = (r and r.error) or rerr or _("the rating didn't save") end
     end
+    if review then
+        local data, verr = doHardcoverGraphQL(token, [[
+            mutation ReviewBook($id: Int!, $rev: String!) {
+                update_user_book(id: $id, object: { review: $rev }) { id error }
+            }
+        ]], { id = ub.id, rev = review })
+        local r = data and data.update_user_book
+        if not r or r.error then
+            local msg = (r and r.error) or verr or _("the review didn't save")
+            soft_err = soft_err and (soft_err .. "; " .. msg) or msg
+        end
+    end
+    if soft_err then return true, T(_("Marked Read, but %1."), soft_err) end
     return true
 end
 
@@ -9556,6 +9578,98 @@ end
 -- callback, which fires later from the main loop once the original call has
 -- long since returned -- the same shape confirmAndLogBookOnHardcover already
 -- uses for exactly this reason.
+-- A row of 5 tappable stars, matching the icon names KOReader's own
+-- bookstatuswidget.lua uses (star.full/star.empty) so this looks like the
+-- native rating UI rather than a different visual language. Each tap is
+-- terminal -- it picks that rating and closes immediately -- rather than a
+-- live fill-up-to-N preview (which is what the native widget does): that
+-- would mean rebuilding and redrawing the row in place on every tap, which
+-- needs testing this session has no way to do. A plain tap-to-commit needs
+-- no redraw logic at all, at the cost of no live preview before committing.
+-- All five icons show filled from the start for the same reason -- an
+-- empty/full split implies a live current value there isn't one yet.
+local function showHardcoverStarPicker(title, on_choose)
+    local CenterContainer = require("ui/widget/container/centercontainer")
+    local MovableContainer = require("ui/widget/container/movablecontainer")
+    local VerticalGroup = require("ui/widget/verticalgroup")
+    local VerticalSpan = require("ui/widget/verticalspan")
+    local Device = require("device")
+    local Screen = Device.screen
+
+    local popup
+    local function choose(rating)
+        UIManager:close(popup)
+        on_choose(rating)
+    end
+
+    local star_group = HorizontalGroup:new{ align = "center" }
+    for i = 1, 5 do
+        table.insert(star_group, Button:new{
+            icon = "star.full",
+            icon_width = Screen:scaleBySize(28),
+            icon_height = Screen:scaleBySize(28),
+            bordersize = 0,
+            padding = Size.padding.small,
+            callback = function() choose(i) end,
+        })
+    end
+
+    local frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = Size.border.window,
+        radius = 0,
+        padding = Size.padding.large,
+        VerticalGroup:new{
+            align = "center",
+            TextBoxWidget:new{
+                text = title,
+                face = Font:getFace("x_smallinfofont"),
+                width = Screen:scaleBySize(280),
+                alignment = "center",
+            },
+            VerticalSpan:new{ width = Size.padding.large },
+            star_group,
+            VerticalSpan:new{ width = Size.padding.default },
+            Button:new{ text = _("Skip rating"), callback = function() choose(nil) end },
+        },
+    }
+    popup = CenterContainer:new{
+        dimen = Screen:getSize(),
+        MovableContainer:new{ frame },
+    }
+    UIManager:show(popup)
+end
+
+-- MultiInputDialog, matching the exact pattern this plugin already uses for
+-- its own settings dialogs (see editSettings et al.) rather than a
+-- different widget for this one case. allow_newline is what actually makes
+-- this usable for more than one line -- MultiInputDialog's input fields are
+-- single-line otherwise.
+local function showHardcoverReviewPrompt(title, on_submit)
+    local dialog
+    dialog = MultiInputDialog:new{
+        title = _("Write a review? (optional)"),
+        fields = {
+            { hint = T(_("Your thoughts on \"%1\"..."), title), allow_newline = true },
+        },
+        buttons = {
+            {
+                { text = _("Skip review"), id = "close", callback = function()
+                    UIManager:close(dialog); on_submit(nil)
+                end },
+                { text = _("Save"), callback = function()
+                    local fields = dialog:getFields()
+                    local text = fields[1] and fields[1]:gsub("^%s+", ""):gsub("%s+$", "")
+                    UIManager:close(dialog)
+                    on_submit(text ~= "" and text or nil)
+                end },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
 function Bookbridge:checkHardcoverFinishedBook(pending, map)
     local token = self.hardcover_token
     for md5, rec in pairs(pending) do
@@ -9571,19 +9685,18 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
                 tostring(already_synced), tostring(entry and entry.decision), tostring(entry and entry.book_id ~= nil)))
         end
         if entry and entry.decision == "sync" and entry.book_id and rec.finished and not already_synced then
-            local SpinWidget = require("ui/widget/spinwidget")
             local title = entry.title or rec.title or _("this book")
-            local starting = tonumber(rec.koreader_rating) or 3
-            local function finish(rating)
+            local function finish(rating, review)
                 local Trapper = require("ui/trapper")
                 Trapper:wrap(function()
-                    local ok, err = doHardcoverMarkFinished(token, entry.book_id, entry.edition_id, rec.finished_date, rating)
+                    local ok, err = doHardcoverMarkFinished(token, entry.book_id, entry.edition_id, rec.finished_date, rating, review)
                     if ok then
                         entry.finished_synced = true
                         entry.finished_synced_date = rec.finished_date
                         map[md5] = entry; saveHardcoverMap(map)
                         local p = loadHardcoverPending(); p[md5] = nil; saveHardcoverPending(p)
-                        debugLog(string.format("[hc] marked finished: %s (rating=%s)", tostring(title), tostring(rating)))
+                        debugLog(string.format("[hc] marked finished: %s (rating=%s, review=%s)",
+                            tostring(title), tostring(rating), review and "yes" or "no"))
                         self:showAfterCloseNotice(rating
                             and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(rating))
                             or T(_("Hardcover: \"%1\" marked Read."), title))
@@ -9593,16 +9706,18 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
                     end
                 end)
             end
-            UIManager:show(SpinWidget:new{
-                title_text = _("Rate this book?"),
-                info_text = T(_("\"%1\" -- finished, ready to mark Read on Hardcover."), title),
-                value = starting, value_min = 1, value_max = 5, value_step = 1,
-                precision = "%d",
-                ok_text = _("Rate & mark Read"),
-                callback = function(spin) finish(spin.value) end,
-                cancel_text = _("Skip rating"),
-                cancel_callback = function() finish(nil) end,
-            })
+            -- Star picker first, then the review prompt, then the actual
+            -- write -- two short taps in sequence rather than one crowded
+            -- screen, and each step reuses a widget already proven
+            -- elsewhere (the star row's own construction is new, but built
+            -- from Button fields confirmed against KOReader's real source;
+            -- MultiInputDialog is the exact widget this plugin's own
+            -- settings dialogs already use).
+            showHardcoverStarPicker(title, function(rating)
+                showHardcoverReviewPrompt(title, function(review)
+                    finish(rating, review)
+                end)
+            end)
             return true
         end
     end
