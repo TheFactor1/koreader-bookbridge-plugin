@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-14 — build a6ae41b
+
+- **The Read-marking prompt is now a row of tappable stars, plus an
+  optional written review.** Replaces the earlier number picker with real
+  stars matching KOReader's own rating look, and adds a second step to
+  write a few words about the book if you want to.
+- **New, first live verification in progress.** The review field in
+  particular is an educated guess at what Hardcover's API expects -- if it
+  reports "marked Read, but the review didn't save," that's the part
+  needing a follow-up fix, same as the rating mutation from the last build.
+
 ## 2026-09-14 — build fc9464a
 
 - **Fixed: the "mark as Read" prompt never showed up.** It was keyed on
