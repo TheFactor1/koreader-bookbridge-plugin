@@ -4,6 +4,20 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-14 — build 5cd4767
+
+- **Marking a book Finished in KOReader can now mark it Read on Hardcover
+  too.** Finishing a book (the real "Book status: Finished" action, not just
+  reaching 100%) offers to record a star rating and syncs both to Hardcover
+  in one step -- previously nothing ever moved a book off "Currently
+  Reading," so finished books sat there indefinitely. A re-read is told
+  apart from an ordinary resync automatically.
+- **New, first live verification in progress.** The rating half of this
+  reached the real Hardcover API for the first time after this build shipped
+  -- if rating a book reports success but doesn't show up on Hardcover, that
+  half needs a follow-up fix; marking Read (no rating chosen) uses the same
+  calls this plugin has pushed reading progress with all along.
+
 ## 2026-09-13 — build a9ad4d4
 
 - **Hardcover corner notices now wrap and stay out of your way while
