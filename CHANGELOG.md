@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 13af8cb
+
+- **Hardcover sync notices moved to a small box in the bottom-left corner.**
+  Closing a book still tells you the page it recorded, but no longer with a
+  box parked mid-screen for 6 seconds — it's a small, low-key notice tucked
+  out of the way instead.
+
 ## 2026-09-13 — build 1779c14
 
 - **Hardcover now syncs quietly.** Closing a book no longer pops a box
