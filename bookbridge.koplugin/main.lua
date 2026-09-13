@@ -9542,6 +9542,19 @@ local function hardcoverErrorIsTransient(err)
         or e:find("connection", 1, true) ~= nil
 end
 
+-- Shared across every corner notice shown below, so a burst of them (several
+-- pending pushes resolving right after resume, say) stacks upward from the
+-- bottom-left corner instead of each one replacing the last -- otherwise an
+-- earlier book's result was gone before it could be read. Each entry is
+-- {height, gap, open}; a new notice is always appended PAST whatever is
+-- still in the stack, never into a gap left by one that already closed, so
+-- an already-shown widget never has to move once it's on screen. Only the
+-- tail (the most recently added, farthest from the corner) is ever trimmed,
+-- and only once everything in it has closed -- the same rule KOReader's own
+-- Notification widget uses for its own top-of-screen stack, for the same
+-- reason: no reflow of anything already on screen.
+local hc_notice_stack = {}
+
 function Bookbridge:showAfterCloseNotice(text)
     local ok_dev, Device = pcall(require, "device")
     -- Android: the OS's own toast. It is drawn by Android's window manager on
@@ -9573,12 +9586,6 @@ function Bookbridge:showAfterCloseNotice(text)
         UIManager:show(msg, "ui")
         return
     end
-    -- Only one notice on screen at a time: a new one replaces whatever the
-    -- last one left up rather than stacking in the corner.
-    if self._hc_notice_widget then
-        pcall(function() UIManager:close(self._hc_notice_widget) end)
-        self._hc_notice_widget = nil
-    end
     local frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = Size.border.default,
@@ -9592,12 +9599,30 @@ function Bookbridge:showAfterCloseNotice(text)
         },
     }
     local fsize = frame:getSize()
-    local x, y = Size.margin.default, Screen:getHeight() - fsize.h - Size.margin.default
+    local gap = Size.margin.small
+    -- Trim closed entries off the tail only (see the note above the stack
+    -- declaration for why not from the middle), then this notice takes the
+    -- next slot past whatever's left.
+    for i = #hc_notice_stack, 1, -1 do
+        if hc_notice_stack[i].open then break end
+        table.remove(hc_notice_stack, i)
+    end
+    local slot = { height = fsize.h, gap = gap, open = true }
+    table.insert(hc_notice_stack, slot)
+    local stacked_below = 0
+    for i = 1, #hc_notice_stack - 1 do
+        stacked_below = stacked_below + hc_notice_stack[i].height + hc_notice_stack[i].gap
+    end
+    local x = Size.margin.default
+    local y = Screen:getHeight() - Size.margin.default - fsize.h - stacked_below
     local region = Geom:new{ x = x, y = y, w = fsize.w, h = fsize.h }
-    self._hc_notice_widget = frame
+    -- The authoritative close signal, regardless of what triggers it (the
+    -- scheduled timeout below is the only path today, but this is where any
+    -- future one would land too) -- so the stack can never get stuck
+    -- thinking a widget is still up after it's gone.
+    frame.onCloseWidget = function() slot.open = false end
     UIManager:show(frame, "ui", region, x, y)
     UIManager:scheduleIn(6, function()
-        if self._hc_notice_widget == frame then self._hc_notice_widget = nil end
         UIManager:close(frame, "ui", region)
     end)
     local msg = frame
