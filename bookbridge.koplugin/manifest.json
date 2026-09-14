@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "version": "0.3.0",
-  "build": "0e52652",
-  "generated": "2026-09-13T19:58:44-04:00",
+  "build": "dc36b70",
+  "generated": "2026-09-13T20:13:32-04:00",
   "files": {
-    "main.lua": { "sha256": "f7d06e1c28a5a91ead7be1c59d80d5901225bd66cd9b5e92370d0e5999d97cda", "size": 532505 },
+    "main.lua": { "sha256": "d5372d3ab3450e5bf4c768457361dd8fcb51a851a5e2c5791fd6e88072ed3003", "size": 534960 },
     "_meta.lua": { "sha256": "24dc8f860126b2bd5e5ff49d64d5bc80df152dc26eaffa3be167fbd64f68e6e5", "size": 276 }
   }
 }

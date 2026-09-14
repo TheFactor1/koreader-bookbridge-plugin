@@ -4,6 +4,22 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build dc36b70
+
+- **The review QR now shows up even if the Kindle has no internet at
+  all.** It used to wait on the Hardcover write actually going through
+  first, which needs the Kindle's OWN connection -- offline, nothing
+  showed at all. Now it shows immediately: a direct link if this book was
+  already matched to Hardcover before (the usual case), or a Hardcover
+  search link for the title if not -- either way built entirely from what's
+  already on the device, no network needed to show it. The actual Read
+  status and rating/review still sync in the background and retry until
+  they land, same as before.
+- **Fixed a real bug this surfaced:** a genuinely offline Kindle (not just
+  a slow one) could crash the background sync instead of retrying quietly,
+  because of a mis-ordered helper function. Only mattered when a Hardcover
+  write actually failed outright.
+
 ## 2026-09-13 — build 0e52652
 
 - **Finishing a book now shows a QR code straight to its Hardcover page.**
