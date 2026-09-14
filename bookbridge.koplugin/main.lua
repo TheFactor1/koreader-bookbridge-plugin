@@ -9675,10 +9675,131 @@ function Bookbridge:writeHardcoverFinish(md5, rec, entry, map)
     end)
 end
 
--- A one-tap-to-dismiss QR code pointing at a way to review this book on
--- Hardcover -- Matt's idea, so a fuller review (written on Hardcover's own
--- page, not KOReader's Book Status field) is one phone-camera scan away
--- instead of typing the title into the Hardcover app by hand.
+-- Same widget as KOReader's own QRMessage (ui/widget/qrwidget's popup
+-- wrapper) -- same tap-anywhere/any-key/timeout dismissal, same modal
+-- fullscreen frame -- with one TextBoxWidget added above the QR code.
+-- QRMessage itself has no field for a caption at all, confirmed by reading
+-- its source: it only ever draws the code, nothing else, so getting a
+-- congratulatory line onto the same dialog meant copying its actual
+-- init/dismiss logic rather than guessing at an option that isn't there.
+local HardcoverReviewQR = require("ui/widget/container/inputcontainer"):extend{
+    modal = true,
+    timeout = nil,
+    _timeout_func = nil,
+    message = nil,  -- the congratulatory line, above the code
+    qr_text = nil,  -- the URL to encode
+    qr_side = nil,  -- the code's width and height (square)
+}
+
+function HardcoverReviewQR:init()
+    local Device = require("device")
+    local Screen = Device.screen
+    if Device:hasKeys() then
+        self.key_events.AnyKeyPressed = { { Device.input.group.Any } }
+    end
+    local VerticalGroup = require("ui/widget/verticalgroup")
+    local VerticalSpan = require("ui/widget/verticalspan")
+    local message_widget = TextBoxWidget:new{
+        text = self.message,
+        face = Font:getFace("x_smallinfofont"),
+        width = math.floor(Screen:getWidth() * 0.6),
+        alignment = "center",
+    }
+    local qr_widget = require("ui/widget/qrwidget"):new{ text = self.qr_text, width = self.qr_side, height = self.qr_side }
+    local body
+    -- A device that can open a link in its own browser (Android, chiefly --
+    -- this is meant for Matt's phone as much as his Kindles) gets a real
+    -- "Open in browser" button instead of whole-screen tap-to-dismiss:
+    -- scanning a QR shown on the very screen you're already holding makes
+    -- no sense there, so the actual point of the dialog on that device is
+    -- the button, not the code (still shown too, in case the screen gets
+    -- handed to someone else). Buttons and a full-screen tap gesture are
+    -- kept mutually exclusive rather than combined on the same dialog --
+    -- whether a tap lands on a nested Button or the parent's own
+    -- full-screen gesture first was never something this session verified
+    -- against KOReader's actual dispatch order, so this only ever uses the
+    -- shape already proven safe elsewhere in this file's own history: a
+    -- dialog with real buttons and NO competing whole-screen gesture.
+    if Device:canOpenLink() then
+        local Button = require("ui/widget/button")
+        local HorizontalGroup = require("ui/widget/horizontalgroup")
+        local HorizontalSpan = require("ui/widget/horizontalspan")
+        local url = self.qr_text
+        body = VerticalGroup:new{
+            align = "center",
+            message_widget,
+            VerticalSpan:new{ width = Size.padding.large },
+            qr_widget,
+            VerticalSpan:new{ width = Size.padding.large },
+            HorizontalGroup:new{
+                align = "center",
+                Button:new{
+                    text = _("Open in browser"),
+                    callback = function() Device:openLink(url); UIManager:close(self) end,
+                },
+                HorizontalSpan:new{ width = Size.padding.default },
+                Button:new{ text = _("Close"), callback = function() UIManager:close(self) end },
+            },
+        }
+    else
+        if Device:isTouchDevice() then
+            self.ges_events.TapClose = {
+                require("ui/gesturerange"):new{
+                    ges = "tap",
+                    range = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() },
+                },
+            }
+        end
+        body = VerticalGroup:new{
+            align = "center",
+            message_widget,
+            VerticalSpan:new{ width = Size.padding.large },
+            qr_widget,
+        }
+    end
+    local frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = Size.border.window,
+        radius = 0,
+        padding = Size.padding.large,
+        body,
+    }
+    self[1] = require("ui/widget/container/centercontainer"):new{ dimen = Screen:getSize(), frame }
+end
+
+-- Onward: verbatim from QRMessage (frontend/ui/widget/qrmessage.lua).
+function HardcoverReviewQR:onCloseWidget()
+    UIManager:setDirty(nil, function() return "ui", self[1][1].dimen end)
+    if self._timeout_func then
+        UIManager:unschedule(self._timeout_func)
+        self._timeout_func = nil
+    end
+end
+
+function HardcoverReviewQR:onShow()
+    UIManager:setDirty(self, function() return "ui", self[1][1].dimen end)
+    if self.timeout then
+        self._timeout_func = function()
+            self._timeout_func = nil
+            UIManager:close(self)
+        end
+        UIManager:scheduleIn(self.timeout, self._timeout_func)
+    end
+    return true
+end
+
+function HardcoverReviewQR:onTapClose()
+    UIManager:close(self)
+    return true
+end
+HardcoverReviewQR.onAnyKeyPressed = HardcoverReviewQR.onTapClose
+HardcoverReviewQR.onClose = HardcoverReviewQR.onTapClose
+
+-- A one-tap-to-dismiss "congrats, go review it" dialog pointing at a way to
+-- review this book on Hardcover -- Matt's idea, so a fuller review
+-- (written on Hardcover's own page, not KOReader's Book Status field) is
+-- one phone-camera scan away instead of typing the title into the
+-- Hardcover app by hand.
 --
 -- Deliberately does NO network work of its own and never waits on whether
 -- the Read status has actually made it to Hardcover yet: Matt's own
@@ -9700,16 +9821,22 @@ end
 -- it) fired right as a book closes, so with no timeout at all it would sit
 -- blocking whatever Matt does next -- opening another book, say -- for as
 -- long as he doesn't happen to notice it.
+--
+-- 0.4 of the shorter screen side, not the 0.7 the plain-QRMessage version
+-- used: Matt's own read on the first build was that it was too big.
+-- KOReader's QRWidget always draws its own quiet-zone border regardless of
+-- pixel size, so this stays comfortably scannable at arm's length.
 function Bookbridge:showHardcoverReviewQR(slug, title)
+    local book_title = title or _("this book")
     local url = slug and ("https://hardcover.app/books/" .. slug)
-        or ("https://hardcover.app/search?q=" .. socketurl.escape(title or ""))
+        or ("https://hardcover.app/search?q=" .. socketurl.escape(book_title))
     debugLog("[hc] review-QR: " .. url)
     local Screen = require("device").screen
-    local side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.7)
-    UIManager:show(QRMessage:new{
-        text = url,
-        width = side,
-        height = side,
+    local side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.4)
+    UIManager:show(HardcoverReviewQR:new{
+        message = T(_("Congratulations, you've finished \"%1\"!\nConsider reviewing it on Hardcover by scanning the QR code below."), book_title),
+        qr_text = url,
+        qr_side = side,
         timeout = 15,
     })
 end
