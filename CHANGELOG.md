@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-14 — build e917d0c
+
+- **Optimization**: the automatic slug-lookup retry (piggybacked on
+  ordinary progress syncs) is now capped at 3 tries instead of retrying
+  forever for a book it genuinely can't find a link for. Audited the rest
+  of the Hardcover integration for similar issues and found nothing else.
+
 ## 2026-09-14 — build 9fd6795
 
 - **Fixed a regression from the last build.** Parking an unmatched book
