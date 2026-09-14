@@ -9826,15 +9826,53 @@ HardcoverReviewQR.onClose = HardcoverReviewQR.onTapClose
 -- used: Matt's own read on the first build was that it was too big.
 -- KOReader's QRWidget always draws its own quiet-zone border regardless of
 -- pixel size, so this stays comfortably scannable at arm's length.
+--
+-- Public domain only, deliberately -- Matt's own example was Tolkien, but
+-- The Lord of the Rings is still under copyright, and this text ships in
+-- a public GitHub repo forever, not just a single on-screen popup, so
+-- "quoted once for a friend" fair-use reasoning doesn't cover it the same
+-- way. Every line below is pre-1929 (safely public domain in the US) and
+-- checked against the source for exact wording -- misquoting a real book
+-- is its own kind of wrong.
+local HARDCOVER_FINISH_QUOTES = {
+    { text = _("Why, sometimes I've believed as many as six impossible things before breakfast."),
+      attribution = "Lewis Carroll, Through the Looking-Glass" },
+    { text = _("It is a truth universally acknowledged, that a single man in possession of a good fortune must be in want of a wife."),
+      attribution = "Jane Austen, Pride and Prejudice" },
+    { text = _("I am not afraid of storms, for I am learning how to sail my ship."),
+      attribution = "Louisa May Alcott, Little Women" },
+    { text = _("Tomorrow is a new day with no mistakes in it yet."),
+      attribution = "L. M. Montgomery, Anne of Green Gables" },
+    { text = _("I am the master of my fate: I am the captain of my soul."),
+      attribution = "William Ernest Henley, Invictus" },
+    { text = _("It is a far, far better thing that I do, than I have ever done."),
+      attribution = "Charles Dickens, A Tale of Two Cities" },
+}
+
+local hc_finish_quotes_seeded = false
+local function pickHardcoverFinishQuote()
+    if not hc_finish_quotes_seeded then
+        math.randomseed(os.time())
+        hc_finish_quotes_seeded = true
+    end
+    local q = HARDCOVER_FINISH_QUOTES[math.random(#HARDCOVER_FINISH_QUOTES)]
+    return T(_("\"%1\"\n-- %2"), q.text, q.attribution)
+end
+
 function Bookbridge:showHardcoverReviewQR(slug, title)
     local book_title = title or _("this book")
-    local url = slug and ("https://hardcover.app/books/" .. slug)
+    -- /reviews/edit over the plain book page: Matt's own example, and one
+    -- tap/scan further along than the page a reviewer would otherwise have
+    -- to navigate from by hand. Only for a known slug -- the title-search
+    -- fallback has no book page to append it to yet.
+    local url = slug and ("https://hardcover.app/books/" .. slug .. "/reviews/edit")
         or ("https://hardcover.app/search?q=" .. socketurl.escape(book_title))
     debugLog("[hc] review-QR: " .. url)
     local Screen = require("device").screen
     local side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.4)
     UIManager:show(HardcoverReviewQR:new{
-        message = T(_("Congratulations, you've finished \"%1\"!\nConsider reviewing it on Hardcover by scanning the QR code below."), book_title),
+        message = T(_("Congratulations, you've finished \"%1\"!\n\n%2\n\nConsider reviewing it on Hardcover."),
+            book_title, pickHardcoverFinishQuote()),
         qr_text = url,
         qr_side = side,
         timeout = 15,
