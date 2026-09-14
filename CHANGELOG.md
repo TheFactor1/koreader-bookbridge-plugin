@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-14 — build 9fd6795
+
+- **Fixed a regression from the last build.** Parking an unmatched book
+  after one search (to stop the battery drain) accidentally also stopped
+  it from ever completing a real match automatically, even when Hardcover
+  was genuinely sure about it -- every such book would have been stuck
+  showing only a guess link forever. Confident matches now complete for
+  real again, same as before either fix; only genuinely unconfident books
+  get parked and left alone.
+
 ## 2026-09-14 — build 3063b3c
 
 - **Fixed a real battery drain.** A finished book with no Hardcover match
