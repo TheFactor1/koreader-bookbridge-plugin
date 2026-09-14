@@ -3123,13 +3123,12 @@ function Bookbridge:registerFileDialogButtons()
         -- captureReadingProgress reads from a LIVE ReaderUI's doc_settings,
         -- here via DocSettings:open() instead since this book may not be
         -- open at all), the exact same direct review-editor link; without
-        -- one, the exact same title-search fallback. No network of its
-        -- own, same as the automatic path.
+        -- one, the exact same title-and-author search fallback.
         if self_ref.hardcover_token and self_ref.hardcover_token ~= "" then
             table.insert(row, {
                 text = _("Review on Hardcover"),
                 callback = function()
-                    local title = deriveFileDialogMetadata(file, book_props)
+                    local title, author = deriveFileDialogMetadata(file, book_props)
                     local md5
                     local ok_ds, DocSettings = pcall(require, "docsettings")
                     if ok_ds then
@@ -3140,7 +3139,31 @@ function Bookbridge:registerFileDialogButtons()
                     end
                     local map = md5 and loadHardcoverMap()
                     local entry = map and map[md5]
-                    self_ref:showHardcoverReviewQR(entry and entry.slug, (entry and entry.title) or title)
+                    if entry and entry.title then title = entry.title end
+                    -- A book matched to Hardcover before this plugin started
+                    -- caching a slug at match time has book_id but no slug
+                    -- yet -- confirmed live: Matt's already-matched books
+                    -- were all falling through to the search fallback for
+                    -- exactly this reason. Unlike the automatic finish path
+                    -- (deliberately offline-safe, no network of its own),
+                    -- this is a one-off tap the user is sitting there
+                    -- waiting on, so a live lookup here is worth doing --
+                    -- and worth caching back onto the map so it's instant
+                    -- next time, same as a freshly-matched book already is.
+                    if entry and entry.book_id and not entry.slug then
+                        local Trapper = require("ui/trapper")
+                        Trapper:wrap(function()
+                            local completed, fetched_slug = Trapper:dismissableRunInSubprocess(function()
+                                return doHardcoverGetBookSlug(self_ref.hardcover_token, entry.book_id)
+                            end, _("Looking up the review page..."))
+                            if completed and fetched_slug then
+                                entry.slug = fetched_slug; map[md5] = entry; saveHardcoverMap(map)
+                            end
+                            self_ref:showHardcoverReviewQR(completed and fetched_slug or nil, title, author)
+                        end)
+                        return
+                    end
+                    self_ref:showHardcoverReviewQR(entry and entry.slug, title, author)
                 end,
             })
         end
@@ -9898,14 +9921,22 @@ local function pickHardcoverFinishQuote()
     return T(_("\"%1\"\n-- %2"), q.text, q.attribution)
 end
 
-function Bookbridge:showHardcoverReviewQR(slug, title)
+function Bookbridge:showHardcoverReviewQR(slug, title, author)
     local book_title = title or _("this book")
     -- /reviews/edit over the plain book page: Matt's own example, and one
     -- tap/scan further along than the page a reviewer would otherwise have
     -- to navigate from by hand. Only for a known slug -- the title-search
     -- fallback has no book page to append it to yet.
+    --
+    -- The fallback includes the author now, not just the title -- a
+    -- title-only search is exactly the "which of these twelve books
+    -- called Dune is it" confusion Matt hit, and this plugin already has
+    -- the author on hand at every call site (rec.author from the reading
+    -- record, or the file's own metadata for the manual long-press action)
+    -- even when it doesn't yet have a Hardcover slug for the book.
+    local search_terms = (author and author ~= "") and (book_title .. " " .. author) or book_title
     local url = slug and ("https://hardcover.app/books/" .. slug .. "/reviews/edit")
-        or ("https://hardcover.app/search?q=" .. socketurl.escape(book_title))
+        or ("https://hardcover.app/search?q=" .. socketurl.escape(search_terms))
     debugLog("[hc] review-QR: " .. url)
     local Screen = require("device").screen
     local side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.4)
@@ -9948,7 +9979,7 @@ function Bookbridge:syncHardcoverFinish(md5, rec, entry, map)
     end
     map[md5] = entry; saveHardcoverMap(map)
     if not already_shown then
-        self:showHardcoverReviewQR(entry.slug, entry.title or rec.title)
+        self:showHardcoverReviewQR(entry.slug, entry.title or rec.title, rec.author)
     end
     self:writeHardcoverFinish(md5, rec, entry, map)
 end
