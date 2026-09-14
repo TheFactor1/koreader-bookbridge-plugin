@@ -10151,15 +10151,26 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
     -- (hardcover_review_qr_enabled) applies here too -- a guess is less
     -- certain than the confident-match popup above, so it should be at
     -- least as easy to turn off, never harder.
+    --
+    -- Uses the SAME finish_qr_shown_date field syncHardcoverFinish checks
+    -- (not a separate one) -- confirmed live this book gets auto-matched
+    -- for real moments after showing the guess (the search that produced
+    -- the guess is often exactly what resolves the real match too), and
+    -- resolveHardcoverMatch/pickHardcoverCandidate carry this field
+    -- forward across their own map[md5] overwrite for exactly this
+    -- reason: a separate field wouldn't have been seen by
+    -- syncHardcoverFinish's own already-shown check, and the popup
+    -- fired twice for the same finish -- once as a guess, again
+    -- moments later as the confirmed match.
     if self.hardcover_review_qr_enabled then
         for md5, rec in pairs(pending) do
             if rec.finished then
                 local entry = map[md5]
-                local already_shown = entry and entry.ambiguous_finish_qr_shown_date == rec.finished_date
+                local already_shown = entry and entry.finish_qr_shown_date == rec.finished_date
                 if not already_shown and (not entry or entry.decision ~= "sync") then
                     entry = entry or {}
                     entry.title = entry.title or rec.title
-                    entry.ambiguous_finish_qr_shown_date = rec.finished_date
+                    entry.finish_qr_shown_date = rec.finished_date
                     map[md5] = entry; saveHardcoverMap(map)
                     local Trapper = require("ui/trapper")
                     Trapper:wrap(function()
@@ -10487,7 +10498,15 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
     end
     local map = loadHardcoverMap()
     if book_id and confident then
-        map[md5] = { book_id = book_id, title = ft, decision = "sync", edition_id = edition and edition.id }; saveHardcoverMap(map)
+        -- Carried forward across the overwrite below, not dropped: a book
+        -- that already showed the "best guess" review popup (checkHardcover
+        -- FinishedBook's second pass, before this match existed) must not
+        -- show it AGAIN once it resolves to a real match moments later --
+        -- confirmed live this was happening, since a plain table literal
+        -- here replaces map[md5] wholesale rather than merging into it.
+        local prev_shown_date = map[md5] and map[md5].finish_qr_shown_date
+        map[md5] = { book_id = book_id, title = ft, decision = "sync", edition_id = edition and edition.id, finish_qr_shown_date = prev_shown_date }
+        saveHardcoverMap(map)
         -- Fetched once, right here, rather than at finish time: this runs
         -- the FIRST time this book is ever matched, whether or not it's
         -- finished yet, so by the time it eventually IS finished (maybe
@@ -10611,7 +10630,14 @@ function Bookbridge:pickHardcoverCandidate(md5, rec, candidates, token)
             callback = function()
                 UIManager:close(dialog)
                 debugLog("[hc] picked " .. tostring(c.id) .. " (" .. tostring(c.title) .. ") for " .. tostring(rec.title))
-                map[md5] = { book_id = c.id, title = c.title, decision = "sync" }; saveHardcoverMap(map)
+                -- Carried forward across the overwrite, same reason and same
+                -- fix as resolveHardcoverMatch's own: this book may already
+                -- have shown the "best guess" review popup while parked in
+                -- Review matches -- see checkHardcoverFinishedBook's second
+                -- pass and its own comment.
+                local prev_shown_date = map[md5] and map[md5].finish_qr_shown_date
+                map[md5] = { book_id = c.id, title = c.title, decision = "sync", finish_qr_shown_date = prev_shown_date }
+                saveHardcoverMap(map)
                 -- Same gap as resolveHardcoverMatch and for the same reason:
                 -- this is the first time map[md5] exists, so a book that was
                 -- ALSO already finished when it landed in Review matches
