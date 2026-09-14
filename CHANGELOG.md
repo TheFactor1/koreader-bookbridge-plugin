@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-14 — build 3063b3c
+
+- **Fixed a real battery drain.** A finished book with no Hardcover match
+  at all could end up retrying a live search on every single book close
+  afterward, forever, instead of just once -- each retry meant waking the
+  WiFi radio for no reason. Now it's tried once and then left alone
+  (parked under Hardcover > Review matches, same as any other ambiguous
+  book) until you resolve it yourself.
+- Also fixed: a book explicitly marked never-sync could still get the
+  automatic review popup. It won't now.
+
 ## 2026-09-14 — build 1100c10
 
 - **New: an ISBN is now captured at download time when downloading
