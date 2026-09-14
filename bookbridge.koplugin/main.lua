@@ -3136,12 +3136,25 @@ function Bookbridge:registerFileDialogButtons()
                 text = _("Review on Hardcover"),
                 callback = function()
                     local title, author = deriveFileDialogMetadata(file, book_props)
-                    local md5
+                    local md5, identifiers
                     local ok_ds, DocSettings = pcall(require, "docsettings")
                     if ok_ds then
                         local ok_open, doc_settings = pcall(function() return DocSettings:open(file) end)
                         if ok_open and doc_settings then
                             md5 = doc_settings:readSetting("partial_md5_checksum")
+                            -- The raw doc_props (ISBN/ASIN, via getProps()),
+                            -- not book_props -- FileManagerBookInfo.extendProps
+                            -- (what actually builds book_props) only copies a
+                            -- fixed whitelist of display fields and drops
+                            -- identifiers entirely, confirmed by reading it
+                            -- directly. Matt's own point: this is metadata
+                            -- Bookbridge already captures for progress-tracked
+                            -- books (captureReadingProgress reads the exact
+                            -- same field, props.identifiers), so an exact
+                            -- identifier match beats a fuzzy title/author
+                            -- search whenever it's actually on hand.
+                            local doc_props = doc_settings:readSetting("doc_props")
+                            identifiers = doc_props and doc_props.identifiers
                         end
                     end
                     local map = md5 and loadHardcoverMap()
@@ -3195,7 +3208,7 @@ function Bookbridge:registerFileDialogButtons()
                     local Trapper = require("ui/trapper")
                     Trapper:wrap(function()
                         local completed, top_id, ft, _fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
-                            return doHardcoverFindBook(self_ref.hardcover_token, title, author, self_ref.hardcover_language)
+                            return doHardcoverFindBook(self_ref.hardcover_token, title, author, self_ref.hardcover_language, identifiers)
                         end, _("Looking up the review page..."))
                         if not completed then return end
                         local best_id, best_title = top_id, ft
