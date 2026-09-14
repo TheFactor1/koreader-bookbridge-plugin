@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 84695a7
+
+- **New: "Review on Hardcover" on a book's long-press menu.** Long-press
+  any book's cover (FileManager, History, Collections, or a file search
+  result) to pull up the same congrats-and-QR/link dialog on demand, any
+  time -- not only right when a book finishes. Uses the same direct link
+  when the book's already matched to Hardcover, the same search-link
+  fallback when it isn't. Only shown when a Hardcover token is configured.
+
 ## 2026-09-13 — build ca97ea4
 
 - **The finish dialog is tap-anywhere-to-dismiss on the phone/button
