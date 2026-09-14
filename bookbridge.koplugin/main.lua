@@ -149,6 +149,13 @@ function Bookbridge:loadSettings()
     if self.hardcover_language == nil then self.hardcover_language = "en" end
     -- Opt-in: push reading progress to Hardcover on close/suspend (see onCloseDocument).
     self.hardcover_progress_sync = self.sm_settings.data.shelfmark.hardcover_progress_sync
+    -- On by default (nil == never set, not "off"), matching hardcover_language's
+    -- own default-on-nil pattern above. Only gates the AUTOMATIC finish-time
+    -- popup (checkHardcoverFinishedBook/syncHardcoverFinish) -- the manual
+    -- "Review on Hardcover" long-press action always shows it regardless,
+    -- since tapping that is already an explicit request to see it.
+    self.hardcover_review_qr_enabled = self.sm_settings.data.shelfmark.hardcover_review_qr_enabled
+    if self.hardcover_review_qr_enabled == nil then self.hardcover_review_qr_enabled = true end
 end
 
 function Bookbridge:defaultDownloadDir()
@@ -192,6 +199,7 @@ function Bookbridge:saveAllSettings(msg)
         hardcover_token = self.hardcover_token,
         hardcover_language = self.hardcover_language,
         hardcover_progress_sync = self.hardcover_progress_sync,
+        hardcover_review_qr_enabled = self.hardcover_review_qr_enabled,
         ai_relay_url = self.ai_relay_url,
         ai_relay_token = self.ai_relay_token,
         update_url = self.update_url,
@@ -3057,80 +3065,14 @@ function Bookbridge:registerFileDialogButtons()
             { text = _("Read"), callback = logCallback(HARDCOVER_STATUS_READ, _("Read")) },
         }
 
-        -- Cheap check (no document open) when book_props is already known;
-        -- otherwise show the button anyway and let the tap-time fallback
-        -- (which does open the document) decide -- see
-        -- deriveFileDialogMetadata's own note on why that lookup only ever
-        -- happens lazily, at tap time, never here.
-        local known_author = book_props and book_props.authors and book_props.authors ~= ""
-        if known_author or not book_props then
-            table.insert(row, {
-                text = _("Follow Author"),
-                callback = function()
-                    local _title, author = deriveFileDialogMetadata(file, book_props)
-                    if not author or author == "" then
-                        UIManager:show(InfoMessage:new{ text = _("Couldn't determine this book's author.") })
-                        return
-                    end
-                    local Trapper = require("ui/trapper")
-                    Trapper:wrap(function()
-                        self_ref:promptHardcoverFollowAuthorForFile(author)
-                    end)
-                end,
-            })
-        end
-
-        -- Only when a CWA server is actually configured -- matches the same
-        -- guard doSyncLibrary itself uses, and there's nothing to check
-        -- against otherwise.
-        if self_ref.cwa_url and self_ref.cwa_url ~= "" then
-            table.insert(row, {
-                text = _("Refresh from Calibre-Web"),
-                callback = function()
-                    self_ref:refreshBookMetadata(file)
-                end,
-            })
-        end
-
-        -- Push counterpart to "Refresh from CWA" above: get THIS book into
-        -- the library without running a whole-library sync.
-        if self_ref.cwa_url and self_ref.cwa_url ~= "" then
-            table.insert(row, {
-                text = _("Send to Calibre-Web"),
-                callback = function()
-                    local Trapper = require("ui/trapper")
-                    Trapper:wrap(function()
-                        self_ref:sendBookToCwa(file)
-                    end)
-                end,
-            })
-        end
-
-        -- One-off counterpart to the batch review offered after a sync: same
-        -- suggest-then-confirm path, for when a single book is bothering you
-        -- rather than waiting for the next sync to surface it.
-        if self_ref.cwa_url and self_ref.cwa_url ~= ""
-                and self_ref.ai_relay_url and self_ref.ai_relay_url ~= "" then
-            table.insert(row, {
-                text = _("Suggest match"),
-                callback = function()
-                    local Trapper = require("ui/trapper")
-                    Trapper:wrap(function()
-                        self_ref:suggestMatchForFile(file)
-                    end)
-                end,
-            })
-        end
-
-        -- Manual entry point into the same "finished a book -> QR to
-        -- review it" flow (showHardcoverReviewQR) -- Matt asked for a way
-        -- to pull this up any time by long-pressing a cover, not only the
-        -- moment Bookbridge itself notices a book is finished. Reuses the
-        -- exact same function: with a cached Hardcover match (looked up
-        -- via the file's own partial_md5_checksum -- the same key
-        -- captureReadingProgress reads from a LIVE ReaderUI's doc_settings,
-        -- here via DocSettings:open() instead since this book may not be
-        -- open at all), the exact same direct review-editor link.
+        -- Right after the other Hardcover-native actions above, ahead of
+        -- the Calibre-Web-specific ones below -- grouped with what it's
+        -- actually related to, and high enough in a 6+ item menu to
+        -- actually get used. Manual entry point into the same "finished a
+        -- book -> QR to review it" flow (showHardcoverReviewQR) -- Matt
+        -- asked for a way to pull this up any time by long-pressing a
+        -- cover, not only the moment Bookbridge itself notices a book is
+        -- finished.
         if self_ref.hardcover_token and self_ref.hardcover_token ~= "" then
             table.insert(row, {
                 text = _("Review on Hardcover"),
@@ -3192,38 +3134,83 @@ function Bookbridge:registerFileDialogButtons()
 
                     -- No recorded Hardcover match at all -- never matched,
                     -- or sitting in "review" because the auto-matcher wasn't
-                    -- confident. Matt's own idea: rather than a bare search
-                    -- query, search live and link straight to whichever
-                    -- candidate has the most readers/reviews -- Hardcover's
-                    -- near-empty duplicate entries have a handful where the
-                    -- real one has thousands, the same signal
-                    -- doHardcoverFindBook already leans on (as one factor
-                    -- among several) to judge auto-sync confidence. Here it's
-                    -- used alone, as a tiebreak among plausible candidates,
-                    -- since the bar for "worth opening to review" is much
-                    -- lower than "safe to auto-sync progress and ratings to."
-                    -- Deliberately does NOT record anything onto the
-                    -- Hardcover map or touch sync/decision state -- only
-                    -- which page this one tap opens.
+                    -- confident. bestGuessHardcoverReviewLink searches live
+                    -- and ranks candidates by readers/reviews rather than
+                    -- trusting the auto-matcher's own confidence score --
+                    -- see its own comment for why. Deliberately does NOT
+                    -- record anything onto the Hardcover map or touch
+                    -- sync/decision state -- only which page this one tap
+                    -- opens, and is_guess flags the result as unconfirmed
+                    -- in the dialog rather than presenting it as certain.
                     local Trapper = require("ui/trapper")
                     Trapper:wrap(function()
-                        local completed, top_id, ft, _fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
-                            return doHardcoverFindBook(self_ref.hardcover_token, title, author, self_ref.hardcover_language, identifiers)
-                        end, _("Looking up the review page..."))
-                        if not completed then return end
-                        local best_id, best_title = top_id, ft
-                        if type(ranked) == "table" and ranked[1] then
-                            table.sort(ranked, function(a, b) return (a.users or 0) > (b.users or 0) end)
-                            best_id, best_title = ranked[1].id, ranked[1].title
-                        end
-                        if not best_id then
-                            self_ref:showHardcoverReviewQR(nil, title, author)
-                            return
-                        end
-                        local slug_completed, fetched_slug = Trapper:dismissableRunInSubprocess(function()
-                            return doHardcoverGetBookSlug(self_ref.hardcover_token, best_id)
-                        end, {})
-                        self_ref:showHardcoverReviewQR(slug_completed and fetched_slug or nil, best_title or title, author)
+                        local slug, best_title, is_guess = self_ref:bestGuessHardcoverReviewLink(md5, title, author, identifiers)
+                        self_ref:showHardcoverReviewQR(slug, best_title, author, is_guess)
+                    end)
+                end,
+            })
+        end
+
+        -- Cheap check (no document open) when book_props is already known;
+        -- otherwise show the button anyway and let the tap-time fallback
+        -- (which does open the document) decide -- see
+        -- deriveFileDialogMetadata's own note on why that lookup only ever
+        -- happens lazily, at tap time, never here.
+        local known_author = book_props and book_props.authors and book_props.authors ~= ""
+        if known_author or not book_props then
+            table.insert(row, {
+                text = _("Follow Author"),
+                callback = function()
+                    local _title, author = deriveFileDialogMetadata(file, book_props)
+                    if not author or author == "" then
+                        UIManager:show(InfoMessage:new{ text = _("Couldn't determine this book's author.") })
+                        return
+                    end
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        self_ref:promptHardcoverFollowAuthorForFile(author)
+                    end)
+                end,
+            })
+        end
+
+        -- Only when a CWA server is actually configured -- matches the same
+        -- guard doSyncLibrary itself uses, and there's nothing to check
+        -- against otherwise.
+        if self_ref.cwa_url and self_ref.cwa_url ~= "" then
+            table.insert(row, {
+                text = _("Refresh from Calibre-Web"),
+                callback = function()
+                    self_ref:refreshBookMetadata(file)
+                end,
+            })
+        end
+
+        -- Push counterpart to "Refresh from CWA" above: get THIS book into
+        -- the library without running a whole-library sync.
+        if self_ref.cwa_url and self_ref.cwa_url ~= "" then
+            table.insert(row, {
+                text = _("Send to Calibre-Web"),
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        self_ref:sendBookToCwa(file)
+                    end)
+                end,
+            })
+        end
+
+        -- One-off counterpart to the batch review offered after a sync: same
+        -- suggest-then-confirm path, for when a single book is bothering you
+        -- rather than waiting for the next sync to surface it.
+        if self_ref.cwa_url and self_ref.cwa_url ~= ""
+                and self_ref.ai_relay_url and self_ref.ai_relay_url ~= "" then
+            table.insert(row, {
+                text = _("Suggest match"),
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        self_ref:suggestMatchForFile(file)
                     end)
                 end,
             })
@@ -6114,6 +6101,72 @@ function Bookbridge:hardcoverFindBook(title, author)
     return id, found_title, found_author, err
 end
 
+-- Best-guess a review link for a book with no confident Hardcover match --
+-- never matched, or parked in "review" because the auto-matcher wasn't
+-- sure. Shared by the manual "Review on Hardcover" long-press action and
+-- the automatic finish-time popup, so both pick the same candidate the
+-- same way: searches live (identifiers first, an exact hit skips scoring
+-- entirely -- see doHardcoverFindBook), then re-ranks whatever candidates
+-- come back purely by readers/reviews rather than doHardcoverFindBook's
+-- own blended matching-confidence score -- Hardcover's near-empty
+-- duplicate entries have a handful where the real one has thousands, a
+-- good tiebreak among plausible candidates even when nothing is confident
+-- enough to trust for automatic progress/rating sync.
+--
+-- Must be called from inside an existing Trapper:wrap (same convention as
+-- hardcoverFindBook above) -- it does its own dismissableRunInSubprocess
+-- calls rather than opening a fresh coroutine.
+--
+-- Returns slug (nil if nothing usable was found), title (the best
+-- candidate's own title when one was found, otherwise whatever was
+-- passed in), and is_guess (true whenever the returned slug came from
+-- this popularity tiebreak rather than an exact identifier hit -- callers
+-- use this to flag the result as unconfirmed rather than presenting a
+-- guess as certain).
+--
+-- Cached in memory per md5 (self._hc_review_guess_cache, cleared on
+-- restart) so asking twice for the same still-unmatched book -- another
+-- long-press, or the automatic check running again on a later close --
+-- doesn't repeat the live search. A "found nothing" result is cached too,
+-- to stop hammering Hardcover's search for a book it doesn't have; a
+-- cancelled search is deliberately NOT cached, so it's retried later
+-- rather than remembered as a dead end.
+function Bookbridge:bestGuessHardcoverReviewLink(md5, title, author, identifiers)
+    local cache = self._hc_review_guess_cache
+    if not cache then cache = {}; self._hc_review_guess_cache = cache end
+    if md5 and cache[md5] then
+        local c = cache[md5]
+        return c.slug, c.title, c.is_guess
+    end
+
+    local Trapper = require("ui/trapper")
+    local completed, top_id, ft, _fa, _err, ranked, confident = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverFindBook(self.hardcover_token, title, author, self.hardcover_language, identifiers)
+    end, {})
+    if not completed then return nil, title, true end
+
+    local best_id, best_title, is_guess = top_id, ft, not confident
+    if type(ranked) == "table" and ranked[1] then
+        table.sort(ranked, function(a, b) return (a.users or 0) > (b.users or 0) end)
+        if ranked[1].id ~= top_id then
+            best_id, best_title, is_guess = ranked[1].id, ranked[1].title, true
+        end
+    end
+
+    if not best_id then
+        if md5 then cache[md5] = { slug = nil, title = title, is_guess = true } end
+        return nil, title, true
+    end
+
+    local slug_completed, fetched_slug = Trapper:dismissableRunInSubprocess(function()
+        return doHardcoverGetBookSlug(self.hardcover_token, best_id)
+    end, {})
+    local slug = slug_completed and fetched_slug or nil
+    local final_title = best_title or title
+    if md5 then cache[md5] = { slug = slug, title = final_title, is_guess = is_guess } end
+    return slug, final_title, is_guess
+end
+
 function Bookbridge:hardcoverSetStatus(book_id, status_id)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
@@ -7520,6 +7573,17 @@ function Bookbridge:addToMainMenu(menu_items)
                             self:saveAllSettings(self.hardcover_progress_sync
                                 and _("On. Progress syncs silently when you close a book or the device sleeps; anything Hardcover can't be sure of waits under Review matches.")
                                 or _("Off."))
+                        end,
+                    },
+                    {
+                        text = _("Show a review reminder when a book finishes"),
+                        keep_menu_open = true,
+                        checked_func = function() return self.hardcover_review_qr_enabled == true end,
+                        callback = function()
+                            self.hardcover_review_qr_enabled = not self.hardcover_review_qr_enabled
+                            self:saveAllSettings(self.hardcover_review_qr_enabled
+                                and _("On. Finishing a book shows a congratulations message with a link to review it on Hardcover.")
+                                or _("Off. \"Review on Hardcover\" is still available any time from a book's long-press menu."))
                         end,
                     },
                     {
@@ -9982,7 +10046,16 @@ local function pickHardcoverFinishQuote()
     return T(_("\"%1\"\n-- %2"), q.text, q.attribution)
 end
 
-function Bookbridge:showHardcoverReviewQR(slug, title, author)
+-- is_guess: true when slug came from bestGuessHardcoverReviewLink's
+-- popularity tiebreak rather than a confident/identifier match -- adds a
+-- one-line caveat to the message instead of presenting a guess as
+-- certain. Deliberately just a visible caveat, not a blocking confirm
+-- step in front of the QR: this whole feature spent several builds
+-- removing exactly that kind of extra tap (the old star/review dialog),
+-- and the guess is easy to ignore (scan/tap something else, or just
+-- don't leave a review) if it's wrong -- so the cost of being wrong here
+-- doesn't justify reintroducing a gate.
+function Bookbridge:showHardcoverReviewQR(slug, title, author, is_guess)
     local book_title = title or _("this book")
     -- /reviews/edit over the plain book page: Matt's own example, and one
     -- tap/scan further along than the page a reviewer would otherwise have
@@ -9998,12 +10071,16 @@ function Bookbridge:showHardcoverReviewQR(slug, title, author)
     local search_terms = (author and author ~= "") and (book_title .. " " .. author) or book_title
     local url = slug and ("https://hardcover.app/books/" .. slug .. "/reviews/edit")
         or ("https://hardcover.app/search?q=" .. socketurl.escape(search_terms))
-    debugLog("[hc] review-QR: " .. url)
+    debugLog("[hc] review-QR: " .. url .. (is_guess and " (best guess)" or ""))
     local Screen = require("device").screen
     local side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.4)
+    local body = T(_("Congratulations, you've finished \"%1\"!\n\n%2\n\nConsider reviewing it on Hardcover."),
+        book_title, pickHardcoverFinishQuote())
+    if slug and is_guess then
+        body = body .. "\n\n" .. _("(Best guess -- not a confirmed match. Wrong book? Search for it on Hardcover instead.)")
+    end
     UIManager:show(HardcoverReviewQR:new{
-        message = T(_("Congratulations, you've finished \"%1\"!\n\n%2\n\nConsider reviewing it on Hardcover."),
-            book_title, pickHardcoverFinishQuote()),
+        message = body,
         qr_text = url,
         qr_side = side,
         timeout = 30,
@@ -10039,7 +10116,7 @@ function Bookbridge:syncHardcoverFinish(md5, rec, entry, map)
         entry.finish_qr_shown_date = rec.finished_date
     end
     map[md5] = entry; saveHardcoverMap(map)
-    if not already_shown then
+    if not already_shown and self.hardcover_review_qr_enabled then
         self:showHardcoverReviewQR(entry.slug, entry.title or rec.title, rec.author)
     end
     self:writeHardcoverFinish(md5, rec, entry, map)
@@ -10061,6 +10138,37 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
         if entry and entry.decision == "sync" and entry.book_id and rec.finished and not already_synced then
             self:syncHardcoverFinish(md5, rec, entry, map)
             return true
+        end
+    end
+
+    -- Second pass: a finished book with no confident match at all --
+    -- never matched, or parked in "review" -- used to go completely
+    -- silent here, even though the manual long-press action already had
+    -- a best-guess fallback for exactly this case. Kept as its own pass,
+    -- run only after every confidently-matched book above already had
+    -- its turn, so a book Bookbridge IS sure about is never delayed
+    -- behind a guess for one it isn't. Off by default toggle
+    -- (hardcover_review_qr_enabled) applies here too -- a guess is less
+    -- certain than the confident-match popup above, so it should be at
+    -- least as easy to turn off, never harder.
+    if self.hardcover_review_qr_enabled then
+        for md5, rec in pairs(pending) do
+            if rec.finished then
+                local entry = map[md5]
+                local already_shown = entry and entry.ambiguous_finish_qr_shown_date == rec.finished_date
+                if not already_shown and (not entry or entry.decision ~= "sync") then
+                    entry = entry or {}
+                    entry.title = entry.title or rec.title
+                    entry.ambiguous_finish_qr_shown_date = rec.finished_date
+                    map[md5] = entry; saveHardcoverMap(map)
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        local slug, best_title, is_guess = self:bestGuessHardcoverReviewLink(md5, entry.title or rec.title, rec.author, rec.identifiers)
+                        self:showHardcoverReviewQR(slug, best_title, rec.author, is_guess)
+                    end)
+                    return true
+                end
+            end
         end
     end
     return false
