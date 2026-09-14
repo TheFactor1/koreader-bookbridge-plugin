@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build a93353e
+
+- **The review QR is smaller and says what it's for.** It now shows a
+  "Congratulations, you've finished X! Consider reviewing it on Hardcover"
+  message above a QR code about half the previous size.
+- **On a phone, it's a real link instead of a code to scan.** Scanning a
+  QR shown on the very screen you're holding never made sense -- devices
+  that can open a link themselves (Android, chiefly) now get "Open in
+  browser" and "Close" buttons instead of a code to point a second camera
+  at. Kindles keep the tap-anywhere QR dialog as before.
+
 ## 2026-09-13 — build dc36b70
 
 - **The review QR now shows up even if the Kindle has no internet at
