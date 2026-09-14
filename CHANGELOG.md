@@ -4,6 +4,24 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build cabcb5b
+
+Five follow-ups in one build:
+
+- **Finishing a book with no confident Hardcover match now shows the
+  review popup too**, using the same best-guess search the manual
+  "Review on Hardcover" action already had -- it used to show nothing at
+  all for these.
+- **A best guess is now labeled as one** in the popup, so it's clear when
+  the link isn't a confirmed match.
+- **"Review on Hardcover" moved up** in the long-press menu, right after
+  Currently Reading/Read instead of last.
+- **A repeated guess for the same book no longer repeats the search** --
+  remembered for the rest of the session.
+- **New toggle**: Hardcover settings > "Show a review reminder when a
+  book finishes" (on by default) turns off both automatic popups. The
+  manual "Review on Hardcover" action still works either way.
+
 ## 2026-09-13 — build 0cd0342
 
 - **"Review on Hardcover" now uses the book's own ISBN/ASIN when it's
