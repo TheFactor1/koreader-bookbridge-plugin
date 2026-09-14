@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build d6e8413
+
+- **Fixed: finishing a book could still show a search page instead of the
+  actual book**, for books matched to Hardcover before this plugin started
+  remembering their direct link. The previous fix only covered the manual
+  "Review on Hardcover" action; now an already-matched book's link gets
+  filled in quietly during ordinary reading (on its next normal progress
+  sync), so by the time you actually finish it, the direct link is already
+  there.
+
 ## 2026-09-13 — build abd34c4
 
 - **Fixed: "Review on Hardcover" kept showing a search page instead of
