@@ -9706,20 +9706,34 @@ function HardcoverReviewQR:init()
         alignment = "center",
     }
     local qr_widget = require("ui/widget/qrwidget"):new{ text = self.qr_text, width = self.qr_side, height = self.qr_side }
+    -- The whole-screen tap-close zone is now registered unconditionally,
+    -- buttons or not -- confirmed safe by reading WidgetContainer's actual
+    -- propagateEvent/handleEvent (frontend/ui/widget/container/
+    -- widgetcontainer.lua): a container tries EVERY child's own
+    -- handleEvent first, depth-first, and only falls back to its OWN
+    -- onGesture (where this zone lives) if none of them consumed the tap.
+    -- A Button is itself an InputContainer with its own tap zone, so a tap
+    -- landing on one is claimed by the button before this zone ever sees
+    -- it; a tap anywhere else on screen falls through and closes the
+    -- dialog. The two were kept mutually exclusive in the first build
+    -- because this dispatch order hadn't actually been checked yet --
+    -- Matt asked for tap-anywhere back on the Android/button version too,
+    -- which is what prompted checking it properly instead of guessing.
+    if Device:isTouchDevice() then
+        self.ges_events.TapClose = {
+            require("ui/gesturerange"):new{
+                ges = "tap",
+                range = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() },
+            },
+        }
+    end
     local body
     -- A device that can open a link in its own browser (Android, chiefly --
-    -- this is meant for Matt's phone as much as his Kindles) gets a real
-    -- "Open in browser" button instead of whole-screen tap-to-dismiss:
-    -- scanning a QR shown on the very screen you're already holding makes
-    -- no sense there, so the actual point of the dialog on that device is
-    -- the button, not the code (still shown too, in case the screen gets
-    -- handed to someone else). Buttons and a full-screen tap gesture are
-    -- kept mutually exclusive rather than combined on the same dialog --
-    -- whether a tap lands on a nested Button or the parent's own
-    -- full-screen gesture first was never something this session verified
-    -- against KOReader's actual dispatch order, so this only ever uses the
-    -- shape already proven safe elsewhere in this file's own history: a
-    -- dialog with real buttons and NO competing whole-screen gesture.
+    -- this is meant for Matt's phone as much as his Kindles) ALSO gets a
+    -- real "Open in browser" button: scanning a QR shown on the very
+    -- screen you're already holding makes no sense there, so the actual
+    -- point of the dialog on that device is the button, not the code
+    -- (still shown too, in case the screen gets handed to someone else).
     if Device:canOpenLink() then
         local Button = require("ui/widget/button")
         local HorizontalGroup = require("ui/widget/horizontalgroup")
@@ -9742,14 +9756,6 @@ function HardcoverReviewQR:init()
             },
         }
     else
-        if Device:isTouchDevice() then
-            self.ges_events.TapClose = {
-                require("ui/gesturerange"):new{
-                    ges = "tap",
-                    range = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() },
-                },
-            }
-        end
         body = VerticalGroup:new{
             align = "center",
             message_widget,
@@ -9817,10 +9823,12 @@ HardcoverReviewQR.onClose = HardcoverReviewQR.onTapClose
 -- results straight from the URL -- so this always has something to show,
 -- entirely from data already sitting on the device.
 --
--- 15s timeout rather than none: this is a modal (tap or any key dismisses
--- it) fired right as a book closes, so with no timeout at all it would sit
--- blocking whatever Matt does next -- opening another book, say -- for as
--- long as he doesn't happen to notice it.
+-- A timeout rather than none at all: this is a modal (tap anywhere, any
+-- key, or a button dismisses it) fired right as a book closes, so with no
+-- timeout at all it would sit blocking whatever Matt does next -- opening
+-- another book, say -- for as long as he doesn't happen to notice it.
+-- 30s (was 15s) per Matt's own follow-up: worth actually reading the
+-- quote and finding a phone before it vanishes, not racing it.
 --
 -- 0.4 of the shorter screen side, not the 0.7 the plain-QRMessage version
 -- used: Matt's own read on the first build was that it was too big.
@@ -9875,7 +9883,7 @@ function Bookbridge:showHardcoverReviewQR(slug, title)
             book_title, pickHardcoverFinishQuote()),
         qr_text = url,
         qr_side = side,
-        timeout = 15,
+        timeout = 30,
     })
 end
 
