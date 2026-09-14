@@ -3114,6 +3114,37 @@ function Bookbridge:registerFileDialogButtons()
             })
         end
 
+        -- Manual entry point into the same "finished a book -> QR to
+        -- review it" flow (showHardcoverReviewQR) -- Matt asked for a way
+        -- to pull this up any time by long-pressing a cover, not only the
+        -- moment Bookbridge itself notices a book is finished. Reuses the
+        -- exact same function: with a cached Hardcover match (looked up
+        -- via the file's own partial_md5_checksum -- the same key
+        -- captureReadingProgress reads from a LIVE ReaderUI's doc_settings,
+        -- here via DocSettings:open() instead since this book may not be
+        -- open at all), the exact same direct review-editor link; without
+        -- one, the exact same title-search fallback. No network of its
+        -- own, same as the automatic path.
+        if self_ref.hardcover_token and self_ref.hardcover_token ~= "" then
+            table.insert(row, {
+                text = _("Review on Hardcover"),
+                callback = function()
+                    local title = deriveFileDialogMetadata(file, book_props)
+                    local md5
+                    local ok_ds, DocSettings = pcall(require, "docsettings")
+                    if ok_ds then
+                        local ok_open, doc_settings = pcall(function() return DocSettings:open(file) end)
+                        if ok_open and doc_settings then
+                            md5 = doc_settings:readSetting("partial_md5_checksum")
+                        end
+                    end
+                    local map = md5 and loadHardcoverMap()
+                    local entry = map and map[md5]
+                    self_ref:showHardcoverReviewQR(entry and entry.slug, (entry and entry.title) or title)
+                end,
+            })
+        end
+
         return row
     end
 
