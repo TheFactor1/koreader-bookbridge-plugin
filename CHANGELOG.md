@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build abd34c4
+
+- **Fixed: "Review on Hardcover" kept showing a search page instead of
+  the actual book, for books already matched to Hardcover.** Those books
+  were matched before this plugin started caching a direct link at match
+  time, so the lookup always came up empty. It now fetches the link live
+  the first time you use it on such a book and remembers it after that.
+- **The search fallback now includes the author, not just the title** --
+  a title-only search for something like "Dune" was too ambiguous to be
+  useful on its own.
+
 ## 2026-09-13 — build 84695a7
 
 - **New: "Review on Hardcover" on a book's long-press menu.** Long-press
