@@ -9598,6 +9598,37 @@ end
 -- guaranteed) falls back to trusting the flag alone rather than re-syncing
 -- forever over a date it can never match.
 
+-- A push or write that failed because the device simply had no network is
+-- not worth a dialog: the record stays pending and the next close/resume
+-- retries it. Only an error Hardcover itself reported (a missing edition
+-- page count, a rejected token) means something a person has to act on.
+-- Without this split, the "tell me when it can't sync" behaviour turns
+-- into one popup per book every time Wi-Fi is asleep -- which is most of
+-- the time on a Kindle mid-book.
+--
+-- Placement matters here in a way it doesn't for most helpers in this
+-- file: this must sit before its first caller (writeHardcoverFinish,
+-- right below), not just anywhere in the file. It used to live much
+-- further down, past several functions that call it -- a `local function`
+-- is only visible to code that comes AFTER it in the same chunk, so every
+-- call site above its old position was silently resolving to an undefined
+-- global instead, meaning any real Hardcover failure (a genuinely offline
+-- Kindle, say -- exactly the case that surfaced this) crashed the
+-- Trapper:wrap coroutine outright instead of retrying quietly. Confirmed
+-- by reproducing the exact shape in isolation: a function defined after
+-- the code that calls it throws "attempt to call a nil value", not a
+-- forward-reference.
+local function hardcoverErrorIsTransient(err)
+    if type(err) ~= "string" then return true end
+    local e = err:lower()
+    return e:find("request failed", 1, true) ~= nil
+        or e:find("unreachable", 1, true) ~= nil
+        or e:find("resolution", 1, true) ~= nil
+        or e:find("timed out", 1, true) ~= nil
+        or e:find("timeout", 1, true) ~= nil
+        or e:find("connection", 1, true) ~= nil
+end
+
 -- The actual Hardcover write, given an answer already recorded in
 -- entry.finish_answer. Shared by the moment right after syncHardcoverFinish
 -- records that answer and by a later silent retry -- confirmed live this
@@ -9632,7 +9663,6 @@ function Bookbridge:writeHardcoverFinish(md5, rec, entry, map)
             self:showAfterCloseNotice(answer.rating
                 and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(answer.rating))
                 or T(_("Hardcover: \"%1\" marked Read."), title))
-            self:showHardcoverReviewQR(entry.book_id, title)
         else
             debugLog("[hc] mark-finished failed for " .. tostring(title) .. ": " .. tostring(err) ..
                 " (transient=" .. tostring(hardcoverErrorIsTransient(err)) .. ")")
@@ -9645,34 +9675,35 @@ function Bookbridge:writeHardcoverFinish(md5, rec, entry, map)
     end)
 end
 
--- A one-tap-to-dismiss QR code straight to the book's own Hardcover page,
--- shown right after a book is confirmed marked Read -- Matt's idea, so a
--- fuller review (written on Hardcover's own page, not KOReader's Book
--- Status field) is one phone-camera scan away instead of typing the title
--- into the Hardcover app by hand. Fired exactly once per genuine finish:
--- writeHardcoverFinish only reaches its "ok" branch (where this is called
--- from) the first time a given rec.finished_date syncs, never on a retry
--- of one already marked finished_synced.
+-- A one-tap-to-dismiss QR code pointing at a way to review this book on
+-- Hardcover -- Matt's idea, so a fuller review (written on Hardcover's own
+-- page, not KOReader's Book Status field) is one phone-camera scan away
+-- instead of typing the title into the Hardcover app by hand.
 --
--- Silent on any failure to find a slug (offline by the time this second
--- request goes out, a Hardcover hiccup, whatever): the Read status and any
--- rating/review already landed by this point regardless, so a missing QR
--- is a bonus not delivered, never worth an error notice of its own.
+-- Deliberately does NO network work of its own and never waits on whether
+-- the Read status has actually made it to Hardcover yet: Matt's own
+-- Kindles routinely finish a book with no signal at all, and the write
+-- that would confirm the sync can take anywhere from instant to "whenever
+-- it next reaches wifi." Reviewing a book on Hardcover never required it
+-- to be marked Read first anyway, so there was nothing to actually wait on.
+--
+-- slug is whatever resolveHardcoverMatch already cached on the map entry
+-- the FIRST time this book was ever matched (best-effort, may be nil --
+-- offline at match time too, or matched through the manual review-list
+-- picker, which doesn't fetch one). With it: a direct link to the book's
+-- own page. Without it: hardcover.app's search page, which needs no
+-- Hardcover API call at all -- confirmed live, `/search?q=...` renders
+-- results straight from the URL -- so this always has something to show,
+-- entirely from data already sitting on the device.
 --
 -- 15s timeout rather than none: this is a modal (tap or any key dismisses
--- it) fired asynchronously after the book was already closed, so with no
--- timeout at all it would sit blocking whatever Matt does next -- opening
--- another book, say -- for as long as he doesn't happen to notice it.
-function Bookbridge:showHardcoverReviewQR(book_id, title)
-    if not book_id then return end
-    local token = self.hardcover_token
-    local slug, err = doHardcoverGetBookSlug(token, book_id)
-    if not slug then
-        debugLog("[hc] review-QR: no slug for book_id " .. tostring(book_id) .. " (" .. tostring(err) .. ")")
-        return
-    end
-    local url = "https://hardcover.app/books/" .. slug
-    debugLog("[hc] review-QR: " .. url .. " for " .. tostring(title))
+-- it) fired right as a book closes, so with no timeout at all it would sit
+-- blocking whatever Matt does next -- opening another book, say -- for as
+-- long as he doesn't happen to notice it.
+function Bookbridge:showHardcoverReviewQR(slug, title)
+    local url = slug and ("https://hardcover.app/books/" .. slug)
+        or ("https://hardcover.app/search?q=" .. socketurl.escape(title or ""))
+    debugLog("[hc] review-QR: " .. url)
     local Screen = require("device").screen
     local side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.7)
     UIManager:show(QRMessage:new{
@@ -9699,7 +9730,22 @@ end
 function Bookbridge:syncHardcoverFinish(md5, rec, entry, map)
     entry.finish_answer = { rating = rec.koreader_rating, review = rec.koreader_review }
     entry.finish_answer_date = rec.finished_date
+    -- The QR is shown here, before the write below even starts, not from
+    -- writeHardcoverFinish on success -- see showHardcoverReviewQR's own
+    -- comment for why. Guarded by its own date-stamped flag, separate from
+    -- finish_answer_date: writeHardcoverFinish gets retried on every close
+    -- until it succeeds (offline, a Hardcover hiccup, whatever), and
+    -- without this the QR would pop up again on every one of those retries
+    -- -- exactly the repeated-popup bug already fixed once for the old
+    -- interactive dialog.
+    local already_shown = entry.finish_qr_shown_date == rec.finished_date
+    if not already_shown then
+        entry.finish_qr_shown_date = rec.finished_date
+    end
     map[md5] = entry; saveHardcoverMap(map)
+    if not already_shown then
+        self:showHardcoverReviewQR(entry.slug, entry.title or rec.title)
+    end
     self:writeHardcoverFinish(md5, rec, entry, map)
 end
 
@@ -9825,23 +9871,6 @@ end
 -- and +3 s after waiting for the panel's own refresh to finish: a widget
 -- painted on top and refreshed alone did not reach either device's panel,
 -- while a repaint from the home screen up always did.
--- A push that failed because the device simply had no network is not worth a
--- dialog: the record stays pending and the next close/resume retries it. Only
--- an error Hardcover itself reported (a missing edition page count, a rejected
--- token) means something a person has to act on. Without this split, the
--- "tell me when it can't sync" behaviour turns into one popup per book every
--- time Wi-Fi is asleep -- which is most of the time on this device.
-local function hardcoverErrorIsTransient(err)
-    if type(err) ~= "string" then return true end
-    local e = err:lower()
-    return e:find("request failed", 1, true) ~= nil
-        or e:find("unreachable", 1, true) ~= nil
-        or e:find("resolution", 1, true) ~= nil
-        or e:find("timed out", 1, true) ~= nil
-        or e:find("timeout", 1, true) ~= nil
-        or e:find("connection", 1, true) ~= nil
-end
-
 -- Shared across every corner notice shown below, so a burst of them (several
 -- pending pushes resolving right after resume, say) stacks upward from the
 -- bottom-left corner instead of each one replacing the last -- otherwise an
@@ -10033,6 +10062,15 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
     local map = loadHardcoverMap()
     if book_id and confident then
         map[md5] = { book_id = book_id, title = ft, decision = "sync", edition_id = edition and edition.id }; saveHardcoverMap(map)
+        -- Fetched once, right here, rather than at finish time: this runs
+        -- the FIRST time this book is ever matched, whether or not it's
+        -- finished yet, so by the time it eventually IS finished (maybe
+        -- days later, maybe with no network at all at that moment) the
+        -- direct review link is already sitting in the map, not something
+        -- that still needs asking Hardcover for. Best-effort: a failure
+        -- here just means the finish-time QR falls back to a search link
+        -- instead of the exact one -- never worth its own error notice.
+        map[md5].slug = doHardcoverGetBookSlug(token, book_id); saveHardcoverMap(map)
         debugLog(string.format("[hc] auto-matched %s -> %s by %s", tostring(rec.title), tostring(ft), tostring(fa)))
         -- A book matched for the first time on the SAME sync that finished
         -- it (a short book read start to finish, say) must go through the
