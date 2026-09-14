@@ -6189,10 +6189,20 @@ end
 --
 -- Returns slug (nil if nothing usable was found), title (the best
 -- candidate's own title when one was found, otherwise whatever was
--- passed in), and is_guess (true whenever the returned slug came from
--- this popularity tiebreak rather than an exact identifier hit -- callers
--- use this to flag the result as unconfirmed rather than presenting a
--- guess as certain).
+-- passed in), is_guess (true whenever the returned slug came from this
+-- popularity tiebreak rather than an exact identifier hit -- callers use
+-- this to flag the result as unconfirmed rather than presenting a guess
+-- as certain), and -- ONLY when is_guess is false, i.e. this genuinely IS
+-- a confident match -- book_id and edition_id, so a caller that wants to
+-- (checkHardcoverFinishedBook's automatic pass does; the manual
+-- long-press action doesn't) can complete a REAL match instead of only
+-- linking to one. Without this, a book Hardcover was actually sure about
+-- would get the exact same "just a guess, parked, never retried" fate as
+-- one it genuinely couldn't place -- confirmed live this was happening:
+-- books that used to auto-resolve moments after finishing (the search
+-- behind the guess is often exactly what would have confirmed the real
+-- match too) stopped doing that entirely once a parked "review" entry
+-- stopped being automatically retried.
 --
 -- Cached in memory per md5 (self._hc_review_guess_cache, cleared on
 -- restart) so asking twice for the same still-unmatched book -- another
@@ -6206,20 +6216,24 @@ function Bookbridge:bestGuessHardcoverReviewLink(md5, title, author, identifiers
     if not cache then cache = {}; self._hc_review_guess_cache = cache end
     if md5 and cache[md5] then
         local c = cache[md5]
-        return c.slug, c.title, c.is_guess
+        return c.slug, c.title, c.is_guess, c.book_id, c.edition_id
     end
 
     local Trapper = require("ui/trapper")
-    local completed, top_id, ft, _fa, _err, ranked, confident = Trapper:dismissableRunInSubprocess(function()
+    local completed, top_id, ft, _fa, _err, ranked, confident, _unreachable, edition = Trapper:dismissableRunInSubprocess(function()
         return doHardcoverFindBook(self.hardcover_token, title, author, self.hardcover_language, identifiers)
     end, {})
     if not completed then return nil, title, true end
 
-    local best_id, best_title, is_guess = top_id, ft, not confident
+    local best_id, best_title, best_edition, is_guess = top_id, ft, edition, not confident
     if type(ranked) == "table" and ranked[1] then
         table.sort(ranked, function(a, b) return (a.users or 0) > (b.users or 0) end)
         if ranked[1].id ~= top_id then
-            best_id, best_title, is_guess = ranked[1].id, ranked[1].title, true
+            -- A DIFFERENT candidate winning on readers alone is exactly
+            -- what is_guess=true means -- doHardcoverFindBook never
+            -- vouched for this one, so its edition (needed for a real
+            -- sync's page-count progress) isn't trustworthy either.
+            best_id, best_title, best_edition, is_guess = ranked[1].id, ranked[1].title, nil, true
         end
     end
 
@@ -6233,8 +6247,16 @@ function Bookbridge:bestGuessHardcoverReviewLink(md5, title, author, identifiers
     end, {})
     local slug = slug_completed and fetched_slug or nil
     local final_title = best_title or title
-    if md5 then cache[md5] = { slug = slug, title = final_title, is_guess = is_guess } end
-    return slug, final_title, is_guess
+    -- book_id/edition_id only travel back out when is_guess is false --
+    -- gated here, not left to every caller to remember to check, so a
+    -- guessed candidate can never accidentally be mistaken for one safe
+    -- to complete a real sync from.
+    local out_book_id = (not is_guess) and best_id or nil
+    local out_edition_id = (not is_guess) and best_edition and best_edition.id or nil
+    if md5 then
+        cache[md5] = { slug = slug, title = final_title, is_guess = is_guess, book_id = out_book_id, edition_id = out_edition_id }
+    end
+    return slug, final_title, is_guess, out_book_id, out_edition_id
 end
 
 function Bookbridge:hardcoverSetStatus(book_id, status_id)
@@ -10305,7 +10327,33 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
                     map[md5] = entry; saveHardcoverMap(map)
                     local Trapper = require("ui/trapper")
                     Trapper:wrap(function()
-                        local slug, best_title, is_guess = self:bestGuessHardcoverReviewLink(md5, entry.title or rec.title, rec.author, rec.identifiers)
+                        local slug, best_title, is_guess, best_book_id, best_edition_id =
+                            self:bestGuessHardcoverReviewLink(md5, entry.title or rec.title, rec.author, rec.identifiers)
+                        if best_book_id then
+                            -- bestGuessHardcoverReviewLink only ever hands
+                            -- back a book_id when the search was genuinely
+                            -- confident (is_guess false) -- Hardcover WAS
+                            -- sure about this book, so complete a REAL
+                            -- match (progress + rating/review sync)
+                            -- instead of leaving it as only a guess link.
+                            -- Without this, a book Hardcover is confident
+                            -- about would get stuck in Review matches
+                            -- forever right alongside one it genuinely
+                            -- couldn't place -- confirmed live this
+                            -- regressed the "auto-resolves moments after
+                            -- finishing" behavior several books showed
+                            -- before the parked-as-review fix above, since
+                            -- a parked "review" entry is never
+                            -- automatically retried again.
+                            entry.book_id = best_book_id
+                            entry.edition_id = best_edition_id
+                            entry.slug = slug
+                            entry.decision = "sync"
+                            entry.finish_answer = { rating = rec.koreader_rating, review = rec.koreader_review }
+                            entry.finish_answer_date = rec.finished_date
+                            map[md5] = entry; saveHardcoverMap(map)
+                            self:writeHardcoverFinish(md5, rec, entry, map)
+                        end
                         self:showHardcoverReviewQR(slug, best_title, rec.author, is_guess)
                     end)
                     return true
