@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 29d7a78
+
+- **"Review on Hardcover" now finds the right book even when it was never
+  matched at all**, instead of just showing a search page. When there's no
+  recorded match, it searches Hardcover live and links straight to
+  whichever candidate has the most readers/reviews -- the real entry
+  reliably has far more than any near-duplicate, so this is usually right.
+  This doesn't change which book gets your reading progress or ratings
+  synced -- only which page one tap opens.
+
 ## 2026-09-13 — build d6e8413
 
 - **Fixed: finishing a book could still show a search page instead of the
