@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build ca97ea4
+
+- **The finish dialog is tap-anywhere-to-dismiss on the phone/button
+  version too now**, not just the plain Kindle QR version -- tapping the
+  buttons still works exactly as before, tapping anywhere else now closes
+  it too.
+- **Stays up longer**: 15s -> 30s.
+
 ## 2026-09-13 — build bf7c156
 
 - **The finish message now includes a random quote**, picked from a small
