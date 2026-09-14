@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 3e79f6b
+
+- **Fixed: the review popup could fire twice for the same book.** Caught
+  live -- a book that got the new "best guess" popup would sometimes show
+  it again moments later once it resolved to a real, confirmed match. Now
+  it only ever shows once per finish, guess or confirmed.
+
 ## 2026-09-13 — build cabcb5b
 
 Five follow-ups in one build:
