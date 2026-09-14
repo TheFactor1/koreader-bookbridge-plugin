@@ -2273,9 +2273,17 @@ local function doHardcoverFindBook(token, title, author, lang, identifiers)
         and ((surname and chosen.author_hit ~= nil) or (not surname and (chosen.users or 0) >= 50))
 
     -- The full ranked list travels along so the review list can offer the
-    -- alternatives; confidence is the sixth value.
+    -- alternatives; confidence is the sixth value. users (readers/shelved
+    -- count) rides along too -- not read by the manual review picker, only
+    -- by the "no confident match yet, but link somewhere useful anyway"
+    -- fallback in registerFileDialogButtons, which re-sorts purely by this
+    -- rather than the blended title/author/compilation score above: a good
+    -- proxy for "which of these is actually the real book" even when the
+    -- match isn't firm enough to trust for automatic progress/rating sync.
     local ranked = {}
-    for i2, c in ipairs(candidates) do ranked[i2] = { id = c.id, title = c.title, author = c.author_hit or c.names[1] } end
+    for i2, c in ipairs(candidates) do
+        ranked[i2] = { id = c.id, title = c.title, author = c.author_hit or c.names[1], users = c.users or 0 }
+    end
 
     -- 3. Not sure? Ask Open Library for the work by title+author and let its
     -- ISBNs settle it on Hardcover. Only its own exact-title, author-matching
@@ -3122,8 +3130,7 @@ function Bookbridge:registerFileDialogButtons()
         -- via the file's own partial_md5_checksum -- the same key
         -- captureReadingProgress reads from a LIVE ReaderUI's doc_settings,
         -- here via DocSettings:open() instead since this book may not be
-        -- open at all), the exact same direct review-editor link; without
-        -- one, the exact same title-and-author search fallback.
+        -- open at all), the exact same direct review-editor link.
         if self_ref.hardcover_token and self_ref.hardcover_token ~= "" then
             table.insert(row, {
                 text = _("Review on Hardcover"),
@@ -3140,6 +3147,12 @@ function Bookbridge:registerFileDialogButtons()
                     local map = md5 and loadHardcoverMap()
                     local entry = map and map[md5]
                     if entry and entry.title then title = entry.title end
+
+                    if entry and entry.slug then
+                        self_ref:showHardcoverReviewQR(entry.slug, title, author)
+                        return
+                    end
+
                     -- A book matched to Hardcover before this plugin started
                     -- caching a slug at match time has book_id but no slug
                     -- yet -- confirmed live: Matt's already-matched books
@@ -3150,7 +3163,7 @@ function Bookbridge:registerFileDialogButtons()
                     -- waiting on, so a live lookup here is worth doing --
                     -- and worth caching back onto the map so it's instant
                     -- next time, same as a freshly-matched book already is.
-                    if entry and entry.book_id and not entry.slug then
+                    if entry and entry.book_id then
                         local Trapper = require("ui/trapper")
                         Trapper:wrap(function()
                             local completed, fetched_slug = Trapper:dismissableRunInSubprocess(function()
@@ -3163,7 +3176,42 @@ function Bookbridge:registerFileDialogButtons()
                         end)
                         return
                     end
-                    self_ref:showHardcoverReviewQR(entry and entry.slug, title, author)
+
+                    -- No recorded Hardcover match at all -- never matched,
+                    -- or sitting in "review" because the auto-matcher wasn't
+                    -- confident. Matt's own idea: rather than a bare search
+                    -- query, search live and link straight to whichever
+                    -- candidate has the most readers/reviews -- Hardcover's
+                    -- near-empty duplicate entries have a handful where the
+                    -- real one has thousands, the same signal
+                    -- doHardcoverFindBook already leans on (as one factor
+                    -- among several) to judge auto-sync confidence. Here it's
+                    -- used alone, as a tiebreak among plausible candidates,
+                    -- since the bar for "worth opening to review" is much
+                    -- lower than "safe to auto-sync progress and ratings to."
+                    -- Deliberately does NOT record anything onto the
+                    -- Hardcover map or touch sync/decision state -- only
+                    -- which page this one tap opens.
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function()
+                        local completed, top_id, ft, _fa, _err, ranked = Trapper:dismissableRunInSubprocess(function()
+                            return doHardcoverFindBook(self_ref.hardcover_token, title, author, self_ref.hardcover_language)
+                        end, _("Looking up the review page..."))
+                        if not completed then return end
+                        local best_id, best_title = top_id, ft
+                        if type(ranked) == "table" and ranked[1] then
+                            table.sort(ranked, function(a, b) return (a.users or 0) > (b.users or 0) end)
+                            best_id, best_title = ranked[1].id, ranked[1].title
+                        end
+                        if not best_id then
+                            self_ref:showHardcoverReviewQR(nil, title, author)
+                            return
+                        end
+                        local slug_completed, fetched_slug = Trapper:dismissableRunInSubprocess(function()
+                            return doHardcoverGetBookSlug(self_ref.hardcover_token, best_id)
+                        end, {})
+                        self_ref:showHardcoverReviewQR(slug_completed and fetched_slug or nil, best_title or title, author)
+                    end)
                 end,
             })
         end
