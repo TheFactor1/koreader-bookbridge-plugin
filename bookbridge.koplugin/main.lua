@@ -10430,18 +10430,32 @@ function Bookbridge:processHardcoverPending()
                 -- live this left the automatic "finished a book" QR stuck on
                 -- the search fallback forever for any such book, since the
                 -- finish-time QR deliberately never does its own network
-                -- work. Doing it here instead means it costs nothing when
-                -- offline (never runs) and nothing extra once it lands (runs
-                -- once per book, ever) -- by the time this book is actually
-                -- finished, likely much later, the slug is already cached
-                -- from an ordinary push like this one.
-                if not entry.slug then
+                -- work. Doing it here instead costs nothing when offline
+                -- (never runs) and nothing once it lands.
+                --
+                -- Capped at 3 tries, not unconditional -- "once it lands"
+                -- only covers the success case. A book whose slug fetch
+                -- keeps failing (the book got deleted on Hardcover, say)
+                -- would otherwise retry on literally every single push for
+                -- as long as it's being read, which can be weeks -- never
+                -- an extra radio wake by itself (it's piggybacked on a push
+                -- that was already happening), but still a real, avoidable
+                -- extra request every close for something that's only ever
+                -- cosmetic. The manual "Review on Hardcover" long-press
+                -- action still retries independently any time, uncapped,
+                -- same as it always has -- this cap is only for the
+                -- automatic, unattended path.
+                if not entry.slug and (entry.slug_backfill_tries or 0) < 3 then
                     local slug_completed, fetched_slug = Trapper:dismissableRunInSubprocess(function()
                         return doHardcoverGetBookSlug(token, entry.book_id)
                     end, {})
                     if slug_completed and fetched_slug then
-                        entry.slug = fetched_slug; map[md5] = entry; saveHardcoverMap(map)
+                        entry.slug = fetched_slug; entry.slug_backfill_tries = nil
+                        map[md5] = entry; saveHardcoverMap(map)
                         debugLog("[hc] backfilled slug for " .. tostring(entry.title) .. ": " .. fetched_slug)
+                    else
+                        entry.slug_backfill_tries = (entry.slug_backfill_tries or 0) + 1
+                        map[md5] = entry; saveHardcoverMap(map)
                     end
                 end
             else
