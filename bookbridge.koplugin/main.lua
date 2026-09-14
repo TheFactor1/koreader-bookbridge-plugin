@@ -826,6 +826,29 @@ local function saveHardcoverPending(t)
     out:write(JSON.encode(t)); out:close(); return true
 end
 
+local DOWNLOAD_ISBN_HINTS_PATH = DataStorage:getSettingsDir() .. "/shelfmark_download_isbn_hints.json"
+-- Captured once, at Anna's Archive download time (doAnnasFetchIsbn), for a
+-- book that hasn't been opened in KOReader yet and so has no
+-- partial_md5_checksum to key the Hardcover map by. Keyed by absolute file
+-- path instead -- stable from the moment the download completes -- so
+-- captureReadingProgress/deriveFileDialogMetadata can pick it up as a
+-- fallback identifier the first time the file's own metadata comes up
+-- empty. Path -> ISBN-13 string.
+local function loadDownloadIsbnHints()
+    local f = io.open(DOWNLOAD_ISBN_HINTS_PATH, "r")
+    if not f then return {} end
+    local c = f:read("*a"); f:close()
+    if not c or c == "" then return {} end
+    local ok, d = pcall(JSON.decode, c)
+    if ok and type(d) == "table" then return d end
+    return {}
+end
+local function saveDownloadIsbnHints(t)
+    local out = io.open(DOWNLOAD_ISBN_HINTS_PATH, "w")
+    if not out then return false end
+    out:write(JSON.encode(t)); out:close(); return true
+end
+
 local PENDING_NOTIFY_PATH = DataStorage:getSettingsDir() .. "/shelfmark_pending_notify.json"
 
 local function loadPendingNotifyList()
@@ -1387,6 +1410,44 @@ local function doAnnasFetchDownloadUrl(annas_url, download_key, tld, md5, socks5
         return nil, code, decoded.error or _("No download URL in response.")
     end
     return dl_url, code
+end
+
+-- Best-effort ISBN-13 for a just-downloaded Anna's Archive release, off
+-- its own /api/isbn (see annas-archive-api's fetchIsbn). Anna's Archive's
+-- own metadata is often the CLEANEST identifier a book will ever carry --
+-- DeDRM/format conversion routinely strips or mangles whatever the file
+-- itself had -- so this exists to capture it once, right at download
+-- time, rather than hoping it survives into the file KOReader eventually
+-- opens. Never a hard failure: a timeout, a non-200, an unreadable body,
+-- or simply no isbn13 in the response all return nil the same way -- the
+-- caller already treats "no hint" as the ordinary case, not an error.
+local function doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy)
+    local url = annas_url .. "/api/isbn?md5=" .. socketurl.escape(md5)
+        .. "&tld=" .. socketurl.escape(tld or "")
+    local headers = { ["authorization"] = "Bearer " .. (download_key or "") }
+    debugLog("[annas] -> GET " .. url)
+
+    socketutil:set_timeout(10, 30)
+    local sink, sink_table = socketutil.table_sink()
+    local request = { method = "GET", url = url, headers = headers, sink = sink }
+    if socks5_proxy and socks5_proxy ~= "" then
+        local proxy_host, proxy_port = socks5_proxy:match("^([^:]+):(%d+)$")
+        if proxy_host then
+            request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+        end
+    end
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+
+    if not ok or code ~= 200 then
+        debugLog("[annas] isbn lookup failed: " .. tostring(ok and code or "connection error"))
+        return nil
+    end
+    local decode_ok, decoded = pcall(JSON.decode, table.concat(sink_table))
+    if not decode_ok or not decoded or not decoded.isbn13 or decoded.isbn13 == "" then return nil end
+    return decoded.isbn13
 end
 
 -- No socks5_proxy param -- this is a direct request to a public-internet
@@ -3098,6 +3159,15 @@ function Bookbridge:registerFileDialogButtons()
                             local doc_props = doc_settings:readSetting("doc_props")
                             identifiers = doc_props and doc_props.identifiers
                         end
+                    end
+                    -- Falls back to the download-time ISBN hint (see
+                    -- downloadFromAnnasArchive/doAnnasFetchIsbn) when the
+                    -- file has no identifier of its own -- the only source
+                    -- at all for a book that's never been opened in
+                    -- KOReader yet, which has no doc_props to read from.
+                    if (not identifiers or identifiers == "") then
+                        local hint = loadDownloadIsbnHints()[file]
+                        if hint then identifiers = hint end
                     end
                     local map = md5 and loadHardcoverMap()
                     local entry = map and map[md5]
@@ -9484,6 +9554,35 @@ function Bookbridge:downloadFromAnnasArchive(release)
     invalidateBookInfoCache(save_path)
 
     UIManager:show(InfoMessage:new{ text = T(_("Saved to %1"), save_path), timeout = 4 })
+
+    -- Best-effort ISBN capture, scheduled after the fact rather than done
+    -- inline above: this is purely a bonus for later Hardcover matching,
+    -- never something worth delaying "Saved to ..." for. Anna's Archive's
+    -- own metadata is often the cleanest ISBN this book will ever carry --
+    -- DeDRM/format conversion routinely strips or mangles whatever the
+    -- file itself had -- so capturing it now, keyed by save_path since
+    -- KOReader has no partial_md5_checksum for a file it's never opened,
+    -- means the very first match attempt (captureReadingProgress /
+    -- deriveFileDialogMetadata, both fall back to this when the file's own
+    -- identifiers come up empty) already has a real identifier to work
+    -- with instead of a fuzzy title/author guess.
+    if self.annas_url and self.annas_url ~= "" and release.md5 then
+        local annas_url, download_key, tld, socks5_proxy =
+            self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
+        local md5, path = release.md5, save_path
+        UIManager:scheduleIn(0.1, function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
+                local isbn13 = doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy)
+                if isbn13 then
+                    local hints = loadDownloadIsbnHints()
+                    hints[path] = isbn13
+                    saveDownloadIsbnHints(hints)
+                    debugLog("[annas] captured isbn13 " .. isbn13 .. " for " .. path)
+                end
+            end)
+        end)
+    end
 end
 
 -- caller_menu, when given, is the releases_menu this was opened from. It is
@@ -9730,9 +9829,21 @@ function Bookbridge:captureReadingProgress()
     local summary = ui.doc_settings:readSetting("summary") or {}
     local finished_by_status = (summary.status == "complete")
     local finished_by_percent = (type(percent) == "number" and percent >= 0.99)
+    -- Falls back to whatever doAnnasFetchIsbn captured at download time
+    -- (see downloadFromAnnasArchive) when the file's own metadata carries
+    -- no identifier at all -- common after DeDRM/format conversion, which
+    -- routinely strips or mangles an EPUB's own ISBN tag even when Anna's
+    -- Archive's own listing had a clean one. Keyed by the file's path,
+    -- the only stable key available before this device has ever computed
+    -- a partial_md5_checksum for it.
+    local identifiers = props.identifiers
+    if (not identifiers or identifiers == "") and ui.document.file then
+        local hint = loadDownloadIsbnHints()[ui.document.file]
+        if hint then identifiers = hint end
+    end
     local pending = loadHardcoverPending()
     pending[md5] = {
-        title = props.title, author = props.authors, identifiers = props.identifiers,
+        title = props.title, author = props.authors, identifiers = identifiers,
         percent = percent, at = os.time(),
         finished = finished_by_status or finished_by_percent,
         finished_date = summary.modified,
