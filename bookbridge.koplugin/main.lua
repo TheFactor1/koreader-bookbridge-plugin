@@ -10278,10 +10278,30 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
             if rec.finished then
                 local entry = map[md5]
                 local already_shown = entry and entry.finish_qr_shown_date == rec.finished_date
-                if not already_shown and (not entry or entry.decision ~= "sync") then
+                -- decision == "skip" (the user explicitly said never-sync
+                -- for this book) is excluded here too -- confirmed this
+                -- was missing: the guess popup would otherwise fire for a
+                -- book Bookbridge was told to leave alone entirely.
+                if not already_shown and (not entry or (entry.decision ~= "sync" and entry.decision ~= "skip")) then
                     entry = entry or {}
                     entry.title = entry.title or rec.title
                     entry.finish_qr_shown_date = rec.finished_date
+                    -- Parked as "review" -- the exact same terminal state
+                    -- resolveHardcoverMatch already gives any ordinary
+                    -- ambiguous match -- rather than left with no decision
+                    -- at all. Confirmed live this was a real, battery-
+                    -- draining bug: a book with no PRIOR entry kept
+                    -- re-qualifying as processHardcoverPending's own "one
+                    -- unmapped book" on every subsequent close, forever,
+                    -- for as long as it never happened to resolve to
+                    -- something confident -- a fresh live Hardcover
+                    -- search, and the WiFi radio wake that comes with it
+                    -- on a Kindle otherwise mostly asleep, on every single
+                    -- book close, not just this one's. Only defaults it
+                    -- when there's genuinely no decision yet -- an entry
+                    -- already parked as "review" (an ordinary ambiguous
+                    -- match) is left exactly as it was.
+                    entry.decision = entry.decision or "review"
                     map[md5] = entry; saveHardcoverMap(map)
                     local Trapper = require("ui/trapper")
                     Trapper:wrap(function()
