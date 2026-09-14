@@ -10063,6 +10063,28 @@ function Bookbridge:processHardcoverPending()
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
                 self:showAfterCloseNotice(T(_("Hardcover: \"%1\" -- page %2 of %3 (%4%)."),
                     tostring(entry.title), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
+                -- Opportunistic slug backfill, piggybacked on network access
+                -- this push JUST confirmed is working. A book matched before
+                -- this plugin started caching a slug at match time has
+                -- book_id but no slug, and previously never got one at all
+                -- unless someone manually long-pressed its cover -- confirmed
+                -- live this left the automatic "finished a book" QR stuck on
+                -- the search fallback forever for any such book, since the
+                -- finish-time QR deliberately never does its own network
+                -- work. Doing it here instead means it costs nothing when
+                -- offline (never runs) and nothing extra once it lands (runs
+                -- once per book, ever) -- by the time this book is actually
+                -- finished, likely much later, the slug is already cached
+                -- from an ordinary push like this one.
+                if not entry.slug then
+                    local slug_completed, fetched_slug = Trapper:dismissableRunInSubprocess(function()
+                        return doHardcoverGetBookSlug(token, entry.book_id)
+                    end, {})
+                    if slug_completed and fetched_slug then
+                        entry.slug = fetched_slug; map[md5] = entry; saveHardcoverMap(map)
+                        debugLog("[hc] backfilled slug for " .. tostring(entry.title) .. ": " .. fetched_slug)
+                    end
+                end
             else
                 debugLog("[hc] push failed for " .. tostring(entry.title) .. ": " .. tostring(a))
                 if completed and not hardcoverErrorIsTransient(a) then
