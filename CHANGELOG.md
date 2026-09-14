@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build bf7c156
+
+- **The finish message now includes a random quote**, picked from a small
+  bank of public-domain lines (Carroll, Austen, Alcott, Montgomery,
+  Henley, Dickens) alongside the congratulations.
+- **The direct link now goes straight to Hardcover's review editor**
+  (`/books/<slug>/reviews/edit`) instead of the plain book page -- one
+  step closer to actually writing something, whether you scan it or tap
+  it.
+
 ## 2026-09-13 — build a93353e
 
 - **The review QR is smaller and says what it's for.** It now shows a
