@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-13 — build 0cd0342
+
+- **"Review on Hardcover" now uses the book's own ISBN/ASIN when it's
+  known**, for an exact match instead of a fuzzy title/author guess. This
+  metadata was already sitting in the book's own file info -- it just
+  wasn't being passed along to the search yet.
+
 ## 2026-09-13 — build 29d7a78
 
 - **"Review on Hardcover" now finds the right book even when it was never
