@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-14 — build 1100c10
+
+- **New: an ISBN is now captured at download time when downloading
+  through Anna's Archive**, and used as a fallback for Hardcover matching
+  whenever the file's own metadata has none (common after DeDRM/format
+  conversion, which routinely strips it). Needs the companion
+  annas-archive-api service redeployed to actually take effect.
+
 ## 2026-09-13 — build 3e79f6b
 
 - **Fixed: the review popup could fire twice for the same book.** Caught
