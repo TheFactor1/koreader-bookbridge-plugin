@@ -10994,8 +10994,21 @@ function Bookbridge:onCloseConfigMenu()
         -- The module may not have existed at reader-ready (Bookshelf loads it
         -- on first use, and on the desktop that first use WAS this park); hook
         -- it now so the next park is caught by the wrap rather than this path.
-        self:hookBookshelfPark()
         local Park = bookshelfPark()
+        local already_hooked = Park and Park._shelfmark_hooked
+        self:hookBookshelfPark()
+        if already_hooked then return end
+        -- CloseConfigMenu fires on ordinary reader-menu navigation (opening
+        -- the font/page settings, reloading, switching documents), not just
+        -- a genuine bookshelf park -- so once the direct hook above is
+        -- active, a real park is always caught through it and this
+        -- isParked() poll must stop running. Left active it produced
+        -- several false "parked under the shelf" triggers per minute of
+        -- normal reading (2026-09-15), each one wrongly treated as the book
+        -- closing and kicking off a live Hardcover/CWA sync attempt --
+        -- visible to the reader as a disruptive "connection failed" popup
+        -- every time the font/margin panel closed.
+        Park = bookshelfPark()
         if Park and type(Park.isParked) == "function" and Park.isParked() then self:onBookshelfParked() end
     end)
 end
