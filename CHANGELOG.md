@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-15 — build 5ad953d
+
+- **Fix**: adjusting the font or margins mid-read could pop a disruptive
+  "connection failed" notice. The reader's config-menu-close event fires
+  far more broadly than an actual book being parked under the shelf, and
+  a leftover poll for that was firing on every one of those events,
+  wrongly treating ordinary menu navigation as the book closing and
+  kicking off a live sync attempt. Now only a genuine park triggers it.
+
 ## 2026-09-14 — build e917d0c
 
 - **Optimization**: the automatic slug-lookup retry (piggybacked on
