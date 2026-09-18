@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build a9cdaf7
+
+- **Fix**: the Kindle notice was still taking 30-40s to appear even after
+  the last fix confirmed the widget stayed open and the flash was being
+  requested correctly. Turns out requesting the flash only queues it --
+  it doesn't run until KOReader's own UI loop happens to wake up again,
+  which with nothing else going on could take a while. Now forces that
+  queued refresh to actually run right away, and does it immediately when
+  the notice appears instead of waiting a second first.
+
 ## 2026-09-18 — build a4b9476
 
 - **Fix**: found the actual cause of the Kindle notice delay -- the debug
