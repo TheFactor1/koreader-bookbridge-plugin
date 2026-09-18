@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build 0539fab
+
+- **Diagnostics**: the Hardcover after-close notice can take far longer
+  than expected to actually appear on a real Kindle -- past the two
+  repaint retries already built in for a known e-ink driver quirk. Those
+  retries now log whether they ran, whether the notice was still on
+  screen when they did, and whether the repaint itself succeeded, so the
+  next occurrence has real evidence instead of a guess. No behavior
+  change.
+
 ## 2026-09-18 — build a7b0a84
 
 - **Fix**: closing a book on one device, then opening the same book on
