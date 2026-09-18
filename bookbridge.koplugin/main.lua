@@ -10658,12 +10658,24 @@ function Bookbridge:showAfterCloseNotice(text)
         return type(UIManager.isWidgetShown) ~= "function" or UIManager:isWidgetShown(msg)
     end
     -- Kindle: the notice's own refresh reaches the driver and never shows;
-    -- a repaint of the whole stack from the home screen up does.
+    -- a repaint of the whole stack from the home screen up does. Logged
+    -- (2026-09-18) because Matt is seeing the notice take ~25s to actually
+    -- appear on a real Kindle -- far past either scheduled attempt below --
+    -- and there was no evidence of whether they're even firing/succeeding.
+    -- These lines are the evidence: correlate their timestamps against when
+    -- the notice was actually seen on screen.
+    local shown_at = os.time()
     for _unused, delay in ipairs({ 1, 3 }) do
         UIManager:scheduleIn(delay, function()
-            if not still_up() then return end
-            pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
-            UIManager:setDirty("all", "ui")
+            local up = still_up()
+            debugLog(string.format("[hc] notice: kindle repaint attempt +%ss, still_up=%s", tostring(delay), tostring(up)))
+            if not up then return end
+            local ok_r, rerr = pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
+            local ok_d, derr = pcall(function() UIManager:setDirty("all", "ui") end)
+            debugLog(string.format("[hc] notice: kindle repaint attempt +%ss done at +%ss -- refreshWaitForLast=%s%s setDirty=%s%s",
+                tostring(delay), tostring(os.time() - shown_at),
+                tostring(ok_r), ok_r and "" or (" (" .. tostring(rerr) .. ")"),
+                tostring(ok_d), ok_d and "" or (" (" .. tostring(derr) .. ")")))
         end)
     end
     -- Android: the frame carrying the notice is posted (the blits lock and
