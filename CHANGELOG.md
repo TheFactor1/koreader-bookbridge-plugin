@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build 51c5cd8
+
+- **Fix**: the Hardcover after-close notice could take 25-32s to actually
+  appear on a Kindle, confirmed by the diagnostic logging just added --
+  the retries were firing and succeeding on schedule the whole time, but
+  the "fast" refresh mode they used could be silently coalesced by the
+  e-ink driver without actually flashing the screen, no error raised.
+  Switched to KOReader's own escalated refresh mode for exactly this
+  case, which forces the real flash.
+
 ## 2026-09-18 — build 0539fab
 
 - **Diagnostics**: the Hardcover after-close notice can take far longer
