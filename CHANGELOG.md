@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build f94d395
+
+- **Reverted**: builds a7b0a84, 0539fab, and 51c5cd8 (the cross-device
+  progress-push dedup, the Kindle notice-refresh diagnostic logging, and
+  the flashui fix), back to build ef2eeb9. A "notice doesn't show up
+  until I hit the menu" report came in on a different device (Android)
+  than the one those changes targeted (Kindle), with no confirmed link
+  between the two -- reverting the whole set rather than guessing which
+  part, if any, is actually responsible.
+
 ## 2026-09-18 — build 51c5cd8
 
 - **Fix**: the Hardcover after-close notice could take 25-32s to actually
