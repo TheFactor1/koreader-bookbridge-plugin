@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build 1335c18
+
+- **Change**: the Kindle notice's own refresh can report success while
+  the screen still takes ~26s to actually update -- confirmed the delay
+  is happening below anything KOReader's own display code can reach
+  (Amazon's own display layer, not this plugin). Added a direct,
+  lower-level push to the e-ink panel using eips, a stock Kindle tool
+  that bypasses that layer entirely, on top of the existing refresh --
+  Kindle-only, and doesn't change anything if it's not available.
+
 ## 2026-09-18 — build 16b5937
 
 - **Fix**: the last change fixed the real delay (confirmed: the whole
