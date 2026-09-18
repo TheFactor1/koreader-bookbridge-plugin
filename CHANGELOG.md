@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build de4081a
+
+- **Change**: the Kindle notice can still take a while to physically
+  appear -- traced it to something below KOReader's own display APIs
+  (Amazon's own display layer, not this plugin) holding the refresh, past
+  what any of the last three fixes could reach. Rather than keep chasing
+  that, closing a book now shows an immediate generic "syncing" notice
+  riding the screen change that always happens right away when you close
+  a book, so you get instant feedback -- the real page-number notice
+  still follows a couple seconds later once the sync actually confirms.
+
 ## 2026-09-18 — build a9cdaf7
 
 - **Fix**: the Kindle notice was still taking 30-40s to appear even after
