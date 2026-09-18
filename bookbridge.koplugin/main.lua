@@ -3221,6 +3221,57 @@ function Bookbridge:registerFileDialogButtons()
             })
         end
 
+        -- Manual, on-demand counterpart to the automatic progress push
+        -- (2026-09-18): closing a book stopped showing a toast -- it fired
+        -- on every close, right as the reader tears down into FileManager,
+        -- which turned out to be exactly the moment this Kindle's display
+        -- updates unreliably (sometimes instant, sometimes 20-40s later,
+        -- confirmed not fixable from anything running on the device -- see
+        -- the note above the removed call in processHardcoverPending). The
+        -- sync itself was never the problem; only narrating it right at
+        -- that moment was. This is purely local/instant -- reads the map
+        -- and pending files already on disk, no network call -- so tapping
+        -- it, which only happens while actively touching the device, isn't
+        -- vulnerable to the same display issue in the first place.
+        if self_ref.hardcover_token and self_ref.hardcover_token ~= "" then
+            table.insert(row, {
+                text = _("Hardcover sync status"),
+                callback = function()
+                    local title = deriveFileDialogMetadata(file, book_props)
+                    local md5
+                    local ok_ds, DocSettings = pcall(require, "docsettings")
+                    if ok_ds then
+                        local ok_open, doc_settings = pcall(function() return DocSettings:open(file) end)
+                        if ok_open and doc_settings then
+                            md5 = doc_settings:readSetting("partial_md5_checksum")
+                        end
+                    end
+                    local entry = md5 and loadHardcoverMap()[md5]
+                    if entry and entry.title then title = entry.title end
+                    local text
+                    if not entry then
+                        text = T(_("Hardcover: \"%1\" hasn't been matched to a book yet -- close it once to start."), title)
+                    elseif entry.decision == "skip" then
+                        text = T(_("Hardcover: sync is turned off for \"%1\"."), title)
+                    elseif entry.decision == "review" then
+                        text = T(_("Hardcover: \"%1\" is waiting in Review matches -- pick a match to start syncing."), title)
+                    else
+                        local pending_rec = md5 and loadHardcoverPending()[md5]
+                        local still_pending = pending_rec and pending_rec.percent
+                            and (not entry.last_percent or math.abs(entry.last_percent - pending_rec.percent) >= 0.0005)
+                        if still_pending then
+                            text = T(_("Hardcover: \"%1\" has a newer close not synced yet -- try again in a moment."), title)
+                        elseif entry.last_percent then
+                            text = T(_("Hardcover: \"%1\" last synced at %2%."), title, math.floor(entry.last_percent * 100 + 0.5))
+                        else
+                            text = T(_("Hardcover: \"%1\" is matched but hasn't synced any progress yet."), title)
+                        end
+                    end
+                    UIManager:show(InfoMessage:new{ text = text })
+                end,
+            })
+        end
+
         -- Cheap check (no document open) when book_props is already known;
         -- otherwise show the button anyway and let the tap-time fallback
         -- (which does open the document) decide -- see
@@ -10420,8 +10471,25 @@ function Bookbridge:processHardcoverPending()
                 pending[md5] = nil
                 entry.last_percent = rec.percent; map[md5] = entry; saveHardcoverMap(map)
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
-                self:showAfterCloseNotice(T(_("Hardcover: \"%1\" -- page %2 of %3 (%4%)."),
-                    tostring(entry.title), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
+                -- No toast here any more (2026-09-18): this fires on every
+                -- ordinary close, right as the reader tears down into
+                -- FileManager -- exactly the moment this Kindle's display
+                -- layer turned out to update unreliably, sometimes
+                -- instantly and sometimes 20-40s later, confirmed not
+                -- fixable from anything running on the device (tried
+                -- KOReader's own display APIs and a direct kernel-driver
+                -- call that bypasses them entirely -- both showed the
+                -- identical pattern). Comparing against Billiam's
+                -- hardcoverapp.koplugin (the most popular community
+                -- integration) showed it doesn't attempt this either: it
+                -- pushes progress silently on every close and only shows a
+                -- notification from a separate, manually-triggered action
+                -- -- see onHardcoverCheckSyncStatus -- where the user is
+                -- already looking at and touching the device, which is
+                -- exactly the condition that made this reliably fast
+                -- rather than the condition that made it unreliable. The
+                -- push itself is untouched: still happens every close,
+                -- still confirmed by Hardcover, just not narrated.
                 -- Opportunistic slug backfill, piggybacked on network access
                 -- this push JUST confirmed is working. A book matched before
                 -- this plugin started caching a slug at match time has
