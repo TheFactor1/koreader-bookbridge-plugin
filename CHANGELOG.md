@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build 0475deb
+
+- **Fix**: re-applied the Kindle notice-delay fix from build 51c5cd8
+  (reverted a few builds ago alongside an unrelated change, over a report
+  that turned out to be about the Android app's own separate issue).
+  Confirmed the Kindle delay is real and this is the right fix for it --
+  see build 51c5cd8's entry below for the detail. Does not bring back
+  build a7b0a84's cross-device progress-push change, which is unrelated.
+
 ## 2026-09-18 — build f94d395
 
 - **Reverted**: builds a7b0a84, 0539fab, and 51c5cd8 (the cross-device
