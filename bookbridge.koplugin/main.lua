@@ -10659,11 +10659,21 @@ function Bookbridge:showAfterCloseNotice(text)
     end
     -- Kindle: the notice's own refresh reaches the driver and never shows;
     -- a repaint of the whole stack from the home screen up does. Logged
-    -- (2026-09-18) because Matt is seeing the notice take ~25s to actually
-    -- appear on a real Kindle -- far past either scheduled attempt below --
-    -- and there was no evidence of whether they're even firing/succeeding.
-    -- These lines are the evidence: correlate their timestamps against when
-    -- the notice was actually seen on screen.
+    -- (2026-09-18) because Matt was seeing the notice take 25-32s to
+    -- actually appear on a real Kindle -- far past either scheduled attempt
+    -- below. The log proved these retries fire on time, find the widget
+    -- still up, and both refreshWaitForLast and setDirty report success --
+    -- every time -- yet the delay was real (confirmed twice, two different
+    -- books). So the calls were never the problem; "ui" was: it's KOReader's
+    -- FAST/partial refresh mode, which this Kindle's e-ink driver can
+    -- coalesce or defer instead of actually flashing, silently, with no
+    -- error to catch. "flashui" is the first-class escalation of exactly
+    -- that mode for exactly this case (see UIManager's own promotion logic,
+    -- which upgrades repeated plain "ui" refreshes to "flashui" for the same
+    -- reason) -- forces the real flash "ui" was quietly skipping, still
+    -- scoped to a "ui"-tier refresh rather than a disruptive full-screen
+    -- "full". (G_reader_settings avoid_flashing_ui, which silently downgrades
+    -- flashui back to ui, is not set on Matt's Kindle -- confirmed live.)
     local shown_at = os.time()
     for _unused, delay in ipairs({ 1, 3 }) do
         UIManager:scheduleIn(delay, function()
@@ -10671,8 +10681,8 @@ function Bookbridge:showAfterCloseNotice(text)
             debugLog(string.format("[hc] notice: kindle repaint attempt +%ss, still_up=%s", tostring(delay), tostring(up)))
             if not up then return end
             local ok_r, rerr = pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
-            local ok_d, derr = pcall(function() UIManager:setDirty("all", "ui") end)
-            debugLog(string.format("[hc] notice: kindle repaint attempt +%ss done at +%ss -- refreshWaitForLast=%s%s setDirty=%s%s",
+            local ok_d, derr = pcall(function() UIManager:setDirty("all", "flashui") end)
+            debugLog(string.format("[hc] notice: kindle repaint attempt +%ss done at +%ss -- refreshWaitForLast=%s%s setDirty(flashui)=%s%s",
                 tostring(delay), tostring(os.time() - shown_at),
                 tostring(ok_r), ok_r and "" or (" (" .. tostring(rerr) .. ")"),
                 tostring(ok_d), ok_d and "" or (" (" .. tostring(derr) .. ")")))
