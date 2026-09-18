@@ -11098,6 +11098,32 @@ function Bookbridge:onCloseDocument()
         -- notice. Without one, wait for the file manager to finish painting.
         local ui = self.ui
         local md5 = ui and ui.doc_settings and ui.doc_settings:readSetting("partial_md5_checksum")
+        -- Immediate, generic placeholder -- shown synchronously, in this
+        -- same tick, specifically to ride the reader -> FileManager
+        -- transition's own repaint. That transition is never slow (the file
+        -- browser always appears right away); a refresh requested
+        -- afterward is what's been the problem -- confirmed live
+        -- 2026-09-18, even the immediate/+0s attempt in showAfterCloseNotice
+        -- (refreshWaitForLast + setDirty(flashui) + forceRePaint, all
+        -- reporting success) still sat unshown on Matt's Kindle for
+        -- 30-40s. This can't carry the real page number yet (that needs the
+        -- network round trip below), but it gives instant feedback that
+        -- something is happening, for free, off a refresh that was already
+        -- about to happen regardless. The real notice still follows a few
+        -- seconds later exactly as before once the push confirms -- this
+        -- doesn't replace it, just stops the wait from being silent.
+        -- Mirrors processHardcoverPending's own two relevant branches (skip
+        -- a same-position repush; otherwise attempt one) so this doesn't
+        -- flash "syncing" for a close that won't actually push anything.
+        do
+            local map_entry = md5 and loadHardcoverMap()[md5]
+            local rec = md5 and loadHardcoverPending()[md5]
+            local already_pushed = map_entry and map_entry.last_percent and rec and rec.percent
+                and math.abs(map_entry.last_percent - rec.percent) < 0.0005
+            if map_entry and map_entry.decision == "sync" and map_entry.book_id and not already_pushed then
+                self:showAfterCloseNotice(T(_("Hardcover: syncing \"%1\"..."), tostring(map_entry.title or rec.title or _("this book"))))
+            end
+        end
         local warm = md5 and self._hc_prefetch and self._hc_prefetch[md5]
         if warm then
             debugLog("[hc] close: prefetched match on hand, deciding next tick")
