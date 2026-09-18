@@ -10672,31 +10672,34 @@ function Bookbridge:showAfterCloseNotice(text)
     -- tick" -- its own doc comment) is the direct fix: it's what actually
     -- executes the refresh setDirty only queued.
     --
-    -- Matt's own suggestion, and the right one: don't wait a second to try
-    -- this at all. There's no reason left to -- forceRePaint makes the
+    -- Don't wait a second to try this at all -- forceRePaint makes the
     -- attempt synchronous, and dismiss-grace already protects the widget
     -- from the reader -> FileManager transition's queued input -- so this
-    -- runs once immediately (+0s), right on the close itself, with the old
-    -- +1s/+3s scheduled attempts kept only as a safety net in case
-    -- something about the widget isn't fully settled at the very instant
-    -- it's shown.
+    -- runs once, immediately (+0s), right on the close itself.
+    --
+    -- The +1s/+3s scheduled follow-ups that used to run after this (kept
+    -- as a "safety net" while the +0s attempt's own reliability was still
+    -- unproven) are gone as of 2026-09-18: confirmed live that the +0s
+    -- attempt alone reliably produces a real flash every time now, and
+    -- since onCloseDocument's immediate placeholder notice runs this exact
+    -- same block too, keeping three attempts per notice meant SIX real
+    -- screen flashes for one ordinary book close (three for the
+    -- placeholder, three for the real notice moments later) -- confirmed
+    -- live, Matt counted five. One attempt per notice is what was actually
+    -- needed; the other two were never a safety net once flashui+
+    -- forceRePaint were both in place, just extra flashing.
     local shown_at = os.time()
-    local function kindleRepaintAttempt(tag)
-        local up = still_up()
-        debugLog(string.format("[hc] notice: kindle repaint attempt +%s, still_up=%s", tag, tostring(up)))
-        if not up then return end
+    local up = still_up()
+    debugLog(string.format("[hc] notice: kindle repaint attempt +0s, still_up=%s", tostring(up)))
+    if up then
         local ok_r, rerr = pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
         local ok_d, derr = pcall(function() UIManager:setDirty("all", "flashui") end)
         local ok_f, ferr = pcall(function() UIManager:forceRePaint() end)
-        debugLog(string.format("[hc] notice: kindle repaint attempt +%s done at +%ss -- refreshWaitForLast=%s%s setDirty(flashui)=%s%s forceRePaint=%s%s",
-            tag, tostring(os.time() - shown_at),
+        debugLog(string.format("[hc] notice: kindle repaint attempt +0s done at +%ss -- refreshWaitForLast=%s%s setDirty(flashui)=%s%s forceRePaint=%s%s",
+            tostring(os.time() - shown_at),
             tostring(ok_r), ok_r and "" or (" (" .. tostring(rerr) .. ")"),
             tostring(ok_d), ok_d and "" or (" (" .. tostring(derr) .. ")"),
             tostring(ok_f), ok_f and "" or (" (" .. tostring(ferr) .. ")")))
-    end
-    kindleRepaintAttempt("0s")
-    for _unused, delay in ipairs({ 1, 3 }) do
-        UIManager:scheduleIn(delay, function() kindleRepaintAttempt(tostring(delay) .. "s") end)
     end
     -- Android: the frame carrying the notice is posted (the blits lock and
     -- post fine) but not composited until a touch or a window event. The
@@ -11098,32 +11101,16 @@ function Bookbridge:onCloseDocument()
         -- notice. Without one, wait for the file manager to finish painting.
         local ui = self.ui
         local md5 = ui and ui.doc_settings and ui.doc_settings:readSetting("partial_md5_checksum")
-        -- Immediate, generic placeholder -- shown synchronously, in this
-        -- same tick, specifically to ride the reader -> FileManager
-        -- transition's own repaint. That transition is never slow (the file
-        -- browser always appears right away); a refresh requested
-        -- afterward is what's been the problem -- confirmed live
-        -- 2026-09-18, even the immediate/+0s attempt in showAfterCloseNotice
-        -- (refreshWaitForLast + setDirty(flashui) + forceRePaint, all
-        -- reporting success) still sat unshown on Matt's Kindle for
-        -- 30-40s. This can't carry the real page number yet (that needs the
-        -- network round trip below), but it gives instant feedback that
-        -- something is happening, for free, off a refresh that was already
-        -- about to happen regardless. The real notice still follows a few
-        -- seconds later exactly as before once the push confirms -- this
-        -- doesn't replace it, just stops the wait from being silent.
-        -- Mirrors processHardcoverPending's own two relevant branches (skip
-        -- a same-position repush; otherwise attempt one) so this doesn't
-        -- flash "syncing" for a close that won't actually push anything.
-        do
-            local map_entry = md5 and loadHardcoverMap()[md5]
-            local rec = md5 and loadHardcoverPending()[md5]
-            local already_pushed = map_entry and map_entry.last_percent and rec and rec.percent
-                and math.abs(map_entry.last_percent - rec.percent) < 0.0005
-            if map_entry and map_entry.decision == "sync" and map_entry.book_id and not already_pushed then
-                self:showAfterCloseNotice(T(_("Hardcover: syncing \"%1\"..."), tostring(map_entry.title or rec.title or _("this book"))))
-            end
-        end
+        -- An earlier build (2026-09-18) added a synchronous placeholder
+        -- notice right here, to give instant feedback during what was then
+        -- a genuine 25-40s wait for the real one. That wait turned out to
+        -- be a missing UIManager:forceRePaint() call in showAfterCloseNotice
+        -- (see its own comment) -- with that actually fixed, the real
+        -- notice now lands within a few seconds of closing, same as any
+        -- ordinary network round trip, and the placeholder was removed:
+        -- confirmed live it was adding its own extra flash on top of the
+        -- real notice's, for no benefit once the wait it was covering for
+        -- no longer exists.
         local warm = md5 and self._hc_prefetch and self._hc_prefetch[md5]
         if warm then
             debugLog("[hc] close: prefetched match on hand, deciding next tick")
