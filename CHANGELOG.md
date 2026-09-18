@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build a7b0a84
+
+- **Fix**: closing a book on one device, then opening the same book on
+  another (already caught up to that position by whatever syncs your
+  actual reading progress) could push the same page to Hardcover a second
+  time and show a redundant notice, even though nothing had actually
+  advanced. Each device only tracks its own last push, so it couldn't see
+  what another device had already recorded -- now it checks Hardcover's
+  own stored page first, and skips the update (and the notice) when it's
+  already correct.
+
 ## 2026-09-15 — build 5ad953d
 
 - **Fix**: adjusting the font or margins mid-read could pop a disruptive
