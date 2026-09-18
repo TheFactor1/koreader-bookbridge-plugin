@@ -10659,19 +10659,44 @@ function Bookbridge:showAfterCloseNotice(text)
     -- "ui"-tier refresh rather than a disruptive full-screen "full".
     -- (G_reader_settings avoid_flashing_ui, which silently downgrades
     -- flashui back to ui, is not set on Matt's Kindle -- confirmed live.)
+    --
+    -- Still not enough on its own: confirmed live 2026-09-18 that
+    -- setDirty (flashui included) only QUEUES a refresh for UIManager's own
+    -- next tick -- it does not paint anything itself. With the dismiss-grace
+    -- fix above, still_up was finally true and both calls reported success
+    -- at +1s/+3s, and the flash still didn't land for 30-40s: with no other
+    -- input or scheduled work due, the device sits in input:waitEvent()
+    -- and nothing drains that queued refresh until something else happens
+    -- to wake the loop. UIManager:forceRePaint() ("Explicitly drain the
+    -- paint & refresh queues *now*, instead of waiting for the next UI
+    -- tick" -- its own doc comment) is the direct fix: it's what actually
+    -- executes the refresh setDirty only queued.
+    --
+    -- Matt's own suggestion, and the right one: don't wait a second to try
+    -- this at all. There's no reason left to -- forceRePaint makes the
+    -- attempt synchronous, and dismiss-grace already protects the widget
+    -- from the reader -> FileManager transition's queued input -- so this
+    -- runs once immediately (+0s), right on the close itself, with the old
+    -- +1s/+3s scheduled attempts kept only as a safety net in case
+    -- something about the widget isn't fully settled at the very instant
+    -- it's shown.
     local shown_at = os.time()
+    local function kindleRepaintAttempt(tag)
+        local up = still_up()
+        debugLog(string.format("[hc] notice: kindle repaint attempt +%s, still_up=%s", tag, tostring(up)))
+        if not up then return end
+        local ok_r, rerr = pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
+        local ok_d, derr = pcall(function() UIManager:setDirty("all", "flashui") end)
+        local ok_f, ferr = pcall(function() UIManager:forceRePaint() end)
+        debugLog(string.format("[hc] notice: kindle repaint attempt +%s done at +%ss -- refreshWaitForLast=%s%s setDirty(flashui)=%s%s forceRePaint=%s%s",
+            tag, tostring(os.time() - shown_at),
+            tostring(ok_r), ok_r and "" or (" (" .. tostring(rerr) .. ")"),
+            tostring(ok_d), ok_d and "" or (" (" .. tostring(derr) .. ")"),
+            tostring(ok_f), ok_f and "" or (" (" .. tostring(ferr) .. ")")))
+    end
+    kindleRepaintAttempt("0s")
     for _unused, delay in ipairs({ 1, 3 }) do
-        UIManager:scheduleIn(delay, function()
-            local up = still_up()
-            debugLog(string.format("[hc] notice: kindle repaint attempt +%ss, still_up=%s", tostring(delay), tostring(up)))
-            if not up then return end
-            local ok_r, rerr = pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
-            local ok_d, derr = pcall(function() UIManager:setDirty("all", "flashui") end)
-            debugLog(string.format("[hc] notice: kindle repaint attempt +%ss done at +%ss -- refreshWaitForLast=%s%s setDirty(flashui)=%s%s",
-                tostring(delay), tostring(os.time() - shown_at),
-                tostring(ok_r), ok_r and "" or (" (" .. tostring(rerr) .. ")"),
-                tostring(ok_d), ok_d and "" or (" (" .. tostring(derr) .. ")")))
-        end)
+        UIManager:scheduleIn(delay, function() kindleRepaintAttempt(tostring(delay) .. "s") end)
     end
     -- Android: the frame carrying the notice is posted (the blits lock and
     -- post fine) but not composited until a touch or a window event. The
