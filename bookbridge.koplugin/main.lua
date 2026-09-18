@@ -2491,6 +2491,22 @@ end
 -- matter -- 42% of a 352-page edition is recorded as page 148, matching what
 -- Hardcover shows. Auto-marks the book currently-reading if it isn't already,
 -- and never downgrades a book already marked read.
+--
+-- Third return value is `unchanged`: true when Hardcover's own stored
+-- progress_pages already equals the value this call would have written, so
+-- no mutation was sent. This is what makes cross-device syncing quiet --
+-- e.g. closing on the Kindle pushes page 148, and opening the same book on
+-- the phone later (already resumed to that same position by whatever syncs
+-- the actual reading position) recaptures percent locally and would
+-- otherwise push page 148 AGAIN as if it were new progress: same page,
+-- second toast, on a device that never advanced anything. The per-device
+-- last_percent check in processHardcoverPending already catches a *second
+-- capture on the same device* (its map file), but the phone and the Kindle
+-- keep separate map files, so it can't see what the OTHER device already
+-- confirmed. Hardcover's own record is the one thing both devices agree on,
+-- and ub.user_book_reads[1].progress_pages -- read right above via
+-- doHardcoverGetUserBook, already fetched for the update/insert decision --
+-- is exactly that, at no extra request.
 local function doHardcoverPushProgress(token, book_id, percent, edition_id)
     local ub, err = doHardcoverGetUserBook(token, book_id)
     if err then return false, err end
@@ -2519,6 +2535,9 @@ local function doHardcoverPushProgress(token, book_id, percent, edition_id)
     if progress_pages > pages then progress_pages = pages end
     local read = ub.user_book_reads and ub.user_book_reads[1]
     if read and not read.finished_at then
+        if read.progress_pages == progress_pages then
+            return true, progress_pages, pages, true  -- unchanged: already at this page on Hardcover
+        end
         local data, uerr = doHardcoverGraphQL(token, [[
             mutation UpdRead($id: Int!, $p: Int!) {
                 update_user_book_read(id: $id, object: { progress_pages: $p }) { id error }
@@ -2535,7 +2554,7 @@ local function doHardcoverPushProgress(token, book_id, percent, edition_id)
         local r = data and data.insert_user_book_read
         if not r or r.error then return false, (r and r.error) or ierr or _("Hardcover didn't confirm the new reading record.") end
     end
-    return true, progress_pages, pages
+    return true, progress_pages, pages, false
 end
 
 -- Marks a book Read and records when -- and optionally how -- it was rated,
@@ -10401,9 +10420,16 @@ function Bookbridge:processHardcoverPending()
             -- prompted, and the record keeps its progress for later.
         elseif entry and entry.decision == "sync" and entry.book_id
                 and entry.last_percent and rec.percent and math.abs(entry.last_percent - rec.percent) < 0.0005 then
-            -- Same position as the last successful push: a suspend/resume or
-            -- a second close re-captured it. Nothing to tell Hardcover; the
-            -- phone log showed every book pushed twice at the same page.
+            -- Same position as the last successful push FROM THIS DEVICE: a
+            -- suspend/resume or a second close re-captured it. Nothing to
+            -- tell Hardcover; the phone log showed every book pushed twice
+            -- at the same page. This is the cheap, no-network check; it
+            -- only ever catches a same-device repeat, since last_percent
+            -- lives in this device's own map file. The cross-device version
+            -- of the same problem (Kindle pushes page 148, phone opens
+            -- already-resumed to page 148 and would otherwise push it again)
+            -- is caught one level down, inside doHardcoverPushProgress
+            -- itself, against Hardcover's own stored progress.
             pending[md5] = nil
         elseif entry and entry.decision == "sync" and entry.book_id then
             -- {} trap, not false/a string: a TrapWidget (visible or invisible)
@@ -10413,15 +10439,23 @@ function Bookbridge:processHardcoverPending()
             -- is used as an already-shown trap that is never shown and never
             -- dismissed, so the subprocess runs to completion, non-blocking,
             -- with no widget to cancel.
-            local completed, ok, a, b = Trapper:dismissableRunInSubprocess(function()
+            local completed, ok, a, b, unchanged = Trapper:dismissableRunInSubprocess(function()
                 return doHardcoverPushProgress(token, entry.book_id, rec.percent, entry.edition_id)
             end, {})
             if completed and ok then
                 pending[md5] = nil
                 entry.last_percent = rec.percent; map[md5] = entry; saveHardcoverMap(map)
-                debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
-                self:showAfterCloseNotice(T(_("Hardcover: \"%1\" -- page %2 of %3 (%4%)."),
-                    tostring(entry.title), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
+                debugLog(string.format("[hc] pushed %s: page %s of %s%s", tostring(entry.title), tostring(a), tostring(b),
+                    unchanged and " (already there on Hardcover -- no write, no notice)" or ""))
+                -- unchanged means another device already pushed this exact
+                -- page: no mutation was sent (see doHardcoverPushProgress),
+                -- so no toast either -- this is the case Matt asked to quiet
+                -- down (closing on the Kindle, then opening the same book on
+                -- the phone, was showing the same page twice).
+                if not unchanged then
+                    self:showAfterCloseNotice(T(_("Hardcover: \"%1\" -- page %2 of %3 (%4%)."),
+                        tostring(entry.title), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
+                end
                 -- Opportunistic slug backfill, piggybacked on network access
                 -- this push JUST confirmed is working. A book matched before
                 -- this plugin started caching a slug at match time has
