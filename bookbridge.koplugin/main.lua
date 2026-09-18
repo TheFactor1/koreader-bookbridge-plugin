@@ -10675,19 +10675,39 @@ function Bookbridge:showAfterCloseNotice(text)
     -- Don't wait a second to try this at all -- forceRePaint makes the
     -- attempt synchronous, and dismiss-grace already protects the widget
     -- from the reader -> FileManager transition's queued input -- so this
-    -- runs once, immediately (+0s), right on the close itself.
+    -- runs once, immediately (+0s), right on the close itself. (The
+    -- +1s/+3s scheduled follow-ups that used to run after this are gone:
+    -- with two notices each retrying three times, one ordinary book close
+    -- flashed the screen up to six times -- Matt counted five, live.)
     --
-    -- The +1s/+3s scheduled follow-ups that used to run after this (kept
-    -- as a "safety net" while the +0s attempt's own reliability was still
-    -- unproven) are gone as of 2026-09-18: confirmed live that the +0s
-    -- attempt alone reliably produces a real flash every time now, and
-    -- since onCloseDocument's immediate placeholder notice runs this exact
-    -- same block too, keeping three attempts per notice meant SIX real
-    -- screen flashes for one ordinary book close (three for the
-    -- placeholder, three for the real notice moments later) -- confirmed
-    -- live, Matt counted five. One attempt per notice is what was actually
-    -- needed; the other two were never a safety net once flashui+
-    -- forceRePaint were both in place, just extra flashing.
+    -- refreshWaitForLast/setDirty/forceRePaint all report success every
+    -- time, on every device generation of this fix -- but confirmed live
+    -- 2026-09-18, twice, that this can still be a false success: the exact
+    -- same call sequence, completing in under a second per this function's
+    -- own debug log, produced a visible flash in under a second once and
+    -- took Matt a further ~26s the very next time, no difference in
+    -- anything this code did or reported either time. That means the
+    -- delay is happening below these calls entirely -- everything here
+    -- routes through UIManager, which on Kindle hands off to Amazon's own
+    -- "pillow" display compositor, and that layer is what appears to be
+    -- queuing the actual panel flash on its own schedule (lipc's own
+    -- interrogatePillow call, tried live, just hung -- consistent with it
+    -- being busy/backed up, not idle). Nothing reachable through
+    -- UIManager/Device.screen can be more forceful than what's already
+    -- been tried here.
+    --
+    -- eips is the escape hatch: a stock Kindle CLI tool (part of the base
+    -- firmware, not this plugin) that talks to the mxcfb/EPDC kernel
+    -- driver directly -- "eips -s w=...,h=... -f" pushes the CURRENT
+    -- framebuffer to the panel as an immediate full flash, bypassing
+    -- pillow's own queue entirely rather than asking it (nicely, so far)
+    -- to hurry up. KOReader's own forceRePaint has already painted the
+    -- notice into that framebuffer by the time this runs, so eips isn't
+    -- drawing anything new, just forcing the panel to actually show what's
+    -- already there. Confirmed live: runs in well under a second and
+    -- exits cleanly. Kindle-only (Device:isKindle(), not just "not
+    -- desktop, not Android") since eips is Kindle-specific -- nothing
+    -- about this touches other e-readers this plugin might run on.
     local shown_at = os.time()
     local up = still_up()
     debugLog(string.format("[hc] notice: kindle repaint attempt +0s, still_up=%s", tostring(up)))
@@ -10695,11 +10715,26 @@ function Bookbridge:showAfterCloseNotice(text)
         local ok_r, rerr = pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
         local ok_d, derr = pcall(function() UIManager:setDirty("all", "flashui") end)
         local ok_f, ferr = pcall(function() UIManager:forceRePaint() end)
-        debugLog(string.format("[hc] notice: kindle repaint attempt +0s done at +%ss -- refreshWaitForLast=%s%s setDirty(flashui)=%s%s forceRePaint=%s%s",
+        local ok_e, eerr = true, nil
+        if Device.isKindle and Device:isKindle() then
+            ok_e, eerr = pcall(function()
+                local w = Device.screen and Device.screen.getWidth and Device.screen:getWidth()
+                local h = Device.screen and Device.screen.getHeight and Device.screen:getHeight()
+                if not w or not h then error("no screen dimensions") end
+                local cmd = string.format("eips -s w=%d,h=%d -f >/dev/null 2>&1", w, h)
+                local ok_exec = os.execute(cmd)
+                -- os.execute's return shape differs across Lua versions (a
+                -- single number pre-5.2 vs true/exit-type/code after) --
+                -- normalize rather than assume one.
+                if not (ok_exec == true or ok_exec == 0) then error("eips exited non-zero") end
+            end)
+        end
+        debugLog(string.format("[hc] notice: kindle repaint attempt +0s done at +%ss -- refreshWaitForLast=%s%s setDirty(flashui)=%s%s forceRePaint=%s%s eips=%s%s",
             tostring(os.time() - shown_at),
             tostring(ok_r), ok_r and "" or (" (" .. tostring(rerr) .. ")"),
             tostring(ok_d), ok_d and "" or (" (" .. tostring(derr) .. ")"),
-            tostring(ok_f), ok_f and "" or (" (" .. tostring(ferr) .. ")")))
+            tostring(ok_f), ok_f and "" or (" (" .. tostring(ferr) .. ")"),
+            tostring(ok_e), ok_e and "" or (" (" .. tostring(eerr) .. ")")))
     end
     -- Android: the frame carrying the notice is posted (the blits lock and
     -- post fine) but not composited until a touch or a window event. The
