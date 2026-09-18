@@ -10604,8 +10604,26 @@ function Bookbridge:showAfterCloseNotice(text)
     -- pcall in this file since it escapes from inside UIManager's own
     -- repaint loop). slot.open is already the correct single source of
     -- truth for "has this actually been closed", so gate on it here too.
+    --
+    -- Also gated on a short grace period after showing: the SAME mechanism
+    -- documented in processHardcoverPending's own Trapper call ("the reader
+    -- -> FileManager close transition delivers [a queued gesture/keypress],
+    -- which cancelled the call every time") reaches onGesture/onKeyPress/
+    -- onKeyRepeat here too, since onIgnoreTouchInput only stops this widget
+    -- from CLAIMING touch focus, not from having a queued gesture/key
+    -- dispatched to it. Confirmed live 2026-09-18: the Kindle's own debug
+    -- log showed still_up already false by the +1s repaint check -- this
+    -- widget was being closed within a second of being shown, well before
+    -- the user could have tapped anything, which is exactly what left the
+    -- +1s/+3s flashui retries with nothing to do (they correctly skip a
+    -- widget that's already gone) and the notice invisible until something
+    -- else forced a real repaint.
+    local Time = require("ui/time")
+    local shown_time = Time.now()
+    local DISMISS_GRACE = Time.s(1)
     local function dismissNotice()
         if not slot.open then return false end
+        if Time.now() - shown_time < DISMISS_GRACE then return false end
         UIManager:close(frame, "ui", region)
         return false
     end
