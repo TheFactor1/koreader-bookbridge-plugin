@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build 6a7309c
+
+- **Change**: closing a book no longer shows a "synced" toast -- after
+  extensive testing, that notification was tied to exactly the moment
+  this Kindle's screen sometimes updates slowly, and nothing running on
+  the device can make that reliable. The sync itself is unaffected: it
+  still happens silently on every close, same as always. In its place,
+  long-press a book's cover and choose "Hardcover sync status" any time
+  you want to check -- it reads instantly from what's already saved on
+  the device, no network wait, no display quirk to fight.
+
 ## 2026-09-18 — build 1335c18
 
 - **Change**: the Kindle notice's own refresh can report success while
