@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build 16b5937
+
+- **Fix**: the last change fixed the real delay (confirmed: the whole
+  thing now completes in a few seconds), but it also meant the screen
+  could flash 5-6 times for one book close -- both the placeholder and
+  the real notice were each retrying their flash 3 times, and now that
+  every attempt actually works, that was just excess flashing, not a
+  safety net. Down to one flash per close: the immediate placeholder is
+  removed (no longer needed now that the wait is short), and the real
+  notice tries once instead of three times.
+
 ## 2026-09-18 — build de4081a
 
 - **Change**: the Kindle notice can still take a while to physically
