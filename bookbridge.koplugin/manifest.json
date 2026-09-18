@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "version": "0.3.0",
-  "build": "0475deb",
-  "generated": "2026-09-18T15:51:08-04:00",
+  "build": "a4b9476",
+  "generated": "2026-09-18T15:56:06-04:00",
   "files": {
-    "main.lua": { "sha256": "6f2c09de2f18b56e168016dcdf4bc02c3692ba8168e86457404b83dc523b6692", "size": 574558 },
+    "main.lua": { "sha256": "3fb1c74f224f976ebf2fd8ec889de6a87709d64551a525e17ac8b69f387aa204", "size": 575680 },
     "_meta.lua": { "sha256": "24dc8f860126b2bd5e5ff49d64d5bc80df152dc26eaffa3be167fbd64f68e6e5", "size": 276 }
   }
 }

@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-18 — build a4b9476
+
+- **Fix**: found the actual cause of the Kindle notice delay -- the debug
+  log showed the notice being closed within a second of appearing, well
+  before anyone could have tapped it. The reader-to-FileManager screen
+  transition delivers a leftover gesture/keypress that this notice was
+  reacting to as a dismissal (a mechanism already known from elsewhere in
+  this plugin, just not connected to this before). It now ignores any
+  dismiss for the first second after showing; a real tap or the 6s
+  auto-dismiss still work normally.
+
 ## 2026-09-18 — build 0475deb
 
 - **Fix**: re-applied the Kindle notice-delay fix from build 51c5cd8
