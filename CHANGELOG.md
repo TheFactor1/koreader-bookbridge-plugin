@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-23 — build 217322b
+
+- **Fix**: closing a book for the first time no longer pops up "Hardcover:
+  synced as ..." and flashes the screen. The first sync of a newly matched
+  book is now silent, like every later one. Long-press a book → "Hardcover
+  sync status" to see where it stands. Errors and "waiting under Review
+  matches" notes still appear.
+
 ## 2026-09-23 — build c2a0cad
 
 The second round of fixes from the stress test.
