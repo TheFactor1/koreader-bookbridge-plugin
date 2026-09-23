@@ -28,6 +28,14 @@
 # fails and so does this -- a partial pass is not a pass.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# The desktop-KOReader suites need a display. A non-interactive shell (cron,
+# an SSH session, a Claude session) has none, and the X server refuses it
+# without the session's auth cookie ("Authorization required", then SDL
+# segfaults and the suites report "inspector never answered"). The GNOME
+# session's Wayland socket needs no cookie, so use it when nothing is set.
+if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && [ -S "/run/user/$(id -u)/wayland-0" ]; then
+  export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} WAYLAND_DISPLAY=wayland-0 SDL_VIDEODRIVER=wayland
+fi
 UPDATE=0; NODEV=0
 for a in "$@"; do
   case "$a" in

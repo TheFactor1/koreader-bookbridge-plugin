@@ -56,6 +56,18 @@ local PUSHES = 0
 doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
 Bookbridge = {}
 assert(load(io.open(SRC):read("*a")))()
+-- processHardcoverPending checks finished books first (added 2026-09-18). None
+-- of the cases here finish a book, so "nothing finished" is the faithful stub.
+-- The cases pass plain tables as self, so inject it per call.
+do
+  local orig = Bookbridge.processHardcoverPending
+  Bookbridge.processHardcoverPending = function(self, ...)
+    if self.checkHardcoverFinishedBook == nil then self.checkHardcoverFinishedBook = function() return false end end
+    return orig(self, ...)
+  end
+end
+doHardcoverGetBookSlug = function() return "test-slug" end   -- slug backfill piggybacks on a successful push
+hardcoverErrorIsTransient = function(err) return tostring(err):find("timeout", 1, true) ~= nil end
 
 local pass, fail = 0, 0
 local function ck(c,m) if c then pass=pass+1; print("PASS  "..m) else fail=fail+1; print("FAIL  "..m) end end
@@ -102,7 +114,7 @@ MAP = { m = { decision="sync", book_id=42, title="X" } }
 PUSHES = 0
 Bookbridge.processHardcoverPending(s3)
 ck(PUSHES == 1 and confirms3 == 0, "already-matched book pushes without a dialog")
-ck(#shown == 1 and shown[1].timeout and shown[1].text:find("page 8 of 382", 1, true), "...and shows the page it recorded in a brief note")
+ck(#shown == 0, "...and pushes silently (success toast removed on purpose in 6a7309c)")
 ck(next(PENDING) == nil, "a successful push clears the queue entry")
 ck(MAP.m.last_percent == 0.2, "...and remembers the position it pushed")
 
@@ -114,6 +126,31 @@ ck(PUSHES == 0 and next(PENDING) == nil, "unchanged position -> no push, queue e
 PENDING = { m = { title="X", percent=0.25 } }; PUSHES = 0
 Bookbridge.processHardcoverPending(s3)
 ck(PUSHES == 1 and MAP.m.last_percent == 0.25, "changed position -> pushed, position updated")
+
+-- 3b. an edition with no page count fails permanently: announce it ONCE, then
+-- keep retrying silently (reported 2026-09-23: the notice returned on every close)
+do
+  local NOPAGES = "Hardcover has no page count for this edition -- can't record progress."
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return false, NOPAGES, "no_pages" end
+  local sn = setmetatable({ hardcover_progress_sync = true, hardcover_token = "t",
+      confirmHardcoverMatch = function() end, resolveHardcoverPending = function() end }, { __index = Bookbridge })
+  MAP = { g = { decision = "sync", book_id = 9, title = "The Girl with the Dragon Tattoo" } }
+  shown = {}; PUSHES = 0
+  for i = 1, 3 do PENDING = { g = { title = "G", percent = 0.1 + i / 100 } }; sn:processHardcoverPending() end
+  local notes = 0; for _, w in ipairs(shown) do if tostring(w.text or w):find("no page count", 1, true) then notes = notes + 1 end end
+  ck(PUSHES == 3 and notes == 1, "no page count: retried every close, but announced only once (got "..notes..")")
+  ck(PENDING.g ~= nil and MAP.g.no_pages_noticed == true, "...record stays queued for a later retry, and remembers it said so")
+  -- a later success re-arms the notice, so a genuinely new failure is still reported
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
+  PENDING = { g = { title = "G", percent = 0.5 } }; sn:processHardcoverPending()
+  ck(MAP.g.no_pages_noticed == nil, "successful push clears the flag (notice re-armed)")
+  -- a different, non-transient error on another book is still shown every time (unchanged)
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return false, "Book not found" end
+  MAP.h = { decision = "sync", book_id = 7, title = "H" }; shown = {}
+  for i = 1, 2 do PENDING = { h = { title = "H", percent = 0.2 + i / 100 } }; sn:processHardcoverPending() end
+  ck(#shown == 2, "other permanent errors keep their existing behaviour (shown each time)")
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
+end
 
 -- 4. Wi-Fi back -> flush, but only when there is something queued
 local s4 = { hardcover_progress_sync=true, hardcover_token="t" }

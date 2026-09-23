@@ -2512,7 +2512,10 @@ local function doHardcoverPushProgress(token, book_id, percent, edition_id)
     local edition = ub.edition
     local pages = edition and tonumber(edition.pages)
     if not edition or not pages or pages <= 0 then
-        return false, _("Hardcover has no page count for this edition -- can't record progress.")
+        -- Third value is a reason code, not text: callers use it to tell this
+        -- PERMANENT failure (nothing the device can fix) from a transient one,
+        -- without matching on a translated message.
+        return false, _("Hardcover has no page count for this edition -- can't record progress."), "no_pages"
     end
     local progress_pages = math.floor(percent * pages + 0.5)
     if progress_pages < 1 then progress_pages = 1 end
@@ -10469,7 +10472,8 @@ function Bookbridge:processHardcoverPending()
             end, {})
             if completed and ok then
                 pending[md5] = nil
-                entry.last_percent = rec.percent; map[md5] = entry; saveHardcoverMap(map)
+                entry.last_percent = rec.percent; entry.no_pages_noticed = nil  -- re-arm the one-time notice
+                map[md5] = entry; saveHardcoverMap(map)
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
                 -- No toast here any more (2026-09-18): this fires on every
                 -- ordinary close, right as the reader tears down into
@@ -10528,7 +10532,16 @@ function Bookbridge:processHardcoverPending()
                 end
             else
                 debugLog("[hc] push failed for " .. tostring(entry.title) .. ": " .. tostring(a))
-                if completed and not hardcoverErrorIsTransient(a) then
+                -- "no_pages" is permanent for that edition, and the record stays
+                -- pending, so without this it re-announced itself on EVERY close
+                -- (reported 2026-09-23 for "The Girl with the Dragon Tattoo").
+                -- Say it once per book; keep retrying silently, so it syncs by
+                -- itself if Hardcover ever gains a page count.
+                if completed and not hardcoverErrorIsTransient(a)
+                        and not (b == "no_pages" and entry.no_pages_noticed) then
+                    if b == "no_pages" then
+                        entry.no_pages_noticed = true; map[md5] = entry; saveHardcoverMap(map)
+                    end
                     self:showAfterCloseNotice(T(_("Hardcover couldn't record \"%1\": %2"),
                         tostring(entry.title), tostring(a)))
                 end
@@ -10901,13 +10914,15 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
         end, {})
         if completed and ok then
             self:clearHardcoverPending(md5)
-            map[md5].last_percent = rec.percent; saveHardcoverMap(map)
+            map[md5].last_percent = rec.percent; map[md5].no_pages_noticed = nil; saveHardcoverMap(map)
             debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(ft), tostring(a), tostring(b)))
             self:showAfterCloseNotice(T(_("Hardcover: synced as \"%1\" by %2 -- page %3 of %4 (%5%)."),
                 ft, tostring(fa), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
         else
             debugLog("[hc] push failed for " .. tostring(ft) .. ": " .. tostring(a))   -- stays pending; retried later
             if completed and not hardcoverErrorIsTransient(a) then
+                -- Once per book for the permanent "no_pages" case; see processHardcoverPending.
+                if b == "no_pages" then map[md5].no_pages_noticed = true; saveHardcoverMap(map) end
                 self:showAfterCloseNotice(T(_("Hardcover couldn't record \"%1\": %2"), ft, tostring(a)))
             end
         end

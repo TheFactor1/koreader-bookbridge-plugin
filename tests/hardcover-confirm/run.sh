@@ -56,6 +56,10 @@ package.loaded["ui/trapper"] = {
 local SEARCHES = 0
 doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return 999, "SEARCHED", "Someone", nil, { {id=999,title="SEARCHED",author="Someone"} }, false end
 doHardcoverPushProgress = function() return true, 8, 382 end
+-- Added to the plugin after this harness was written: slug caching at match
+-- time, and the transient/permanent error split for push-failure notices.
+doHardcoverGetBookSlug = function() return "test-slug" end
+hardcoverErrorIsTransient = function(err) return tostring(err):find("timeout", 1, true) ~= nil end
 Bookbridge = {}
 assert(load(io.open(SRC):read("*a")))()
 
