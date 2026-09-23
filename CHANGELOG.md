@@ -4,6 +4,30 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-23 — build c2a0cad
+
+The second round of fixes from the stress test.
+
+- **Fix**: a wrong Shelfmark password is no longer re-tried quietly every time
+  the Kindle wakes -- that alone could get the account locked for half an
+  hour. After Shelfmark refuses it, background checks wait until you fix the
+  password (anything you do yourself still tries, and still says why).
+- **New**: "Send to Calibre-Web" on a book that was already uploaded but never
+  showed up now asks whether to send it again (with a note about duplicates)
+  instead of refusing forever.
+- **Fix**: if the Kindle's clock was wrong and then corrected, automatic
+  updates no longer switch themselves off until the clock catches up.
+- **Fix**: after "Later", the one-time "Shelfmark is now Bookbridge -- restart?"
+  question no longer comes back every time you open a book.
+- **Fix**: "Suggest match" stops at the first error and tells you what's wrong
+  (password, lockout, or can't reach Calibre-Web) instead of trying every
+  word of the title and then saying "no candidates".
+- **Fix**: if a requested book fails to download, you're now told once
+  ("Couldn't be delivered") instead of never hearing about it.
+- **Fix**: an expired or revoked Hardcover token is now reported once, clearly,
+  instead of failing silently forever. Enter a new token and syncing resumes.
+- **Tidy**: download hints for books you've deleted are cleaned up.
+
 ## 2026-09-23 — build 28c2b2a
 
 Fixes from a stress test that looked for more problems like the repeating
