@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-23 — build 761a652
+
+- **Fix**: "Hardcover couldn't record ... Hardcover has no page count for
+  this edition" no longer pops up every time you close a book. Some
+  editions on Hardcover simply have no page count, and progress is
+  recorded in pages, so that book can't sync -- but the notice used to
+  repeat forever. Now it's shown once per book. The plugin keeps quietly
+  retrying, so if Hardcover ever adds a page count for that edition, the
+  book starts syncing on its own without you doing anything.
+
 ## 2026-09-18 — build 6a7309c
 
 - **Change**: closing a book no longer shows a "synced" toast -- after
