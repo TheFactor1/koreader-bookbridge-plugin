@@ -4,6 +4,30 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-23 — build 28c2b2a
+
+Fixes from a stress test that looked for more problems like the repeating
+"no page count" notice -- things that go wrong once and then repeat or pile
+up.
+
+- **Fix**: a wrong Calibre-Web password no longer floods the server. A
+  library sync used to keep going through every book after the first
+  refusal -- dozens of requests in seconds, which is what locks the account
+  out -- and then say "Done.". It now stops after the first refusal and tells
+  you to check the password (or, if Calibre-Web has locked you out, to wait a
+  minute).
+- **Fix**: a finished book that Hardcover won't mark as Read no longer stops
+  every other book's reading progress from syncing.
+- **Fix**: no more empty pop-up box after the automatic update check.
+- **Fix**: a patchy Wi-Fi connection no longer shows "Hardcover couldn't
+  record ..." after closing a book -- it just retries quietly.
+- **Fix**: any Hardcover error that won't go away on its own (not only "no page
+  count") is now shown once per book instead of after every close. Retries
+  continue quietly in the background.
+- **Fix**: if several things trigger a Hardcover sync at once (waking the
+  Kindle, reconnecting, closing a book), they no longer run over each other --
+  no more double updates or duplicate notices.
+
 ## 2026-09-23 — build 761a652
 
 - **Fix**: "Hardcover couldn't record ... Hardcover has no page count for
