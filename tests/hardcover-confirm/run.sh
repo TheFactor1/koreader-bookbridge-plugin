@@ -81,8 +81,8 @@ shown = {}; MAP = {}; SEARCHES = 0; CLEARED = {}
 local PUSHES = 0; doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
 Bookbridge.resolveHardcoverMatch(inst{ _hc_prefetch = { m = { book_id=427473, title="Red Rising", author="Pierce Brown", ranked={}, confident=true } } },
     "m", { title="Red Rising", author="Pierce Brown", percent=0.02 })
-ck(#shown == 1 and shown[1].timeout and not shown[1].buttons, "confident match: one auto-dismissing note, no dialog")
-ck(shown[1].text:find("page 8 of 382", 1, true) ~= nil, "the note carries the page numbers")
+ck(#shown == 0, "confident match: silent -- no note, no dialog (the toast's repaint flashed the Kindle)")
+ck(MAP.m and MAP.m.last_percent == 0.02, "confident match: pushed position remembered for the sync-status action")
 ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==427473, "confident match: recorded as sync")
 ck(PUSHES == 1 and CLEARED[1] == "m", "confident match: progress pushed and the queue entry cleared")
 ck(SEARCHES == 0, "confident match from prefetch: zero searches")

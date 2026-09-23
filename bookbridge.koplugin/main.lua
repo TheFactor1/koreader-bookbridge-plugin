@@ -11206,8 +11206,9 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
             map[md5].last_percent = rec.percent
             map[md5].push_notified_error = nil; map[md5].no_pages_noticed = nil; saveHardcoverMap(map)
             debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(ft), tostring(a), tostring(b)))
-            self:showAfterCloseNotice(T(_("Hardcover: synced as \"%1\" by %2 -- page %3 of %4 (%5%)."),
-                ft, tostring(fa), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
+            -- Silent, like the ordinary push in processHardcoverPending: the
+            -- success toast's repaint is what flashes the Kindle screen. The
+            -- long-press "Hardcover sync status" action shows the result.
         else
             debugLog("[hc] push failed for " .. tostring(ft) .. ": " .. tostring(a))   -- stays pending; retried later
             -- Once per distinct error per book; see drainHardcoverPending.
