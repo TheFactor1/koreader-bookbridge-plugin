@@ -90,6 +90,42 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  settings-save (no local KOReader)"; skipped="${skipped:+$skipped, }settings-save"
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
+section "Shelfmark login refusal (not re-sent in the background)"
+out=$(bash tests/shelfmark-auth/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  shelfmark-auth (no local KOReader)"; skipped="${skipped:+$skipped, }shelfmark-auth"
+else echo "$out" | grep -E '^FAIL|attempt to|rror'; echo "FAIL"; fail=1; fi
+
+section "Send to Calibre-Web (asks before re-sending an already-uploaded book)"
+out=$(bash tests/send-to-cwa/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  send-to-cwa (no local KOReader)"; skipped="${skipped:+$skipped, }send-to-cwa"
+else echo "$out" | grep -E '^FAIL|attempt to|rror'; echo "FAIL"; fail=1; fi
+
+section "Rename prompt (once per session, not every book open)"
+out=$(bash tests/rename-once/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  rename-once (no local KOReader)"; skipped="${skipped:+$skipped, }rename-once"
+else echo "$out" | grep -E '^FAIL|attempt to|rror'; echo "FAIL"; fail=1; fi
+
+section "Suggest match (stops at the first refusal)"
+out=$(bash tests/suggest-match-stop/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  suggest-match-stop (no local KOReader)"; skipped="${skipped:+$skipped, }suggest-match-stop"
+else echo "$out" | grep -E '^FAIL|attempt to|rror'; echo "FAIL"; fail=1; fi
+
+section "Ready-to-read watch (failed deliveries reported once, then dropped)"
+out=$(bash tests/request-watch/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  request-watch (no local KOReader)"; skipped="${skipped:+$skipped, }request-watch"
+else echo "$out" | grep -E '^FAIL|attempt to|rror'; echo "FAIL"; fail=1; fi
+
+section "ISBN hints (deleted books pruned, unmounted folders kept)"
+out=$(bash tests/isbn-hints/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  isbn-hints (no local KOReader)"; skipped="${skipped:+$skipped, }isbn-hints"
+else echo "$out" | grep -E '^FAIL|attempt to|rror'; echo "FAIL"; fail=1; fi
+
 section "Rename migration (a Bookbridge build inside the old shelfmark.koplugin folder moves itself)"
 out=$(bash tests/rename-migration/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- copies itself, disables the old folder, offers a restart, then removes the old folder"

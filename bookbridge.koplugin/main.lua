@@ -207,12 +207,17 @@ function Bookbridge:saveAllSettings(msg)
         last_auto_update_check = self.last_auto_update_check,
     })
     self.sm_settings:flush()
-    self.session_cookie = nil -- force re-login with new creds
     -- Only when there is something to say. The automatic update check saves
     -- its timestamp through here with no message, and InfoMessage's default
     -- text is "", so every check (startup, wake, reconnect -- up to ~4 a day)
     -- flashed an empty box with just an icon. Same for the auto-update toggle.
+    -- Those two message-less saves also used to drop the Shelfmark session,
+    -- forcing a needless re-login every few hours -- one more strike toward
+    -- Shelfmark's lockout whenever the saved password is wrong. Every save
+    -- that can change the server or credentials is a settings dialog, and
+    -- every one of those passes a message, so that is where it still happens.
     if msg then
+        self.session_cookie = nil -- force re-login with new creds
         UIManager:show(InfoMessage:new{ text = msg, timeout = 2 })
     end
 end
@@ -619,6 +624,11 @@ end
 -- restart; the next start, running from the right folder, removes the old
 -- one. Settings and log files keep their shelfmark* names on purpose --
 -- nothing on the device is migrated by hand.
+-- Once per KOReader session. The module loads once, but init -- and so this
+-- -- runs for every FileManager and every Reader instance. Before 2026-09-23,
+-- choosing "Later" meant the files were copied again and "Restart now?" came
+-- back on the very next book open or return to the library.
+local rename_prompted = false
 function Bookbridge:migratePluginFolder()
     -- self.path is set by PluginLoader; the debug fallback covers a direct load.
     local dir = self.path or (debug.getinfo(1, "S").source:gsub("^@", ""):match("^(.*)/[^/]+$"))
@@ -636,6 +646,7 @@ function Bookbridge:migratePluginFolder()
         end
         return
     end
+    if rename_prompted then return end
     local new_dir = parent .. "/bookbridge.koplugin"
     lfs.mkdir(new_dir)
     for _, f in ipairs({ "main.lua", "_meta.lua", "manifest.json", "installed-build" }) do
@@ -647,8 +658,9 @@ function Bookbridge:migratePluginFolder()
         end
     end
     local check = io.open(new_dir .. "/main.lua", "rb")
-    if not check then debugLog("[rename] could not write " .. new_dir); return end
+    if not check then debugLog("[rename] could not write " .. new_dir); return end   -- retried on the next start
     check:close()
+    rename_prompted = true
     disabled[folder:gsub("%.koplugin$", "")] = true
     G_reader_settings:saveSetting("plugins_disabled", disabled)
     G_reader_settings:flush()
@@ -853,6 +865,24 @@ local function saveDownloadIsbnHints(t)
     local out = io.open(DOWNLOAD_ISBN_HINTS_PATH, "w")
     if not out then return false end
     out:write(JSON.encode(t)); out:close(); return true
+end
+-- Records one hint, and drops the hints of books that have since been
+-- deleted -- nothing else ever removed an entry, so the file only grew
+-- (found 2026-09-23). Conservative on purpose: an entry goes only when its
+-- FOLDER still exists and the file doesn't, so a folder that is briefly
+-- missing (unmounted storage) never wipes hints for books still to be opened.
+local function addDownloadIsbnHint(path, isbn13)
+    local hints = loadDownloadIsbnHints()
+    hints[path] = isbn13
+    for p in pairs(hints) do
+        if p ~= path then
+            local dir = p:match("^(.*)/[^/]+$")
+            if dir and lfs.attributes(dir, "mode") == "directory" and not lfs.attributes(p, "mode") then
+                hints[p] = nil
+            end
+        end
+    end
+    return saveDownloadIsbnHints(hints)
 end
 
 local PENDING_NOTIFY_PATH = DataStorage:getSettingsDir() .. "/shelfmark_pending_notify.json"
@@ -1086,7 +1116,10 @@ local function doLogin(server_url, username, password, socks5_proxy)
         return true, cookie
     end
     local err = resp and resp.error or _("Login failed -- check your Shelfmark username/password in Settings.")
-    return false, nil, err
+    -- The status goes back too: 401 = wrong username/password, 429 = the
+    -- account is locked after too many failures. nil = never reached the
+    -- server, which says nothing about the credentials.
+    return false, nil, err, code
 end
 
 -- The full operation: log in first if we don't have a session yet, do the
@@ -1097,8 +1130,8 @@ local function doApiRequest(server_url, username, password, cookie, method, path
         if not username or username == "" then
             return nil, nil, nil, _("No Shelfmark username set -- check Settings.")
         end
-        local ok, new_cookie, login_err = doLogin(server_url, username, password, socks5_proxy)
-        if not ok then return nil, nil, nil, login_err end
+        local ok, new_cookie, login_err, login_code = doLogin(server_url, username, password, socks5_proxy)
+        if not ok then return nil, nil, nil, login_err, login_code end
         cookie = new_cookie
     end
 
@@ -1107,8 +1140,8 @@ local function doApiRequest(server_url, username, password, cookie, method, path
     cookie = new_cookie
 
     if code == 401 then
-        local ok, relog_cookie, login_err = doLogin(server_url, username, password, socks5_proxy)
-        if not ok then return nil, nil, nil, login_err end
+        local ok, relog_cookie, login_err, login_code = doLogin(server_url, username, password, socks5_proxy)
+        if not ok then return nil, nil, nil, login_err, login_code end
         cookie = relog_cookie
         resp, code, new_cookie, err = doRawRequest(server_url, cookie, method, path, body, socks5_proxy, block_timeout, total_timeout)
         if err then return nil, nil, cookie, err end
@@ -1998,6 +2031,12 @@ local function doHardcoverGraphQL(token, query, variables)
     end
     local raw_body = table.concat(sink_table)
     debugLog("[hardcover] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#raw_body))
+    if code == 401 or code == 403 then
+        -- Its own wording, NOT "request failed": that phrase is classed as
+        -- transient, so a revoked or expired token used to be retried silently
+        -- forever with nobody told (found 2026-09-23). See HC_TOKEN_REJECTED.
+        return nil, T(_("Hardcover rejected the API token (HTTP %1) -- update it under Bookbridge > Settings."), tostring(code))
+    end
     if code ~= 200 then
         return nil, T(_("Hardcover request failed (HTTP %1)."), tostring(code))
     end
@@ -5961,7 +6000,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                     -- the filename. Re-uploading would just make a duplicate,
                     -- the exact failure this guards; keep retrying the match
                     -- instead, and never upload a second copy.
-                    addLine(T(_("  [%1] already uploaded earlier -- Calibre-Web hasn't matched it back yet (its embedded author may differ from the filename); not re-uploading."), fname))
+                    addLine(T(_("  [%1] already uploaded earlier -- Calibre-Web hasn't matched it back yet (its embedded author may differ from the filename); not re-uploading. If it never arrived, use \"Send to Calibre-Web\" on the book to send it again."), fname))
                 else
                     table.insert(to_upload, path)
                 end
@@ -6187,6 +6226,12 @@ end
 -- earlier native crashes too, if Android's watchdog decided the
 -- unresponsive app needed to be force-killed. Must be called from within a
 -- Trapper:wrap()'d coroutine (every entry point below is).
+-- Identifies one set of Shelfmark credentials (see shelfmarkLoginKnownBad).
+-- In memory only; never written to disk or logged.
+local function shelfmarkCredentialKey(server_url, username, password)
+    return tostring(server_url) .. "\0" .. tostring(username) .. "\0" .. tostring(password)
+end
+
 function Bookbridge:apiRequest(method, path, body, progress_text, block_timeout, total_timeout)
     local Trapper = require("ui/trapper")
     local server_url, username, password, cookie, socks5_proxy =
@@ -6199,7 +6244,7 @@ function Bookbridge:apiRequest(method, path, body, progress_text, block_timeout,
     -- into the visible dialog. Only an omitted argument gets the default.
     if progress_text == nil then progress_text = _("Talking to Shelfmark...") end
 
-    local completed, resp, code, new_cookie, err = Trapper:dismissableRunInSubprocess(function()
+    local completed, resp, code, new_cookie, err, login_code = Trapper:dismissableRunInSubprocess(function()
         return doApiRequest(server_url, username, password, cookie, method, path, body, socks5_proxy, block_timeout, total_timeout)
     end, progress_text)
 
@@ -6209,7 +6254,29 @@ function Bookbridge:apiRequest(method, path, body, progress_text, block_timeout,
     if new_cookie then
         self.session_cookie = new_cookie
     end
+    if login_code == 401 or login_code == 429 then
+        -- Shelfmark refused THESE credentials (or locked the account). See
+        -- shelfmarkLoginKnownBad: background checks stop re-sending them.
+        self._shelfmark_login_rejected = shelfmarkCredentialKey(server_url, username, password)
+        debugLog("[auth] Shelfmark rejected the login (HTTP " .. tostring(login_code) .. "); background checks paused until it succeeds or the credentials change")
+    elseif not err then
+        self._shelfmark_login_rejected = nil
+    end
     return resp, code, err
+end
+
+-- Shelfmark locks a username for 30 minutes after 10 failed logins -- per
+-- username, so every device on that account. Before 2026-09-23 a wrong saved
+-- password was re-sent by every action AND silently by the "ready to read"
+-- check on each wake, so an account could lock without anyone touching the
+-- Kindle. A refusal is now remembered for exactly the server/username/password
+-- that got it (in memory only, never written anywhere): background work skips
+-- Shelfmark until a login succeeds or Settings holds different credentials.
+-- Anything the user does still tries, so the reason stays on screen and a
+-- password fixed on the server side works straight away.
+function Bookbridge:shelfmarkLoginKnownBad()
+    return self._shelfmark_login_rejected ~= nil
+        and self._shelfmark_login_rejected == shelfmarkCredentialKey(self.server_url, self.username, self.password)
 end
 
 -- Mirrors apiRequest's Trapper-subprocess wrapping above, but for CWA's
@@ -6748,7 +6815,32 @@ end
 -- if it genuinely isn't, waits for CWA's import and registers it, and
 -- refuses to upload at all if CWA can't be reached -- just without walking
 -- the rest of the library.
-function Bookbridge:sendBookToCwa(file)
+function Bookbridge:sendBookToCwa(file, confirmed_resend)
+    -- A book pushed on an earlier run and never matched back is deliberately
+    -- NOT re-uploaded by a sync (see loadPendingUploads: re-sending a book CWA
+    -- did import, under metadata that disagrees with the filename, makes a
+    -- duplicate every run). But if CWA really dropped the upload, the book was
+    -- stuck with no way to send it again -- this action refused too. Now it
+    -- asks: the user knows what they want, the plugin can't tell those cases
+    -- apart. Only a yes clears the mark.
+    if not confirmed_resend then
+        local pu = loadPendingUploads()[file]
+        if pu then
+            local fname = file:match("([^/]+)$") or file
+            local ConfirmBox = require("ui/widget/confirmbox")
+            UIManager:show(ConfirmBox:new{
+                text = T(_("\"%1\" was already uploaded to Calibre-Web (%2) and hasn't been matched back yet.\n\nIf Calibre-Web did import it -- under a different title or author than the filename -- sending it again makes a duplicate. Worth a look in Calibre-Web first.\n\nSend it again anyway?"),
+                    fname, pu.at and os.date("%b %d", pu.at) or _("earlier")),
+                ok_text = _("Send again"),
+                ok_callback = function()
+                    local t = loadPendingUploads(); t[file] = nil; savePendingUploads(t)
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function() self:sendBookToCwa(file, true) end)
+                end,
+            })
+            return
+        end
+    end
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
     local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
@@ -6792,7 +6884,7 @@ function Bookbridge:suggestMatchForFile(file)
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
     local fname = file:match("([^/]+)%.[Ee][Pp][Uu][Bb]$") or file:match("([^/]+)$") or file
 
-    local completed, candidates = Trapper:dismissableRunInSubprocess(function()
+    local completed, candidates, failure = Trapper:dismissableRunInSubprocess(function()
         local seen, out = {}, {}
         local cleaned = stripTrailingParenGroups(fname)
         local before_sep, after_sep = cleaned:match("^(.-)%s+%-%s+(.+)$")
@@ -6814,6 +6906,12 @@ function Bookbridge:suggestMatchForFile(file)
         for _, q in ipairs(queries) do
             local body, code = doCwaRequest(cwa_url, cwa_username, cwa_password,
                 "/opds/search/" .. socketurl.escape(q), socks5_proxy)
+            -- Anything but a 200 ends the ladder: a shorter query can't fix a
+            -- wrong password or a dead server. It used to carry on -- one
+            -- failed CWA login per word of the filename (CWA locks after 3 a
+            -- minute), or a 15-45 s timeout per word when unreachable -- and
+            -- then report "no candidates", hiding the real reason.
+            if code ~= 200 then return out, code or "unreachable" end
             if body and code == 200 then
                 for _, e in ipairs(parseOpdsEntries(body)) do
                     if e.uuid and not seen[e.uuid] and #out < 10 then
@@ -6832,6 +6930,20 @@ function Bookbridge:suggestMatchForFile(file)
     end, _("Searching Calibre-Web for candidates..."))
 
     if not completed then return end
+    if (type(candidates) ~= "table" or #candidates == 0) and failure then
+        local text
+        if failure == 401 or failure == 403 then
+            text = T(_("Calibre-Web rejected the login (HTTP %1). Check the Calibre-Web username and password under Bookbridge > Settings."), tostring(failure))
+        elseif failure == 429 then
+            text = _("Calibre-Web is refusing requests after too many failed logins (HTTP 429). Wait a minute, check the Calibre-Web password under Bookbridge > Settings, then try again.")
+        elseif failure == "unreachable" then
+            text = _("Couldn't reach Calibre-Web -- check the Calibre-Web URL in Settings and your connection.")
+        else
+            text = T(_("Calibre-Web answered with an error (HTTP %1) -- try again later."), tostring(failure))
+        end
+        UIManager:show(InfoMessage:new{ text = text })
+        return
+    end
     if type(candidates) ~= "table" or #candidates == 0 then
         UIManager:show(InfoMessage:new{ text = _("Calibre-Web returned no candidates for this book.") })
         return
@@ -7288,6 +7400,20 @@ function Bookbridge:autoCheckForUpdate(reason)
     -- and just holds off for ten minutes, so the next wake or network
     -- event inside the window gets another try instead of waiting hours.
     local last = auto_update_state.last or tonumber(self.last_auto_update_check) or 0
+    -- A saved time in the FUTURE means the clock was ahead when it was
+    -- recorded (no RTC sync yet after a battery drain, a bad NTP answer) and
+    -- has since been corrected. now - last is then negative, so this would
+    -- have skipped every check until real time caught up -- months, if the
+    -- clock had been far off -- silently turning automatic updates off. Same
+    -- for a retry wait: it is never legitimately longer than AUTO_UPDATE_RETRY.
+    if last > now then
+        debugLog("[update] auto: last check time is in the future (clock was ahead?); ignoring it")
+        last = 0
+        auto_update_state.last = nil
+    end
+    if auto_update_state.not_before and auto_update_state.not_before - now > AUTO_UPDATE_RETRY then
+        auto_update_state.not_before = nil
+    end
     if now - last < AUTO_UPDATE_INTERVAL then return end
     if auto_update_state.not_before and now < auto_update_state.not_before then return end
     auto_update_state.running = true
@@ -9712,9 +9838,7 @@ function Bookbridge:downloadFromAnnasArchive(release)
             Trapper:wrap(function()
                 local isbn13 = doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy)
                 if isbn13 then
-                    local hints = loadDownloadIsbnHints()
-                    hints[path] = isbn13
-                    saveDownloadIsbnHints(hints)
+                    addDownloadIsbnHint(path, isbn13)
                     debugLog("[annas] captured isbn13 " .. isbn13 .. " for " .. path)
                 end
             end)
@@ -9828,16 +9952,22 @@ end
 -- one on hand -- checkPendingRequestNotifications below (used from onResume,
 -- where nothing's been fetched yet) is the one place that calls the API.
 local TERMINAL_NON_DELIVERED_STATUSES = { cancelled = true, rejected = true, declined = true }
+-- Shelfmark's own terminal download states (core/models.py
+-- TERMINAL_QUEUE_STATUSES = complete, error, cancelled). An APPROVED request
+-- whose download then failed or was cancelled used to stay on the watch list
+-- forever -- one background query on every wake -- and nobody was ever told
+-- it wasn't coming (found 2026-09-23).
+local TERMINAL_FAILED_DELIVERY_STATES = { error = true, cancelled = true }
 local function reconcilePendingNotifications(requests)
     local pending = loadPendingNotifyList()
-    if next(pending) == nil then return {} end
+    if next(pending) == nil then return {}, {} end   -- (ready, failed): callers take the length of both
 
     local by_id = {}
     for _, r in ipairs(requests or {}) do
         if r.id then by_id[tostring(r.id)] = r end
     end
 
-    local newly_ready = {}
+    local newly_ready, failed = {}, {}
     local changed = false
     for id_str, title in pairs(pending) do
         local r = by_id[id_str]
@@ -9853,10 +9983,14 @@ local function reconcilePendingNotifications(requests)
         elseif TERMINAL_NON_DELIVERED_STATUSES[r.status] then
             pending[id_str] = nil
             changed = true
+        elseif TERMINAL_FAILED_DELIVERY_STATES[r.delivery_state] then
+            table.insert(failed, title)
+            pending[id_str] = nil
+            changed = true
         end
     end
     if changed then savePendingNotifyList(pending) end
-    return newly_ready
+    return newly_ready, failed
 end
 
 -- Checks whether anything this device requested (see submitRequest) has
@@ -9872,6 +10006,10 @@ end
 function Bookbridge:checkPendingRequestNotifications()
     local pending = loadPendingNotifyList()
     if next(pending) == nil then return end
+    if self:shelfmarkLoginKnownBad() then
+        debugLog("[notify] skipped: Shelfmark refused the saved login; not re-sending it in the background")
+        return
+    end
 
     -- Explicit short timeouts, rather than apiRequest's 15s-block/45s-total
     -- defaults. Those defaults are sized for a search the user is sitting
@@ -9894,16 +10032,22 @@ function Bookbridge:checkPendingRequestNotifications()
     local requests = resp.requests or resp
     if type(requests) ~= "table" then return end
 
-    local newly_ready = reconcilePendingNotifications(requests)
-    if #newly_ready == 0 then return end
+    local newly_ready, failed = reconcilePendingNotifications(requests)
+    if #newly_ready == 0 and #failed == 0 then return end
 
-    local text
+    local parts = {}
     if #newly_ready == 1 then
-        text = T(_("Ready to read: %1"), newly_ready[1])
-    else
-        text = T(_("%1 books are ready to read:"), tostring(#newly_ready))
+        parts[#parts + 1] = T(_("Ready to read: %1"), newly_ready[1])
+    elseif #newly_ready > 1 then
+        parts[#parts + 1] = T(_("%1 books are ready to read:"), tostring(#newly_ready))
             .. "\n\n" .. table.concat(newly_ready, "\n")
     end
+    -- Said once: the request leaves the watch list in the same step.
+    if #failed > 0 then
+        parts[#parts + 1] = _("Couldn't be delivered (see My requests):")
+            .. "\n\n" .. table.concat(failed, "\n")
+    end
+    local text = table.concat(parts, "\n\n")
     -- No timeout -- stays on screen until dismissed rather than flashing by,
     -- since this can appear unprompted right as the screen wakes up.
     UIManager:show(InfoMessage:new{ text = text })
@@ -10526,8 +10670,17 @@ function Bookbridge:processHardcoverPending()
     if not ok then error(err, 0) end
 end
 
+-- Marks a push failure caused by the token itself (see the request layer).
+local HC_TOKEN_REJECTED = "rejected the API token"
 function Bookbridge:drainHardcoverPending()
     if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
+    -- A token Hardcover has refused would fail for every book, so after the
+    -- one notice (below) nothing is sent with it again this session. In memory
+    -- only: a new token in Settings resumes at once; a restart tries once more.
+    if self._hc_token_rejected and self._hc_token_rejected == self.hardcover_token then
+        debugLog("[hc] process: skipped -- Hardcover rejected this API token; waiting for a new one")
+        return
+    end
     local pending = loadHardcoverPending()
     if next(pending) == nil then
         self._hc_wait_tries = nil   -- queue drained; don't carry a count into the next book
@@ -10672,12 +10825,21 @@ function Bookbridge:drainHardcoverPending()
                     self:showAfterCloseNotice(T(_("Hardcover couldn't record \"%1\": %2"),
                         tostring(entry.title), tostring(a)))
                 end
+                -- A rejected token fails every other book the same way: stop
+                -- here (one notice, not one per queued book) and pause
+                -- Hardcover until the token changes. The records stay queued.
+                if completed and tostring(a):find(HC_TOKEN_REJECTED, 1, true) then
+                    self._hc_token_rejected = token
+                    break
+                end
             end
         elseif not unmapped then
             unmapped = { md5 = md5, rec = rec }
         end
     end
     saveHardcoverPending(pending)
+    -- A token rejected in the loop above would fail this lookup too.
+    if self._hc_token_rejected and self._hc_token_rejected == token then unmapped = nil end
     if unmapped then
         -- If the open-time lookup for this book is STILL running, wait for it
         -- instead of starting a competing second search. Hardcover throttles

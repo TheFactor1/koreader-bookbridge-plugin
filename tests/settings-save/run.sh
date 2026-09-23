@@ -28,8 +28,10 @@ local pass, fail = 0, 0
 local function ck(ok, what) if ok then pass = pass + 1; print("PASS  " .. what) else fail = fail + 1; print("FAIL  " .. what) end end
 Bookbridge.saveAllSettings(s)
 ck(saved == 1 and #shown == 0, "no message (the automatic update check): settings saved, nothing shown (shown " .. #shown .. ")")
+ck(s.session_cookie == "c", "...and the Shelfmark session is kept (no needless re-login every few hours)")
 Bookbridge.saveAllSettings(s, "Saved.")
 ck(#shown == 1 and shown[1].text == "Saved.", "a message (every settings dialog): shown as before")
+ck(s.session_cookie == nil, "...and the session is dropped, so new credentials are used on the next request")
 print(string.format("=== %d passed, %d failure(s)", pass, fail))
 os.exit(fail == 0 and 0 or 1)
 LUA

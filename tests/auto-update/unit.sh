@@ -41,6 +41,19 @@ ck(#LOG == 0, "five hours later: inside the interval, no check")
 LOG = {}; CHECK = { manifest = true, changed = { "main.lua" }, build = "def" }; NOW = B + 2000 + 7 * 3600; Bookbridge.autoCheckForUpdate(dev, "startup")
 ck(installed == 1 and LOG[2]:find("installing"), "seven hours later: a changed build is installed")
 -- 4. switch off / no source: nothing at all
+-- 5. a clock that was ahead and got corrected must not switch updates off (2026-09-23)
+LOG = {}; CHECK = { manifest = true, changed = {}, build = "abc" }; NOW = B - 30 * 24 * 3600
+Bookbridge.autoCheckForUpdate(dev, "wake")
+ck(#LOG >= 2, "clock set back a month after a check: still checks (the saved time is in the future)")
+LOG = {}; NOW = NOW + 60; Bookbridge.autoCheckForUpdate(dev, "wake")
+ck(#LOG == 0, "...and then the normal six-hour interval applies from the corrected time")
+-- 6. a retry wait stranded in the future by a clock correction is dropped
+LOG = {}; CHECK = nil; NOW = NOW + 7 * 3600; Bookbridge.autoCheckForUpdate(dev, "wake")   -- fails: waits 10 min
+LOG = {}; CHECK = { manifest = true, changed = {}, build = "abc" }; NOW = NOW - 24 * 3600
+Bookbridge.autoCheckForUpdate(dev, "wake")
+ck(#LOG >= 1, "a retry wait stranded a day ahead by a clock correction doesn't block the next check")
+NOW = B + 400 * 24 * 3600
+
 LOG = {}; NOW = NOW + 24 * 3600; Bookbridge.autoCheckForUpdate(plugin({ auto_update = false, update_url = "http://srv" }), "wake"); Bookbridge.autoCheckForUpdate(plugin({ auto_update = true, update_url = "" }), "wake")
 ck(#LOG == 0, "off, or no update source: never checks")
 print(("=== AUTO UPDATE UNIT %d/%d"):format(n - fails, n), fails == 0 and "PASS" or "FAIL"); os.exit(fails == 0 and 0 or 1)

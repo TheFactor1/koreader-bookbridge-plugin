@@ -21,6 +21,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
 awk '/^local function hardcoverErrorIsTransient/{f=1}   f{print} f&&/^end$/{exit}' "$M" >  "$W/fns.lua"
 grep -E '^local HC_PROCESS_STALE = ' "$M" >> "$W/fns.lua"
+grep -E '^local HC_TOKEN_REJECTED = ' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:drainHardcoverPending/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:checkHardcoverFinishedBook/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
@@ -219,6 +220,31 @@ do
   sg._hc_processing = os.time() - 700; PUSHES = 0
   PENDING = { g = { title = "G", percent = 0.6 } }; sg:processHardcoverPending()
   ck(PUSHES == 1, "a stale in-progress mark (>10 min) doesn't block syncing")
+end
+
+-- 3f. a rejected API token: ONE notice, then Hardcover is paused until it changes
+do
+  local TOKMSG = "Hardcover rejected the API token (HTTP 401) -- update it under Bookbridge > Settings."
+  ck(HC_TRANSIENT(TOKMSG) == false, "a rejected token is not transient (it was silently retried forever as \"request failed\")")
+  local st = setmetatable({ hardcover_progress_sync = true, hardcover_token = "old",
+      confirmHardcoverMatch = function() end, resolveHardcoverMatch = function() end }, { __index = Bookbridge })
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return false, TOKMSG end
+  MAP = { a = { decision = "sync", book_id = 1, title = "A" }, b = { decision = "sync", book_id = 2, title = "B" },
+          c = { decision = "sync", book_id = 3, title = "C" } }
+  shown = {}; PUSHES = 0
+  for i = 1, 4 do
+    PENDING = { a = { title = "A", percent = 0.1 + i / 100 }, b = { title = "B", percent = 0.2 + i / 100 }, c = { title = "C", percent = 0.3 + i / 100 } }
+    st:processHardcoverPending()
+  end
+  local notes = 0; for _, w in ipairs(shown) do if tostring(w.text or w):find("rejected the API token", 1, true) then notes = notes + 1 end end
+  ck(notes == 1, "3 queued books x 4 closes with a bad token: ONE notice (got " .. notes .. ")")
+  ck(PUSHES == 1, "...and one request in total, not one per book per close (sent " .. PUSHES .. ")")
+  ck(PENDING.a and PENDING.b and PENDING.c, "...all three stay queued for when the token is fixed")
+  -- a new token in Settings resumes straight away
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
+  st.hardcover_token = "new"; PUSHES = 0
+  st:processHardcoverPending()
+  ck(PUSHES == 3 and next(PENDING) == nil, "new token: syncing resumes at once and the queue drains")
 end
 
 -- 4. Wi-Fi back -> flush, but only when there is something queued
