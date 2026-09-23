@@ -208,7 +208,13 @@ function Bookbridge:saveAllSettings(msg)
     })
     self.sm_settings:flush()
     self.session_cookie = nil -- force re-login with new creds
-    UIManager:show(InfoMessage:new{ text = msg, timeout = 2 })
+    -- Only when there is something to say. The automatic update check saves
+    -- its timestamp through here with no message, and InfoMessage's default
+    -- text is "", so every check (startup, wake, reconnect -- up to ~4 a day)
+    -- flashed an empty box with just an icon. Same for the auto-update toggle.
+    if msg then
+        UIManager:show(InfoMessage:new{ text = msg, timeout = 2 })
+    end
 end
 
 function Bookbridge:editServerSettings()
@@ -1119,11 +1125,26 @@ end
 -- delivered file ends up (see the note on Bookbridge:downloadFromCwa), so
 -- this is the only way to close that loop from inside this plugin.
 
+-- Per-run request guard for a library sync. CWA locks an account after 3
+-- failed logins a minute and answers 429 from then on. Before this, a sync
+-- with a wrong password carried on regardless -- one request per tracked book
+-- and several per untracked file -- measured at 68 requests in 18 s on
+-- 2026-09-23, 63 of them already refused by the lockout. While a run holds a
+-- guard, the first 401/403/429 marks it stopped: every later request in that
+-- run returns that code without touching the network, and doSyncLibrary ends
+-- the run at its next checkpoint. nil outside a run, so no other caller of
+-- doCwaRequest is affected.
+local cwa_run_guard = nil
+
 -- Returns the raw response body (a string; not JSON) plus the HTTP code.
 local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting")
         return nil, nil, _("Calibre-Web URL isn't set -- add it under Bookbridge > Settings.")
+    end
+    if cwa_run_guard and cwa_run_guard.stopped then
+        debugLog("[cwa] -- skipped " .. path .. " (run stopped after HTTP " .. tostring(cwa_run_guard.stopped) .. ")")
+        return nil, cwa_run_guard.stopped
     end
     local headers = {}
     if username and username ~= "" then
@@ -1157,6 +1178,9 @@ local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
         return nil, nil, _("Request to Calibre-Web timed out.")
     end
     debugLog("[cwa] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#table.concat(sink_table)))
+    if cwa_run_guard and (code == 401 or code == 403 or code == 429) then
+        cwa_run_guard.stopped = code
+    end
     return table.concat(sink_table), code
 end
 
@@ -4726,7 +4750,31 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     -- fetch would then look identical to a real deletion. Those still go
     -- through the per-book check, which distinguishes them properly.
     -- nil (fetch failed) simply disables the optimization for this run.
+    --
+    -- The catalog is also the first request of the run, so it is where a
+    -- wrong password or an active lockout shows up: armed here, the guard
+    -- stops the run after that ONE request (see cwa_run_guard).
+    cwa_run_guard = {}
+    local function finishStopped()
+        local code = cwa_run_guard and cwa_run_guard.stopped
+        cwa_run_guard = nil
+        -- Same saves as a normal finish: anything the run already did (a
+        -- tracked book re-downloaded before a lockout began mid-run) is kept,
+        -- so the next sync doesn't redo it.
+        saveSyncRegistry(registry)
+        savePendingUploads(pending_uploads)
+        if code == 429 then
+            addLine(_("Sync stopped: Calibre-Web is refusing requests after too many failed logins (HTTP 429). Wait a minute, check the Calibre-Web password under Bookbridge > Settings, then sync again."))
+        elseif code == 403 then
+            addLine(_("Sync stopped: Calibre-Web refused access (HTTP 403). Check that this Calibre-Web account is allowed to use OPDS, then sync again."))
+        else
+            addLine(T(_("Sync stopped: Calibre-Web rejected the login (HTTP %1). Check the Calibre-Web username and password under Bookbridge > Settings, then sync again."), tostring(code)))
+        end
+        reportProgress(100)
+        return report, replaced_paths, unmatched
+    end
     local catalog = fetchCwaCatalog(cwa_url, cwa_username, cwa_password, socks5_proxy)
+    if cwa_run_guard.stopped then return finishStopped() end
     local skipped_unchanged = 0
 
     local tracked_done = 0
@@ -4775,6 +4823,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     if skipped_unchanged > 0 then
         addLine(T(_("  (%1 unchanged in Calibre-Web -- checked in one request)"), skipped_unchanged))
     end
+    if cwa_run_guard and cwa_run_guard.stopped then return finishStopped() end
 
     local known_paths = {}
     for _, entry in pairs(registry) do
@@ -5944,6 +5993,9 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         -- redoes what it hadn't finished yet, not everything.
         saveSyncRegistry(registry)
     end
+    -- Before the upload phase: its login is a separate POST that would count
+    -- as one more failed login against a lockout already in progress.
+    if cwa_run_guard and cwa_run_guard.stopped then return finishStopped() end
 
     local uploaded = {}
     if #to_upload > 0 then
@@ -6042,6 +6094,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
 
     saveSyncRegistry(registry)
     savePendingUploads(pending_uploads)
+    cwa_run_guard = nil
     addLine(_("Done."))
     reportProgress(100)
     return report, replaced_paths, unmatched
@@ -6548,8 +6601,16 @@ local function runSyncWithProgress(title, subtitle, sync_args)
     local cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, only_path =
         sync_args[1], sync_args[2], sync_args[3], sync_args[4], sync_args[5], sync_args[6]
     local completed, report, replaced_paths, unmatched = Trapper:dismissableRunInSubprocess(function()
-        return doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy,
+        -- Always drop the per-run CWA guard afterwards, even if the run
+        -- throws: Trapper falls back to running this IN-PROCESS when it can't
+        -- fork, and a guard left "stopped" there would silently skip every
+        -- later Calibre-Web request (downloads, suggest-match) until the next
+        -- sync. The error itself still propagates exactly as before.
+        local ok, r, rp, um = pcall(doSyncLibrary, cwa_url, cwa_username, cwa_password, socks5_proxy,
             download_dir, only_path, progress_path)
+        cwa_run_guard = nil
+        if not ok then error(r, 0) end
+        return r, rp, um
     end, false)
 
     stopped = true
@@ -9993,6 +10054,13 @@ local function hardcoverErrorIsTransient(err)
         or e:find("timed out", 1, true) ~= nil
         or e:find("timeout", 1, true) ~= nil
         or e:find("connection", 1, true) ~= nil
+        -- The request layer's own wording for a thrown socket/SSL error
+        -- ("Couldn't reach Hardcover.") and for a non-JSON body such as a
+        -- captive portal's login page. Both are network conditions, not
+        -- anything wrong with the book; before 2026-09-23 they fell through
+        -- as permanent and were announced after every close on flaky Wi-Fi.
+        or e:find("couldn't reach", 1, true) ~= nil
+        or e:find("unreadable response", 1, true) ~= nil
 end
 
 -- The actual Hardcover write, given an answer already recorded in
@@ -10324,7 +10392,11 @@ function Bookbridge:checkHardcoverFinishedBook(pending, map)
         end
         if entry and entry.decision == "sync" and entry.book_id and rec.finished and not already_synced then
             self:syncHardcoverFinish(md5, rec, entry, map)
-            return true
+            -- The md5, not true: the caller carries on with every OTHER book
+            -- (see processHardcoverPending). Returning true here used to end
+            -- the whole run, so one finished book whose mark-Read kept
+            -- failing blocked every other book's progress sync indefinitely.
+            return md5
         end
     end
 
@@ -10421,7 +10493,40 @@ end
 -- Pushes every pending record it can: known books silently, and the FIRST
 -- unmatched book through a one-time confirm (the rest wait for the next pass).
 -- Must run inside a Trapper:wrap (both callers provide one).
+-- Runs are serialised. Several triggers can land together -- a wake fires
+-- onResume and onNetworkConnected, a Bookshelf park is followed by the real
+-- close -- and each push yields while its subprocess runs, so a second run
+-- could start mid-way through the first: both working from their own copies
+-- of the queue and the map, double-pushing and double-notifying, and the last
+-- save overwriting whatever the other had recorded (a Review choice, say).
+-- A trigger that arrives during a run is not dropped: it gets one follow-up
+-- run afterwards, which sees anything captured in the meantime. The stale
+-- limit means a run that never came back can't disable syncing for good.
+local HC_PROCESS_STALE = 600   -- seconds
 function Bookbridge:processHardcoverPending()
+    local now = os.time()
+    if self._hc_processing and now - self._hc_processing < HC_PROCESS_STALE then
+        self._hc_process_again = true
+        debugLog("[hc] process: a run is already in progress; queued one more after it")
+        return
+    end
+    self._hc_processing = now
+    self._hc_process_again = nil
+    -- Called on Bookbridge explicitly (not self:), so the body is found even
+    -- when this runs on a bare table; on the plugin instance it's the same.
+    local ok, err = pcall(Bookbridge.drainHardcoverPending, self)
+    self._hc_processing = nil
+    if self._hc_process_again then
+        self._hc_process_again = nil
+        UIManager:scheduleIn(1, function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:processHardcoverPending() end)
+        end)
+    end
+    if not ok then error(err, 0) end
+end
+
+function Bookbridge:drainHardcoverPending()
     if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
     local pending = loadHardcoverPending()
     if next(pending) == nil then
@@ -10435,7 +10540,22 @@ function Bookbridge:processHardcoverPending()
     -- shortcut is designed to drop silently -- which is correct for an
     -- ordinary resync, but would mean a finished book never gets marked Read
     -- if this ran after it instead of before.
-    if self:checkHardcoverFinishedBook(pending, map) then return end
+    local finished_md5 = self:checkHardcoverFinishedBook(pending, map)
+    -- true = the finish review QR for an unmatched book is up: that path owns
+    -- this run (unchanged). An md5 = a matched finished book's mark-Read was
+    -- just attempted. That write ran to completion synchronously (direct
+    -- requests, no subprocess) and saved the map and the queue itself, so
+    -- reload both before going on -- carrying on with the copies loaded above
+    -- would save stale state back over it -- and leave that one book alone
+    -- below: it stays queued and its mark-Read is retried next time.
+    if finished_md5 == true then return end
+    local skip_md5
+    if finished_md5 then
+        skip_md5 = finished_md5
+        pending = loadHardcoverPending()
+        map = loadHardcoverMap()
+        if next(pending) == nil then debugLog("[hc] process: nothing else pending"); return end
+    end
     local token = self.hardcover_token
     local Trapper = require("ui/trapper")
     local n = 0; for _ in pairs(pending) do n = n + 1 end
@@ -10443,7 +10563,10 @@ function Bookbridge:processHardcoverPending()
     local unmapped
     for md5, rec in pairs(pending) do
         local entry = map[md5]
-        if entry and entry.decision == "skip" then
+        if md5 == skip_md5 then
+            -- Its mark-Read was attempted above this run; see the note there.
+            debugLog("[hc] process: " .. tostring(entry and entry.title or rec.title) .. " handled by the finish sync; not pushing progress")
+        elseif entry and entry.decision == "skip" then
             -- Dropping it silently is how "nothing happens, no dialog, no log"
             -- looked on-device: say which book, and how to undo it.
             debugLog(string.format(
@@ -10472,7 +10595,8 @@ function Bookbridge:processHardcoverPending()
             end, {})
             if completed and ok then
                 pending[md5] = nil
-                entry.last_percent = rec.percent; entry.no_pages_noticed = nil  -- re-arm the one-time notice
+                entry.last_percent = rec.percent
+                entry.push_notified_error = nil; entry.no_pages_noticed = nil  -- re-arm the failure notice
                 map[md5] = entry; saveHardcoverMap(map)
                 debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(entry.title), tostring(a), tostring(b)))
                 -- No toast here any more (2026-09-18): this fires on every
@@ -10532,16 +10656,19 @@ function Bookbridge:processHardcoverPending()
                 end
             else
                 debugLog("[hc] push failed for " .. tostring(entry.title) .. ": " .. tostring(a))
-                -- "no_pages" is permanent for that edition, and the record stays
-                -- pending, so without this it re-announced itself on EVERY close
-                -- (reported 2026-09-23 for "The Girl with the Dragon Tattoo").
-                -- Say it once per book; keep retrying silently, so it syncs by
-                -- itself if Hardcover ever gains a page count.
-                if completed and not hardcoverErrorIsTransient(a)
-                        and not (b == "no_pages" and entry.no_pages_noticed) then
-                    if b == "no_pages" then
-                        entry.no_pages_noticed = true; map[md5] = entry; saveHardcoverMap(map)
-                    end
+                -- A permanent error leaves the record queued, so without a memory
+                -- it was re-announced on EVERY close -- first reported 2026-09-23
+                -- for "no page count", and equally true of a book deleted or
+                -- merged on Hardcover, or a GraphQL rejection. Say each distinct
+                -- error once per book (as writeHardcoverFinish already does for
+                -- mark-Read) and keep retrying silently, so it syncs by itself if
+                -- the cause clears. no_pages_noticed is build 761a652's flag for
+                -- the same thing, honoured so an upgraded device doesn't repeat it.
+                local already_said = entry.push_notified_error == a
+                    or (b == "no_pages" and entry.no_pages_noticed)
+                if completed and not hardcoverErrorIsTransient(a) and not already_said then
+                    entry.push_notified_error = a; entry.no_pages_noticed = nil
+                    map[md5] = entry; saveHardcoverMap(map)
                     self:showAfterCloseNotice(T(_("Hardcover couldn't record \"%1\": %2"),
                         tostring(entry.title), tostring(a)))
                 end
@@ -10914,15 +11041,16 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
         end, {})
         if completed and ok then
             self:clearHardcoverPending(md5)
-            map[md5].last_percent = rec.percent; map[md5].no_pages_noticed = nil; saveHardcoverMap(map)
+            map[md5].last_percent = rec.percent
+            map[md5].push_notified_error = nil; map[md5].no_pages_noticed = nil; saveHardcoverMap(map)
             debugLog(string.format("[hc] pushed %s: page %s of %s", tostring(ft), tostring(a), tostring(b)))
             self:showAfterCloseNotice(T(_("Hardcover: synced as \"%1\" by %2 -- page %3 of %4 (%5%)."),
                 ft, tostring(fa), tostring(a), tostring(b), math.floor((rec.percent or 0) * 100 + 0.5)))
         else
             debugLog("[hc] push failed for " .. tostring(ft) .. ": " .. tostring(a))   -- stays pending; retried later
-            if completed and not hardcoverErrorIsTransient(a) then
-                -- Once per book for the permanent "no_pages" case; see processHardcoverPending.
-                if b == "no_pages" then map[md5].no_pages_noticed = true; saveHardcoverMap(map) end
+            -- Once per distinct error per book; see drainHardcoverPending.
+            if completed and not hardcoverErrorIsTransient(a) and map[md5].push_notified_error ~= a then
+                map[md5].push_notified_error = a; saveHardcoverMap(map)
                 self:showAfterCloseNotice(T(_("Hardcover couldn't record \"%1\": %2"), ft, tostring(a)))
             end
         end

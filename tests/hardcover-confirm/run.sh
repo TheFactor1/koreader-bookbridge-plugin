@@ -23,8 +23,12 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 # Extracted by name so it cannot drift from the real implementation.
-awk '/^function Bookbridge:resolveHardcoverMatch/{f=1} f{print} f&&/^end$/{exit}' \
+# The REAL transient/permanent classifier, first: a chunk local its callers
+# below resolve to (a stub here once disagreed with it about "timed out").
+awk '/^local function hardcoverErrorIsTransient/{f=1} f{print} f&&/^end$/{exit}' \
     "$REPO/bookbridge.koplugin/main.lua" > "$W/confirm.lua"
+awk '/^function Bookbridge:resolveHardcoverMatch/{f=1} f{print} f&&/^end$/{exit}' \
+    "$REPO/bookbridge.koplugin/main.lua" >> "$W/confirm.lua"
 awk '/^function Bookbridge:pickHardcoverCandidate/{f=1} f{print} f&&/^end$/{exit}' \
     "$REPO/bookbridge.koplugin/main.lua" >> "$W/confirm.lua"
 awk '/^function Bookbridge:showAfterCloseNotice/{f=1} f{print} f&&/^end$/{exit}' \
@@ -57,9 +61,8 @@ local SEARCHES = 0
 doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return 999, "SEARCHED", "Someone", nil, { {id=999,title="SEARCHED",author="Someone"} }, false end
 doHardcoverPushProgress = function() return true, 8, 382 end
 -- Added to the plugin after this harness was written: slug caching at match
--- time, and the transient/permanent error split for push-failure notices.
+-- time. (The transient/permanent classifier is the real one, extracted above.)
 doHardcoverGetBookSlug = function() return "test-slug" end
-hardcoverErrorIsTransient = function(err) return tostring(err):find("timeout", 1, true) ~= nil end
 Bookbridge = {}
 assert(load(io.open(SRC):read("*a")))()
 
@@ -83,6 +86,24 @@ ck(shown[1].text:find("page 8 of 382", 1, true) ~= nil, "the note carries the pa
 ck(MAP.m and MAP.m.decision=="sync" and MAP.m.book_id==427473, "confident match: recorded as sync")
 ck(PUSHES == 1 and CLEARED[1] == "m", "confident match: progress pushed and the queue entry cleared")
 ck(SEARCHES == 0, "confident match from prefetch: zero searches")
+
+-- 1b. confident first-time match whose push FAILS (2026-09-23): a permanent
+-- error is said once and remembered on the new map entry -- the flag every
+-- later close checks, so it isn't repeated -- and a transient one says nothing.
+shown = {}; MAP = {}; CLEARED = {}
+doHardcoverPushProgress = function() return false, "Book not found" end
+Bookbridge.resolveHardcoverMatch(inst{ _hc_prefetch = { m = { book_id=427473, title="Red Rising", author="Pierce Brown", ranked={}, confident=true } } },
+    "m", { title="Red Rising", author="Pierce Brown", percent=0.02 })
+local notes = 0; for _, w in ipairs(shown) do if tostring(w.text or ""):find("couldn't record", 1, true) then notes = notes + 1 end end
+ck(notes == 1 and MAP.m and MAP.m.push_notified_error == "Book not found", "first-match push fails permanently: one notice, and remembered for later closes")
+ck(#CLEARED == 0, "...progress stays queued for a retry")
+shown = {}; MAP = {}
+doHardcoverPushProgress = function() return false, "Hardcover request timed out." end
+Bookbridge.resolveHardcoverMatch(inst{ _hc_prefetch = { m = { book_id=427473, title="Red Rising", author="Pierce Brown", ranked={}, confident=true } } },
+    "m", { title="Red Rising", author="Pierce Brown", percent=0.02 })
+notes = 0; for _, w in ipairs(shown) do if tostring(w.text or ""):find("couldn't record", 1, true) then notes = notes + 1 end end
+ck(notes == 0 and MAP.m and MAP.m.push_notified_error == nil, "first-match push fails transiently: no notice, nothing remembered")
+doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
 
 -- 2. uncertain prefetch -> review, no UI, no push, progress kept
 shown = {}; MAP = {}; PUSHES = 0; CLEARED = {}

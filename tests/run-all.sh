@@ -79,6 +79,17 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, pref
 elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-confirm (no local KOReader)"; skipped="${skipped:+$skipped, }hardcover-confirm"
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
+section "Calibre-Web auth stop (a wrong password ends a sync after one request)"
+out=$(bash tests/cwa-auth-stop/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, real doSyncLibrary + doCwaRequest vs a refusing server"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
+section "Settings save (no blank confirmation box)"
+out=$(bash tests/settings-save/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  settings-save (no local KOReader)"; skipped="${skipped:+$skipped, }settings-save"
+else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
+
 section "Rename migration (a Bookbridge build inside the old shelfmark.koplugin folder moves itself)"
 out=$(bash tests/rename-migration/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- copies itself, disables the old folder, offers a restart, then removes the old folder"

@@ -19,7 +19,12 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 [ -x "${KDIR:-/nonexistent}/luajit" ] || { echo "SKIP  no local KOReader (set KOREADER_DIR)"; exit 3; }
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
-awk '/^function Bookbridge:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit}' "$M" >  "$W/fns.lua"
+awk '/^local function hardcoverErrorIsTransient/{f=1}   f{print} f&&/^end$/{exit}' "$M" >  "$W/fns.lua"
+grep -E '^local HC_PROCESS_STALE = ' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:drainHardcoverPending/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:checkHardcoverFinishedBook/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+echo 'HC_TRANSIENT = hardcoverErrorIsTransient   -- export the chunk-local classifier to the test' >> "$W/fns.lua"
 awk '/^function Bookbridge:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:captureReadingProgress/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
@@ -67,7 +72,7 @@ do
   end
 end
 doHardcoverGetBookSlug = function() return "test-slug" end   -- slug backfill piggybacks on a successful push
-hardcoverErrorIsTransient = function(err) return tostring(err):find("timeout", 1, true) ~= nil end
+-- (hardcoverErrorIsTransient is the REAL one, extracted from main.lua)
 
 local pass, fail = 0, 0
 local function ck(c,m) if c then pass=pass+1; print("PASS  "..m) else fail=fail+1; print("FAIL  "..m) end end
@@ -139,17 +144,81 @@ do
   for i = 1, 3 do PENDING = { g = { title = "G", percent = 0.1 + i / 100 } }; sn:processHardcoverPending() end
   local notes = 0; for _, w in ipairs(shown) do if tostring(w.text or w):find("no page count", 1, true) then notes = notes + 1 end end
   ck(PUSHES == 3 and notes == 1, "no page count: retried every close, but announced only once (got "..notes..")")
-  ck(PENDING.g ~= nil and MAP.g.no_pages_noticed == true, "...record stays queued for a later retry, and remembers it said so")
+  ck(PENDING.g ~= nil and MAP.g.push_notified_error == NOPAGES, "...record stays queued for a later retry, and remembers it said so")
   -- a later success re-arms the notice, so a genuinely new failure is still reported
   doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
   PENDING = { g = { title = "G", percent = 0.5 } }; sn:processHardcoverPending()
   ck(MAP.g.no_pages_noticed == nil, "successful push clears the flag (notice re-armed)")
-  -- a different, non-transient error on another book is still shown every time (unchanged)
+  -- any other permanent error: said once per book too, not on every close
   doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return false, "Book not found" end
-  MAP.h = { decision = "sync", book_id = 7, title = "H" }; shown = {}
-  for i = 1, 2 do PENDING = { h = { title = "H", percent = 0.2 + i / 100 } }; sn:processHardcoverPending() end
-  ck(#shown == 2, "other permanent errors keep their existing behaviour (shown each time)")
+  MAP.h = { decision = "sync", book_id = 7, title = "H" }; shown = {}; PUSHES = 0
+  for i = 1, 3 do PENDING = { h = { title = "H", percent = 0.2 + i / 100 } }; sn:processHardcoverPending() end
+  ck(PUSHES == 3 and #shown == 1, "a book deleted on Hardcover: retried each close, announced once (got " .. #shown .. ")")
+  -- ...but a DIFFERENT error is new information, so it is said
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return false, "Edition was merged" end
+  PENDING = { h = { title = "H", percent = 0.3 } }; sn:processHardcoverPending()
+  ck(#shown == 2, "a different error for the same book is announced")
+  -- an upgraded device keeps build 761a652's no_pages memory (no repeat on upgrade)
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return false, NOPAGES, "no_pages" end
+  MAP.u = { decision = "sync", book_id = 5, title = "U", no_pages_noticed = true }; shown = {}
+  PENDING = { u = { title = "U", percent = 0.3 } }; sn:processHardcoverPending()
+  ck(#shown == 0, "no_pages already announced by 761a652 is not repeated after upgrading")
   doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
+end
+
+-- 3c. network conditions are transient: never narrated after a close
+do
+  ck(HC_TRANSIENT("Couldn't reach Hardcover.") == true, "a thrown socket/SSL error (\"Couldn't reach Hardcover.\") is transient")
+  ck(HC_TRANSIENT("Hardcover returned an unreadable response.") == true, "a captive portal's non-JSON page is transient")
+  ck(HC_TRANSIENT("Hardcover request timed out.") == true, "a timeout is transient (unchanged)")
+  ck(HC_TRANSIENT("Hardcover has no page count for this edition -- can't record progress.") == false
+     and HC_TRANSIENT("Book not found") == false, "real problems with the book are still permanent")
+end
+
+-- 3d. one finished book whose mark-Read keeps failing must not block the others
+do
+  local FIN = 0
+  local sb = setmetatable({ hardcover_progress_sync = true, hardcover_token = "t",
+      syncHardcoverFinish = function() FIN = FIN + 1 end,   -- the write fails: nothing cleared
+      confirmHardcoverMatch = function() end, resolveHardcoverMatch = function() end }, { __index = Bookbridge })
+  MAP = { f = { decision = "sync", book_id = 1, title = "Finished F" }, n = { decision = "sync", book_id = 2, title = "Reading N" } }
+  PUSHES = 0
+  for i = 1, 3 do
+    PENDING = { f = { title = "F", percent = 1.0, finished = true, finished_date = "2026-09-23" },
+                n = { title = "N", percent = 0.3 + i / 100 } }
+    sb:processHardcoverPending()
+  end
+  ck(FIN == 3, "the failing finished book's mark-Read is retried every time (" .. FIN .. ")")
+  ck(PUSHES == 3, "...and the OTHER book's progress still syncs every time (pushed " .. PUSHES .. ", the old code: 0)")
+  ck(PENDING.f ~= nil, "...while the finished book stays queued for its retry")
+end
+
+-- 3e. runs are serialised: a trigger arriving mid-run is deferred, not run on top
+do
+  local sg = setmetatable({ hardcover_progress_sync = true, hardcover_token = "t",
+      confirmHardcoverMatch = function() end, resolveHardcoverMatch = function() end }, { __index = Bookbridge })
+  local nested = false
+  doHardcoverPushProgress = function()
+    PUSHES = PUSHES + 1
+    if not nested then nested = true; Bookbridge.processHardcoverPending(sg) end   -- e.g. a wake landing mid-push
+    return true, 8, 382
+  end
+  MAP = { g = { decision = "sync", book_id = 3, title = "G" } }
+  PENDING = { g = { title = "G", percent = 0.4 } }; PUSHES = 0; scheduled = {}
+  sg:processHardcoverPending()
+  ck(PUSHES == 1, "a second trigger during a push does not start a concurrent run (pushed " .. PUSHES .. ")")
+  ck(#scheduled == 1 and scheduled[1].delay == 1, "...it gets one follow-up run instead of being dropped")
+  ck(sg._hc_processing == nil, "...and the in-progress mark is cleared when the run ends")
+  -- a run that errors still clears the mark, and the error still surfaces
+  doHardcoverPushProgress = function() error("boom") end
+  PENDING = { g = { title = "G", percent = 0.5 } }
+  local ok = pcall(sg.processHardcoverPending, sg)
+  ck(not ok and sg._hc_processing == nil, "an error inside a run clears the mark (syncing isn't disabled) and is re-raised")
+  -- a mark left by a run that never returned expires rather than blocking forever
+  doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
+  sg._hc_processing = os.time() - 700; PUSHES = 0
+  PENDING = { g = { title = "G", percent = 0.6 } }; sg:processHardcoverPending()
+  ck(PUSHES == 1, "a stale in-progress mark (>10 min) doesn't block syncing")
 end
 
 -- 4. Wi-Fi back -> flush, but only when there is something queued
