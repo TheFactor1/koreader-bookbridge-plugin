@@ -304,7 +304,7 @@ do
     ck(closes == 1, "CloseConfigMenu with nothing parked (a normal config close) does nothing")
     parked = true
     sm:onCloseConfigMenu(); for _, f in ipairs(ticks) do f() end; ticks = {}
-    ck(closes == 2, "CloseConfigMenu while parked, past the debounce -> treated as a close")
+    ck(closes == 1, "CloseConfigMenu once the park is hooked -> ignored (the hook catches real parks; 5ad953d)")
     UIManager.nextTick = old_next
     package.loaded["lib/bookshelf_reader_park"] = nil; package.loaded["apps/reader/readerui"] = nil
 end
