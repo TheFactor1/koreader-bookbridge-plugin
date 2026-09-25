@@ -4,6 +4,21 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build 14271aa
+
+- **New**: your Anna's Archive download key is now actually tested when you
+  save it (and in Status & setup) -- without using up a download. You'll see
+  "Key works", "Key refused", or that the mirror is down.
+- **New**: a new device with nothing set up opens Status & setup by itself
+  the first time, starting with "Start here: import settings from your
+  server".
+- **New**: on a Kindle using Tailscale, the proxy setting fills itself in --
+  no more typing 127.0.0.1:1055.
+- **Change**: Shelfmark settings now ask only for the address, username and
+  password. The proxy and pairing relay moved to an **Advanced** button.
+- **New**: when a search, request, download or Hardcover list fails, the
+  message has a **Status & setup** button that shows what's wrong.
+
 ## 2026-09-25 — build ae4c182
 
 - **Fix**: the Anna's Archive check only confirms the service answers, and now
