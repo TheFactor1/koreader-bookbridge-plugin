@@ -27,6 +27,7 @@ awk '/^function Bookbridge:drainHardcoverPending/{f=1}   f{print} f&&/^end$/{exi
 awk '/^function Bookbridge:checkHardcoverFinishedBook/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 echo 'HC_TRANSIENT = hardcoverErrorIsTransient   -- export the chunk-local classifier to the test' >> "$W/fns.lua"
 awk '/^function Bookbridge:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:pullReadestPositionWhenOnline/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:writeHardcoverFinish/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:captureReadingProgress/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
@@ -272,7 +273,7 @@ do
 end
 
 -- 4. Wi-Fi back -> flush, but only when there is something queued
-local s4 = { hardcover_progress_sync=true, hardcover_token="t" }
+local s4 = setmetatable({ hardcover_progress_sync=true, hardcover_token="t" }, { __index = Bookbridge })
 PENDING = {}; scheduled = {}
 Bookbridge.onNetworkConnected(s4)
 ck(#scheduled == 0, "network back with an empty queue does nothing")
@@ -283,9 +284,9 @@ ck(scheduled[1] and scheduled[1].delay == 2, "flush waits for the connection to 
 
 -- and stays quiet when the feature is off
 PENDING = { m = { title="X", percent=0.2 } }; scheduled = {}
-Bookbridge.onNetworkConnected({ hardcover_progress_sync=false, hardcover_token="t" })
+Bookbridge.onNetworkConnected(setmetatable({ hardcover_progress_sync=false, hardcover_token="t" }, { __index = Bookbridge }))
 ck(#scheduled == 0, "progress sync off -> network events ignored")
-Bookbridge.onNetworkConnected({ hardcover_progress_sync=true, hardcover_token="" })
+Bookbridge.onNetworkConnected(setmetatable({ hardcover_progress_sync=true, hardcover_token="" }, { __index = Bookbridge }))
 ck(#scheduled == 0, "no token -> network events ignored")
 
 -- capture records what the footer shows, not the raw page ratio

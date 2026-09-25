@@ -11377,6 +11377,7 @@ end
 -- pending work only moved on the next close or resume, so progress read on a
 -- plane sat there until you happened to close another book.
 function Bookbridge:onNetworkConnected()
+    self:pullReadestPositionWhenOnline()
     if self.auto_update and self.update_url and self.update_url ~= "" then
         UIManager:scheduleIn(5, function() self:autoCheckForUpdate("network") end)
     end
@@ -11673,6 +11674,24 @@ function Bookbridge:onSuspend()
     self:stopClipboardReceiver()
     self:captureReadingProgress()
     self:pushReadestPositionBeforeSleep()
+end
+
+-- On a Kindle wake the Readest plugin pulls the open book's position 1 s in,
+-- before Wi-Fi is back, and hands the retry to KOReader -- which is already
+-- restoring Wi-Fi itself and drops it ("A previous connection attempt is
+-- still ongoing!"). Readest only re-pulls on NetworkConnected when Wi-Fi's
+-- action is "prompt", so with "turn on" a position read further on another
+-- device never arrived (confirmed live 2026-09-25). Run Readest's own
+-- background pull once the network is actually up. Same guards as the sleep
+-- push; a pull that finds nothing newer changes nothing.
+function Bookbridge:pullReadestPositionWhenOnline()
+    local ui = self.ui
+    local rs = ui and ui.document and ui.readest
+    if type(rs) ~= "table" or type(rs.scheduleBackgroundPull) ~= "function" then return end
+    local s = rs.settings
+    if type(s) ~= "table" or not s.auto_sync or not s.access_token then return end
+    local ok, err = pcall(function() rs:scheduleBackgroundPull(1) end)
+    debugLog("[readest] network back: position pull " .. (ok and "scheduled" or ("failed: " .. tostring(err))))
 end
 
 -- The Readest plugin saves the reading position 5 s after a page turn (at

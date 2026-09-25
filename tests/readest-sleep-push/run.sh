@@ -16,11 +16,13 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
 awk '/^function Bookbridge:onSuspend/{f=1} f{print} f&&/^end$/{exit}' "$M" > "$W/fns.lua"
 awk '/^function Bookbridge:pushReadestPositionBeforeSleep/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:pullReadestPositionWhenOnline/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -q "pushBookConfig" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
 if [ -f "$RD/main.lua" ]; then
   { grep -E '^local API_CALL_DEBOUNCE_DELAY = ' "$RD/main.lua"
     echo 'ReadestSync = {}'
-    awk '/^function ReadestSync:pushBookConfig/{f=1} f{print} f&&/^end$/{exit}' "$RD/main.lua"; } > "$W/readest.lua"
+    awk '/^function ReadestSync:pushBookConfig/{f=1} f{print} f&&/^end$/{exit}' "$RD/main.lua"
+    awk '/^function ReadestSync:scheduleBackgroundPull/{f=1} f{print} f&&/^end$/{exit}' "$RD/main.lua"; } > "$W/readest.lua"
 fi
 cd "$KDIR" || exit 1
 W="$W" ./luajit - <<'LUA'
@@ -90,6 +92,35 @@ local broken = readest({ auto_sync = true, access_token = "t" })
 broken.pushBookConfig = function() error("readest internals changed") end
 local ok = pcall(function() bb(broken):onSuspend() end)
 ck(ok and logs[#logs]:find("failed", 1, true), "a Readest error is caught and logged, sleep carries on")
+-- network back after a wake: Readest's own background pull is scheduled
+local scheduled = {}
+UIManager = UIManager or {}
+UIManager.scheduleIn = function(_s, d, f) scheduled[#scheduled + 1] = { d = d, f = f } end
+UIManager.unschedule = function() end
+package.loaded["ui/uimanager"] = UIManager
+if not ReadestProto.scheduleBackgroundPull then
+    ReadestProto.scheduleBackgroundPull = function(self, delay)
+        UIManager:scheduleIn(delay, function() self:pullBookConfig(false) end)
+    end
+end
+local pulls = 0
+local function readestPull(settings)
+    local r = readest(settings)
+    r.pullBookConfig = function() pulls = pulls + 1 end
+    r.pullBookNotes = function() end
+    r.pullBookStats = function() end
+    return r
+end
+bb(readestPull({ auto_sync = true, access_token = "t" })):pullReadestPositionWhenOnline()
+ck(#scheduled == 1 and scheduled[1].d == 1, "network back with a book open: Readest's pull scheduled 1 s out")
+for _, t in ipairs(scheduled) do t.f() end
+ck(pulls == 1, "...and it runs Readest's own position pull")
+ck(logs[#logs] == "[readest] network back: position pull scheduled", "...logged")
+scheduled, pulls = {}, 0
+bb(readestPull({ auto_sync = false, access_token = "t" })):pullReadestPositionWhenOnline()
+bb(readestPull({ auto_sync = true, access_token = "t" }), false):pullReadestPositionWhenOnline()
+bb(nil):pullReadestPositionWhenOnline()
+ck(#scheduled == 0, "no pull when auto sync is off, no book is open, or Readest isn't installed")
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)
 LUA
