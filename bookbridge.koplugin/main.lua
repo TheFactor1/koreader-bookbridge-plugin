@@ -1237,6 +1237,41 @@ end
 -- own ~1.3KB HTML error page, silently reported as a successful sync.
 -- Same temp-file-then-rename fix downloadFromAnnasArchive already uses,
 -- for the identical reason.
+-- KOReader records a book's partial-md5 fingerprint in its sidecar the first
+-- time the book is opened and never recomputes it. After a download replaces
+-- an already-opened book with CWA's copy, the sidecar kept the OLD file's
+-- fingerprint, so Readest (and anything else keyed by it) saw a different
+-- book from the one other devices downloaded. Re-stamp it from the new bytes,
+-- and carry the Hardcover map/queue entries across so they don't re-match.
+-- Skipped for the open document: its in-memory settings would write the old
+-- value back on close.
+local function refreshBookFingerprint(path)
+    local ok_ds, DocSettings = pcall(require, "docsettings")
+    if not ok_ds or not DocSettings:hasSidecarFile(path) then return end
+    local ok_rui, ReaderUI = pcall(require, "apps/reader/readerui")
+    local open_doc = ok_rui and ReaderUI.instance and ReaderUI.instance.document and ReaderUI.instance.document.file
+    if open_doc == path then
+        debugLog("[cwa] fingerprint: " .. tostring(path) .. " is open; left as is")
+        return
+    end
+    local ok, err = pcall(function()
+        local ds = DocSettings:open(path)
+        local old = ds:readSetting("partial_md5_checksum")
+        local new = require("util").partialMD5(path)
+        if not new or new == old then return end
+        ds:saveSetting("partial_md5_checksum", new)
+        ds:flush()
+        if old then
+            local map = loadHardcoverMap()
+            if map[old] and not map[new] then map[new] = map[old]; map[old] = nil; saveHardcoverMap(map) end
+            local pend = loadHardcoverPending()
+            if pend[old] and not pend[new] then pend[new] = pend[old]; pend[old] = nil; saveHardcoverPending(pend) end
+        end
+        debugLog("[cwa] fingerprint: " .. tostring(path) .. " " .. tostring(old) .. " -> " .. tostring(new))
+    end)
+    if not ok then debugLog("[cwa] fingerprint update failed for " .. tostring(path) .. ": " .. tostring(err)) end
+end
+
 local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy, save_path)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting download")
@@ -1289,12 +1324,14 @@ local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy
         return nil, code, T(_("Download from Calibre-Web failed (HTTP %1)."), tostring(code))
     end
 
+    local replaced = lfs.attributes(save_path, "mode") == "file"
     if not os.rename(temp_path, save_path) then
         debugLog("[cwa] <- HTTP " .. tostring(code) .. " but couldn't move " .. temp_path .. " into place")
         os.remove(temp_path)
         return nil, code, _("Download succeeded but couldn't be saved.")
     end
     debugLog("[cwa] <- HTTP " .. tostring(code) .. " saved to " .. tostring(save_path))
+    if replaced then refreshBookFingerprint(save_path) end
     return true, code
 end
 

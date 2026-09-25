@@ -109,8 +109,8 @@ KPID=$(pgrep -f '^\./luajit \./reader\.lua' | tail -1)
 got=$(curl -s --max-time 5 "$I/ui/bookbridge/download_dir" | tr -d '"')
 [ "$got" = "$BOOKS" ] && say PASS "driving the KOReader this run launched (pid ${KPID:-?})" || { say FAIL "inspector belongs to a different KOReader (download_dir=$got)"; exit 1; }
 curl -s --max-time 8 "$I/ui/menu/onShowMenu/" >/dev/null; sleep 1
-idx=""; for i in $(seq 1 24); do t=$(curl -s --max-time 5 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$i/text"); [ "$t" = "Sync library with CWA" ] && { idx=$i; break; }; done
-[ -n "$idx" ] && say PASS "found 'Sync library with CWA' at submenu index $idx" || { say FAIL "sync menu item not found"; exit 1; }
+idx=""; for i in $(seq 1 24); do t=$(curl -s --max-time 5 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$i/text"); [ "$t" = "Sync library with Calibre-Web" ] && { idx=$i; break; }; done
+[ -n "$idx" ] && say PASS "found 'Sync library with Calibre-Web' at submenu index $idx" || { say FAIL "sync menu item not found"; exit 1; }
 
 # --- drive it, exactly as a tap: the item's own Trapper-wrapped callback ---
 curl -s --max-time 8 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$idx/callback/" >/dev/null

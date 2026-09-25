@@ -79,6 +79,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, pref
 elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-confirm (no local KOReader)"; skipped="${skipped:+$skipped, }hardcover-confirm"
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
+section "Fingerprint refresh (a book replaced by CWA's copy gets a new KOReader fingerprint)"
+out=$(bash tests/fingerprint-refresh/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, real DocSettings + partialMD5"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  fingerprint-refresh (no local KOReader)"; skipped="${skipped:+$skipped, }fingerprint-refresh"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Calibre-Web auth stop (a wrong password ends a sync after one request)"
 out=$(bash tests/cwa-auth-stop/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, real doSyncLibrary + doCwaRequest vs a refusing server"
