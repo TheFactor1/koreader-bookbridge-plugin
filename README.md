@@ -27,14 +27,29 @@ for tracking what you read. Runs on Kindle, Android and desktop KOReader.
   installed.
 - About 15 minutes.
 
-*The pictures below are real screenshots: the wizard as it runs, and
-Bookbridge in KOReader, using the example address `100.64.0.10`.*
+*Every picture below is a real screenshot -- the web pages, the terminal
+output, the wizard, Shelfmark and Bookbridge in KOReader -- with red boxes and
+numbers showing where to click, in order. The example address is
+`100.64.0.10`; yours will differ.*
 
 ### Step 1 -- Install Docker on the computer
 
-Docker runs the server programs for you. Install it from
-[docs.docker.com/get-docker](https://docs.docker.com/get-docker/) and open it
-once so it's running.
+Docker runs the server programs for you. Go to
+[docs.docker.com/get-docker](https://docs.docker.com/get-docker/), download
+the one for your computer, install it and open it once so it's running.
+
+<img src="docs/images/step1-docker-download.png" alt="Docker's download page: pick Docker Desktop for your computer, or Docker Engine on a Linux server" width="720">
+
+To check it worked, open a terminal (Mac: **Terminal**; Linux: your
+terminal app; Windows: the **Ubuntu** app from WSL) and type these two lines.
+Any version number means you're ready:
+
+```bash
+docker --version
+docker compose version
+```
+
+<img src="docs/images/step1-terminal-check.png" alt="Terminal: docker --version and docker compose version both print a version" width="720">
 
 ### Step 2 -- Install Tailscale (recommended)
 
@@ -46,17 +61,24 @@ Skip this step if you'll only ever use it at home on the same Wi-Fi.
 - On a Kindle or Kobo: install the *Tailscale VPN* KOReader plugin and sign
   in to the same Tailscale account. Bookbridge finds it by itself later.
 
+<img src="docs/images/step2-tailscale-download.png" alt="Tailscale's download page: pick your system, or the one-line install on Linux; then sign in" width="720">
+
 ### Step 3 -- Download the server files
 
-Open a terminal on the computer and run:
+In the terminal, run:
 
 ```bash
 git clone https://github.com/TheFactor1/bookbridge-server
 cd bookbridge-server
 ```
 
-(No `git`? On the [bookbridge-server page](https://github.com/TheFactor1/bookbridge-server)
-click **Code > Download ZIP**, unzip it, and open a terminal in that folder.)
+<img src="docs/images/step3-terminal-clone.png" alt="Terminal: git clone downloads bookbridge-server, cd moves into it" width="720">
+
+No `git`? On the [bookbridge-server page](https://github.com/TheFactor1/bookbridge-server)
+click **Code**, then **Download ZIP**. Unzip it and open a terminal in that
+folder.
+
+<img src="docs/images/step3-download-zip.png" alt="GitHub: the green Code button, then Download ZIP" width="720">
 
 ### Step 4 -- Start the setup wizard
 
@@ -66,14 +88,19 @@ In the same terminal:
 docker compose -f docker-compose.setup.yml up -d
 ```
 
-Then open **http://localhost:8090** in a web browser on that computer.
+The first time, it builds the wizard (under a minute). A line ending in
+`denied` near the top is normal. When the last line says **Started**, open
+**http://localhost:8090** in a web browser on that computer.
+
+<img src="docs/images/step4-terminal-wizard.png" alt="Terminal: the wizard builds and ends with Container shelfmark-setup Started" width="720">
 
 ### Step 5 -- Follow the wizard
 
-The wizard has five parts, top to bottom:
+The wizard has five parts, top to bottom. The numbers in the pictures follow
+the order you click in.
 
-1. **This machine's address** -- the address your reader will use to reach
-   the computer. With Tailscale it starts with `100.` (the Tailscale app shows
+1. **This machine's address** -- the address your reader uses to reach the
+   computer. With Tailscale it starts with `100.` (the Tailscale app shows
    it). Without Tailscale it's the computer's home-network address, like
    `192.168.1.20`.
 2. **What to run** -- Shelfmark (search & request books) is always on. Tick
@@ -81,65 +108,109 @@ The wizard has five parts, top to bottom:
    reader can download from (recommended). Anna's Archive and AI suggestions
    are optional extras.
 
-   <img src="docs/images/setup-1-wizard-choose.png" alt="The setup wizard: this machine's address, and what to run" width="480">
+   <img src="docs/images/step5-wizard-choose.png" alt="The wizard: this machine's address, tick Library sync, extras optional" width="720">
 
-3. **Configure & start** -- press the button and wait. The first time takes
-   a few minutes while the programs download.
-4. **Check the services** -- every line should say it answered. If one
-   doesn't, wait a minute and press **Re-check**.
+3. **Configure & start** -- click it and wait. The first time takes a few
+   minutes while the programs download.
+4. **Check the services** -- every line should say **up**. If one doesn't,
+   wait a minute and click **Re-check**.
 
-   <img src="docs/images/setup-2-wizard-check.png" alt="Configure & start, then every service checked and up" width="480">
+   <img src="docs/images/step5-wizard-start.png" alt="Configure & start, then every service shows up" width="720">
 
 5. **Pair your Kindle** -- a **6-character code** appears. Leave this page
-   open. The code works for 10 minutes; press **New code** if it runs out.
+   open. The code works for 10 minutes; click **New code** if it runs out.
 
-   <img src="docs/images/setup-3-wizard-code.png" alt="The 6-character pairing code, with what to do on the reader" width="480">
+   <img src="docs/images/step5-wizard-code.png" alt="The 6-character pairing code and the New code button" width="720">
 
 ### Step 6 -- Make your Shelfmark account
 
-Open **http://localhost:8084** and follow Shelfmark's first-time setup. Choose
-a username and password -- you'll type them on your reader in Step 9.
+Open **http://localhost:8084**. Shelfmark starts with no login at all, and
+Bookbridge needs one, so this step has three short parts.
+
+**a. The welcome setup.** Click **Next** twice. On the third page paste a
+Hardcover API key -- Shelfmark uses it to search for books. It's free: sign
+up at [hardcover.app](https://hardcover.app), then copy the key from
+[hardcover.app/account/api](https://hardcover.app/account/api) (the **Get API
+Key** link opens it). Click **Test Connection**, then **Next**. The last page
+can wait -- click **Finish Setup**.
+
+<img src="docs/images/step6-shelfmark-welcome.png" alt="Shelfmark's four welcome pages: Next, Next, paste the Hardcover key, Finish Setup" width="720">
+
+**b. Make your user.** Open the menu at the top right and choose **Settings**.
+
+<img src="docs/images/step6-shelfmark-open-settings.png" alt="Shelfmark: the menu button, then Settings" width="480">
+
+Click **Users & Requests**, then **Create Local User**:
+
+<img src="docs/images/step6-shelfmark-users.png" alt="Settings: Users & Requests, then Create Local User" width="720">
+
+Pick a username and a password (you'll type both on your reader in Step 9),
+scroll down and click **Create**. The first user is the admin.
+
+<img src="docs/images/step6-shelfmark-create-user.png" alt="Create Local User: username, password, confirm password" width="720">
+
+**c. Turn the login on.** Click **Security**, set **Authentication Method** to
+**Local**, and click **Save Changes**. Shelfmark now asks for that username
+and password.
+
+<img src="docs/images/step6-shelfmark-security.png" alt="Security: Authentication Method set to Local, then Save Changes" width="720">
 
 ### Step 7 -- Put Bookbridge on your reader
 
 1. Download **bookbridge.koplugin.zip** from the
-   [latest release](https://github.com/TheFactor1/koreader-bookbridge-plugin/releases/latest).
+   [latest release](https://github.com/TheFactor1/koreader-bookbridge-plugin/releases/latest)
+   (under **Assets**).
+
+   <img src="docs/images/step7-release-download.png" alt="The release's Assets: bookbridge.koplugin.zip" width="560">
+
 2. Unzip it. You get a folder called `bookbridge.koplugin`.
-3. Plug the reader into the computer by USB and copy that folder into
-   KOReader's `plugins` folder:
+3. Plug the reader into the computer by USB. Drag that folder (the folder,
+   not the .zip) into KOReader's `plugins` folder:
    - Kindle: `koreader/plugins`
    - Kobo: `.adds/koreader/plugins`
-4. Eject the reader, then restart KOReader (menu > **Exit** > **Restart KOReader**).
+
+   <img src="docs/images/step7-copy-to-reader.png" alt="Drag the bookbridge.koplugin folder into koreader/plugins on the reader" width="720">
+
+4. Eject the reader. In KOReader, tap the top of the screen, open the menu
+   (the three lines at the top right), then **Exit** > **Restart KOReader**.
+
+   <img src="docs/images/step7-restart-koreader.png" alt="KOReader's menu: Exit, then Restart KOReader" width="420">
 
 ### Step 8 -- Connect the reader to your server
 
-Bookbridge opens **Status & setup** by itself the first time.
+1. Bookbridge opens **Status & setup** by itself the first time. Tap
+   **Start here: import settings from your server**.
 
-<img src="docs/images/setup-4-reader-first-start.png" alt="Status & setup on the first start, with Start here at the top" width="360">
+   <img src="docs/images/step8-start-here.png" alt="Status & setup on the first start: tap Start here" width="420">
 
-1. Tap **Start here: import settings from your server**.
 2. Type the address from Step 5 (just the address, e.g. `100.64.0.10`) and
    the 6-character code, then tap **Import**.
 
-   <img src="docs/images/setup-5-reader-import.png" alt="Import from server: the address and the code" width="360">
+   <img src="docs/images/step8-import.png" alt="Import from server: the address, the code, then Import" width="420">
 
 3. The list checks everything and shows what works -- here the library is
-   signed in, and only the Shelfmark login is left:
+   signed in, and only the Shelfmark login is left.
 
-   <img src="docs/images/setup-6-reader-after-import.png" alt="Status & setup after importing: Shelfmark needs login, Calibre-Web signed in" width="360">
-
+   <img src="docs/images/step8-after-import.png" alt="Status & setup after importing: Shelfmark needs login, Calibre-Web signed in" width="420">
 
 ### Step 9 -- Sign in to Shelfmark
 
-On the same list, the **Shelfmark** line says **Needs login**. Tap it, enter
-the username and password from Step 6, and tap **Apply**. It should say
-**Signed in to Shelfmark**.
+On the same list, tap the **Shelfmark** line (it says **Needs login**). Enter
+the username and password from Step 6 and tap **Apply**.
 
-<img src="docs/images/setup-7-reader-shelfmark-login.png" alt="Shelfmark settings: address, username and password" width="360">
+<img src="docs/images/step9-shelfmark-login.png" alt="Shelfmark settings: username, password, then Apply" width="420">
+
+The line now says **Signed in**:
+
+<img src="docs/images/step9-signed-in.png" alt="Status & setup: Shelfmark signed in" width="420">
 
 **That's it.** Open the **Bookbridge** menu and choose **Search & request a
-book**. When you're finished setting up you can close the wizard -- your
-servers keep running:
+book**.
+
+<img src="docs/images/done-bookbridge-menu.png" alt="The Bookbridge menu: Search & request a book" width="420">
+
+When you're finished setting up you can close the wizard -- your servers keep
+running:
 
 ```bash
 docker compose -f docker-compose.setup.yml down
@@ -167,6 +238,7 @@ docker compose -f docker-compose.setup.yml down
 | **Wrong login** | Tap the line and re-type the username and password. |
 | **Locked -- try later** | Too many wrong passwords. Wait 30 minutes, then try again. |
 | **Needs login** | Tap it and sign in (Step 9). |
+| Search or requests fail in Shelfmark | Shelfmark still has no login, or no Hardcover key -- redo Step 6. |
 | **Not installed** / **Not set up** | Optional -- only needed for that extra feature. |
 
 Import said the code didn't work? Codes are single-use and last 10 minutes --
