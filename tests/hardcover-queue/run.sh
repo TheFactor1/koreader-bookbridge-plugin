@@ -27,6 +27,7 @@ awk '/^function Bookbridge:drainHardcoverPending/{f=1}   f{print} f&&/^end$/{exi
 awk '/^function Bookbridge:checkHardcoverFinishedBook/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 echo 'HC_TRANSIENT = hardcoverErrorIsTransient   -- export the chunk-local classifier to the test' >> "$W/fns.lua"
 awk '/^function Bookbridge:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+grep -E '^local READEST_PULL_DELAYS = ' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:pullReadestPositionWhenOnline/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:writeHardcoverFinish/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"

@@ -16,6 +16,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
 awk '/^function Bookbridge:onSuspend/{f=1} f{print} f&&/^end$/{exit}' "$M" > "$W/fns.lua"
 awk '/^function Bookbridge:pushReadestPositionBeforeSleep/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+grep -E '^local READEST_PULL_DELAYS = ' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:pullReadestPositionWhenOnline/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -q "pushBookConfig" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
 if [ -f "$RD/main.lua" ]; then
@@ -112,10 +113,17 @@ local function readestPull(settings)
     return r
 end
 bb(readestPull({ auto_sync = true, access_token = "t" })):pullReadestPositionWhenOnline()
-ck(#scheduled == 1 and scheduled[1].d == 1, "network back with a book open: Readest's pull scheduled 1 s out")
-for _, t in ipairs(scheduled) do t.f() end
-ck(pulls == 1, "...and it runs Readest's own position pull")
-ck(logs[#logs] == "[readest] network back: position pull scheduled", "...logged")
+ck(#scheduled == 2 and scheduled[1].d == 5 and scheduled[2].d == 15, "network back with a book open: pulls at +5 s and +15 s (lets DHCP settle)")
+ck(logs[#logs] == "[readest] network back: position pulls scheduled (+5s, +15s)", "...logged")
+local function drain() while #scheduled > 0 do local t = table.remove(scheduled, 1); t.f() end end
+drain()
+ck(pulls == 2, "...each runs Readest's own position pull (got " .. pulls .. ")")
+scheduled, pulls = {}, 0
+local b = bb(readestPull({ auto_sync = true, access_token = "t" }))
+b:pullReadestPositionWhenOnline()
+b.ui.document = nil
+drain()
+ck(pulls == 0, "book closed before the pull fires: nothing pulled")
 scheduled, pulls = {}, 0
 bb(readestPull({ auto_sync = false, access_token = "t" })):pullReadestPositionWhenOnline()
 bb(readestPull({ auto_sync = true, access_token = "t" }), false):pullReadestPositionWhenOnline()

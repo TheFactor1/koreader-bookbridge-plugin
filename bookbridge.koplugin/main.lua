@@ -11682,16 +11682,28 @@ end
 -- still ongoing!"). Readest only re-pulls on NetworkConnected when Wi-Fi's
 -- action is "prompt", so with "turn on" a position read further on another
 -- device never arrived (confirmed live 2026-09-25). Run Readest's own
--- background pull once the network is actually up. Same guards as the sleep
--- push; a pull that finds nothing newer changes nothing.
+-- background pull once the network is actually up. Not straight away:
+-- NetworkConnected can fire while the Kindle is still renewing its DHCP lease
+-- ("stale DHCP lease detected, forcing re-DHCP"), and a pull 1 s later failed
+-- silently while a manual pull a minute later worked (confirmed live). So pull
+-- at +5 s and again at +15 s; a pull that finds nothing newer changes nothing.
+-- Same guards as the sleep push, re-checked when each pull fires.
+local READEST_PULL_DELAYS = { 5, 15 }
 function Bookbridge:pullReadestPositionWhenOnline()
     local ui = self.ui
     local rs = ui and ui.document and ui.readest
     if type(rs) ~= "table" or type(rs.scheduleBackgroundPull) ~= "function" then return end
     local s = rs.settings
     if type(s) ~= "table" or not s.auto_sync or not s.access_token then return end
-    local ok, err = pcall(function() rs:scheduleBackgroundPull(1) end)
-    debugLog("[readest] network back: position pull " .. (ok and "scheduled" or ("failed: " .. tostring(err))))
+    for _unused, delay in ipairs(READEST_PULL_DELAYS) do
+        UIManager:scheduleIn(delay, function()
+            if not ui.document or ui.readest ~= rs then return end   -- book closed meanwhile
+            local ok, err = pcall(function() rs:scheduleBackgroundPull(0) end)
+            debugLog("[readest] network back: position pull at +" .. delay .. "s "
+                .. (ok and "started" or ("failed: " .. tostring(err))))
+        end)
+    end
+    debugLog("[readest] network back: position pulls scheduled (+5s, +15s)")
 end
 
 -- The Readest plugin saves the reading position 5 s after a page turn (at
