@@ -11,7 +11,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
 { grep -E '^local HC_TOKEN_REJECTED = |^local hc_rejected_token = |^local CLIPBOARD_RECEIVER_PORT = |^local STATUS_CHECK_MAX_AGE = |^local STATUS_MAX = ' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in collectStatusRows showStatus runStatusChecks; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -27,7 +27,8 @@ loadSyncRegistry = function() return REG end
 loadHardcoverMap = function() return MAP end
 debugLog = function() end
 local shown
-UIManager = { show = function(_s, w) shown = w end, close = function() end }
+local msgs = {}
+UIManager = { show = function(_s, w) shown = w; msgs[#msgs + 1] = w end, close = function() end }
 InfoMessage = { new = function(_s, t) return t end }
 Menu = { new = function(_s, t) return t end }
 shelfmarkCredentialKey = function(u, n, p) return tostring(u) .. "|" .. tostring(n) .. "|" .. tostring(p) end
@@ -36,6 +37,8 @@ doLogin = function() return NET.sm_ok, nil, nil, NET.sm_code end
 doCwaRequest = function() return "", NET.cwa_code end
 doHardcoverGraphQL = function() if NET.hc_ok then return { me = {} } end return nil, NET.hc_err end
 doTestService = function() return NET.annas_ok end
+local ONLINE = true
+package.loaded["ui/network/manager"] = { isOnline = function() return ONLINE end }
 package.loaded["ui/trapper"] = { wrap = function(_s, f) return f() end, dismissableRunInSubprocess = function(_s, f) return true, f() end }
 Bookbridge = {}
 local getRej, setRej = assert(load(io.open(W .. "/fns.lua"):read("*a")))()
@@ -64,7 +67,7 @@ local b = bb({ server_url = "http://s", username = "matt", password = "p", cwa_u
     ui = { readest = ok_rs }, clipboard_server = {}, download_dir = "/mnt/us/books" })
 rows = b:collectStatusRows()
 ck(not rows[1].text:find("Start here", 1, true), "configured: no 'Start here' row")
-ck(row(rows, "Shelfmark").mandatory == "Set up", "Shelfmark: 'Set up' until checked")
+ck(row(rows, "Shelfmark").mandatory == "Saved", "Shelfmark: 'Saved' until checked (not the ambiguous 'Set up')")
 ck(row(rows, "Calibre-Web").mandatory == "3 books synced", "Calibre-Web: shows the synced book count")
 ck(row(rows, "Hardcover").mandatory == "Syncing", "Hardcover: 'Syncing'")
 ck(row(rows, "Readest").mandatory == "Syncing", "Readest: 'Syncing' when signed in with auto sync")
@@ -117,6 +120,62 @@ rows = b:collectStatusRows()
 ck(row(rows, "Shelfmark").mandatory == "Locked -- try later" and row(rows, "Calibre-Web").mandatory == "Wrong login", "check: 429 -> 'Locked', CWA 401 -> 'Wrong login'")
 b._status_checks.at = os.time() - 3600
 ck(row(b:collectStatusRows(), "Shelfmark").mandatory == "Wrong login", "results older than 10 minutes are dropped (the known-bad guard still shows)")
+-- Opening the screen with no recent result checks first, then shows "Signed in"
+b._status_checks = nil
+NET = { sm_ok = true, cwa_code = 200, hc_ok = true }
+shown = nil
+b:showStatus()
+ck(shown and row(shown.item_table, "Shelfmark").mandatory == "Signed in" and row(shown.item_table, "Calibre-Web").mandatory == "Signed in, 3 books",
+   "opening the screen checks the logins first when there's no recent result")
+local calls = 0
+local real = doLogin; doLogin = function(...) calls = calls + 1; return real(...) end
+b:showStatus()
+ck(calls == 0, "...but not again while the result is fresh (no repeated logins)")
+b._status_checks = nil; ONLINE = false; shown = nil
+b:showStatus()
+ck(calls == 0 and shown and row(shown.item_table, "Shelfmark").mandatory == "Saved", "offline: opens straight away without checking")
+ONLINE = true; doLogin = real
+
+-- Verify at setup: saving a connection tests just that login and says so
+b.saveAllSettings = function() end
+local function last() return msgs[#msgs] and msgs[#msgs].text or "" end
+NET = { sm_ok = true }
+b:saveAndVerify("shelfmark")
+ck(last() == "Saved -- signed in to Shelfmark as matt.", "save Shelfmark, login works: 'signed in as matt'")
+NET = { sm_ok = false, sm_code = 401 }
+b:saveAndVerify("shelfmark")
+ck(last() == "Saved, but Shelfmark refused this username or password.", "save Shelfmark, wrong password: says so")
+NET = { sm_ok = false, sm_code = 429 }
+b:saveAndVerify("shelfmark")
+ck(last():find("locked this account", 1, true), "save Shelfmark, account locked: says to wait")
+NET = { cwa_code = 200 }
+local before = calls
+b:saveAndVerify("cwa")
+ck(last() == "Saved -- signed in to Calibre-Web as admin.", "save Calibre-Web: signed in")
+NET = { cwa_code = nil }
+b:saveAndVerify("cwa")
+ck(last():find("couldn't reach Calibre-Web", 1, true), "save Calibre-Web, server down: can't reach")
+NET = { hc_ok = false, hc_err = "Hardcover rejected the API token (HTTP 401)" }
+b:saveAndVerify("hardcover")
+ck(last():find("refused this token", 1, true) and getRej() == "tok", "save Hardcover, bad token: says so and pauses Hardcover")
+NET = { hc_ok = true }
+b:saveAndVerify("hardcover")
+ck(last() == "Saved -- Hardcover accepted the token." and getRej() == nil, "save Hardcover, good token: accepted, Hardcover resumes")
+b.hardcover_token = nil
+b:saveAndVerify("hardcover")
+ck(last() == "Saved.", "cleared a setting: just 'Saved.', nothing to test")
+b.hardcover_token = "tok"; ONLINE = false
+b:saveAndVerify("cwa")
+ck(last():find("Connect to Wi-Fi", 1, true), "offline: saved, with how to test later")
+ONLINE = true
+-- only the saved service is tested
+local logins, cwas = 0, 0
+local rl, rc = doLogin, doCwaRequest
+doLogin = function(...) logins = logins + 1; return rl(...) end
+doCwaRequest = function(...) cwas = cwas + 1; return rc(...) end
+NET = { cwa_code = 200 }
+b:saveAndVerify("cwa")
+ck(logins == 0 and cwas == 1, "saving Calibre-Web tests only Calibre-Web (no Shelfmark login)")
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)
 LUA

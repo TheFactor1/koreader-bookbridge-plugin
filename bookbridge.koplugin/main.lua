@@ -260,7 +260,7 @@ function Bookbridge:editServerSettings()
                         self.socks5_proxy = fields[4] ~= "" and fields[4] or nil
                         self.pairing_relay_url = fields[5] ~= "" and fields[5]:gsub("/*$", "") or nil
                         UIManager:close(self.settings_dialog)
-                        self:saveAllSettings(_("Saved. You'll be logged in on your next search or request."))
+                        self:saveAndVerify("shelfmark")
                     end,
                 },
             },
@@ -295,7 +295,7 @@ function Bookbridge:editCwaSettings()
                         self.cwa_username = fields[2] ~= "" and fields[2] or nil
                         self.cwa_password = fields[3] ~= "" and fields[3] or nil
                         UIManager:close(self.cwa_settings_dialog)
-                        self:saveAllSettings(_("Saved."))
+                        self:saveAndVerify("cwa")
                     end,
                 },
             },
@@ -403,7 +403,7 @@ function Bookbridge:editAnnasSettings()
                         self.annas_download_key = fields[2] ~= "" and fields[2] or nil
                         self.annas_tld = fields[3] ~= "" and fields[3] or "gd"
                         UIManager:close(self.annas_settings_dialog)
-                        self:saveAllSettings(_("Saved."))
+                        self:saveAndVerify("annas")
                     end,
                 },
             },
@@ -446,7 +446,7 @@ function Bookbridge:editHardcoverSettings()
                         self.hardcover_token = fields[1] ~= "" and fields[1] or nil
                         self.hardcover_language = (fields[2] or ""):lower():gsub("%s", "")
                         UIManager:close(self.hardcover_settings_dialog)
-                        self:saveAllSettings(_("Saved."))
+                        self:saveAndVerify("hardcover")
                     end,
                 },
             },
@@ -11991,7 +11991,7 @@ function Bookbridge:collectStatusRows()
     elseif not self.username or self.username == "" then sm = _("Needs login")
     else
         sm = statusCheckedLabel(checks.shelfmark, _("Signed in"))
-            or (self:shelfmarkLoginKnownBad() and _("Wrong login")) or _("Set up")
+            or (self:shelfmarkLoginKnownBad() and _("Wrong login")) or _("Saved")
     end
     add({ text = _("Shelfmark -- search & requests"), mandatory = sm, action = sm_act })
 
@@ -12043,7 +12043,7 @@ function Bookbridge:collectStatusRows()
         rd = _("Auto sync off")
         rd_act = function()
             pcall(function() rs:onReadestSyncToggleAutoSync(true) end)
-            self:showStatus()
+            self:showStatus({ no_auto_check = true })
         end
     else
         rd = _("Syncing")
@@ -12055,7 +12055,7 @@ function Bookbridge:collectStatusRows()
 
     -- Anna's Archive (optional)
     add({ text = _("Anna's Archive -- extra source (optional)"),
-        mandatory = (self.annas_url and self.annas_url ~= "") and (statusCheckedLabel(checks.annas, _("Reachable")) or _("Set up")) or _("Not set up"),
+        mandatory = (self.annas_url and self.annas_url ~= "") and (statusCheckedLabel(checks.annas, _("Reachable")) or _("Saved")) or _("Not set up"),
         action = function() self:editAnnasSettings() end })
 
     -- Updates
@@ -12089,8 +12089,22 @@ function Bookbridge:collectStatusRows()
     return rows
 end
 
-function Bookbridge:showStatus()
+function Bookbridge:showStatus(opts)
+    opts = opts or {}
     if self._status_menu then UIManager:close(self._status_menu); self._status_menu = nil end
+    -- Opening the screen checks the logins when there's no recent result, so
+    -- it can say "Signed in" rather than just "Saved".
+    local checks = self._status_checks
+    local stale = not checks or os.time() - (checks.at or 0) > STATUS_CHECK_MAX_AGE
+    local anything = (self.server_url and self.server_url ~= "") or (self.cwa_url and self.cwa_url ~= "")
+        or (self.hardcover_token and self.hardcover_token ~= "")
+    if stale and anything and not opts.no_auto_check then
+        local ok_nm, NetworkMgr = pcall(require, "ui/network/manager")
+        if ok_nm and NetworkMgr:isOnline() then
+            self:runStatusChecks()
+            return
+        end
+    end
     local menu
     menu = Menu:new{
         title = _("Bookbridge status"),
@@ -12111,54 +12125,120 @@ function Bookbridge:showStatus()
     UIManager:show(menu)
 end
 
--- The only network part of the status screen, and only when asked: one login
--- per service, in a subprocess with a dismissable "Checking..." note.
+-- The network part of the status screen: one login per service, in a
+-- subprocess with a dismissable note. `which` limits it to some services (the
+-- settings dialogs check just the one that was saved); nil = all configured.
+-- Merges into the cached results and keeps the background-login guards in
+-- step with what it learned. Must run inside a Trapper:wrap. Returns the
+-- results table, or nil if cancelled.
+function Bookbridge:checkConnections(which, progress_text)
+    local Trapper = require("ui/trapper")
+    local want = function(k) return which == nil or which[k] end
+    local cfg = {
+        server_url = want("shelfmark") and self.server_url, username = self.username, password = self.password,
+        cwa_url = want("cwa") and self.cwa_url, cwa_username = self.cwa_username, cwa_password = self.cwa_password,
+        token = want("hardcover") and self.hardcover_token, annas_url = want("annas") and self.annas_url,
+        proxy = self.socks5_proxy,
+    }
+    local completed, res = Trapper:dismissableRunInSubprocess(function()
+        local out = {}
+        if cfg.server_url and cfg.server_url ~= "" and cfg.username and cfg.username ~= "" then
+            local ok, _cookie, _err, code = doLogin(cfg.server_url, cfg.username, cfg.password, cfg.proxy)
+            out.shelfmark = { state = ok and "ok" or (code == 401 and "refused" or (code == 429 and "locked" or "down")), code = code }
+        end
+        if cfg.cwa_url and cfg.cwa_url ~= "" and cfg.cwa_username and cfg.cwa_username ~= "" then
+            local _body, code = doCwaRequest(cfg.cwa_url, cfg.cwa_username, cfg.cwa_password, "/opds", cfg.proxy)
+            out.cwa = { state = code == 200 and "ok" or ((code == 401 or code == 403) and "refused" or (code == 429 and "locked" or "down")), code = code }
+        end
+        if cfg.token and cfg.token ~= "" then
+            local data, err = doHardcoverGraphQL(cfg.token, "query { me { id } }")
+            out.hardcover = { state = data and "ok" or (tostring(err):find(HC_TOKEN_REJECTED, 1, true) and "token" or "down") }
+        end
+        if cfg.annas_url and cfg.annas_url ~= "" then
+            out.annas = { state = doTestService(cfg.annas_url, cfg.proxy) and "ok" or "down" }
+        end
+        return out
+    end, progress_text or _("Checking connections..."))
+    if not completed or type(res) ~= "table" then return nil end
+    local cache = self._status_checks
+    if which == nil or not cache or os.time() - (cache.at or 0) > STATUS_CHECK_MAX_AGE then cache = {} end
+    for k, v in pairs(res) do cache[k] = v end
+    if which ~= nil then
+        -- A service whose settings were just emptied has nothing to report.
+        for k in pairs(which) do if not res[k] then cache[k] = nil end end
+    end
+    cache.at = os.time()
+    self._status_checks = cache
+    if res.shelfmark then
+        if res.shelfmark.state == "refused" or res.shelfmark.state == "locked" then
+            self._shelfmark_login_rejected = shelfmarkCredentialKey(self.server_url, self.username, self.password)
+        elseif res.shelfmark.state == "ok" then
+            self._shelfmark_login_rejected = nil
+        end
+    end
+    if res.hardcover then
+        if res.hardcover.state == "token" then hc_rejected_token = self.hardcover_token
+        elseif res.hardcover.state == "ok" and hc_rejected_token == self.hardcover_token then hc_rejected_token = nil end
+    end
+    debugLog(string.format("[status] checked: shelfmark=%s cwa=%s hardcover=%s annas=%s",
+        res.shelfmark and res.shelfmark.state or "-", res.cwa and res.cwa.state or "-",
+        res.hardcover and res.hardcover.state or "-", res.annas and res.annas.state or "-"))
+    return res
+end
+
 function Bookbridge:runStatusChecks()
     local Trapper = require("ui/trapper")
     Trapper:wrap(function()
-        local cfg = {
-            server_url = self.server_url, username = self.username, password = self.password,
-            cwa_url = self.cwa_url, cwa_username = self.cwa_username, cwa_password = self.cwa_password,
-            token = self.hardcover_token, annas_url = self.annas_url, proxy = self.socks5_proxy,
-        }
-        local completed, res = Trapper:dismissableRunInSubprocess(function()
-            local out = {}
-            if cfg.server_url and cfg.server_url ~= "" and cfg.username and cfg.username ~= "" then
-                local ok, _cookie, _err, code = doLogin(cfg.server_url, cfg.username, cfg.password, cfg.proxy)
-                out.shelfmark = { state = ok and "ok" or (code == 401 and "refused" or (code == 429 and "locked" or "down")), code = code }
-            end
-            if cfg.cwa_url and cfg.cwa_url ~= "" and cfg.cwa_username and cfg.cwa_username ~= "" then
-                local _body, code = doCwaRequest(cfg.cwa_url, cfg.cwa_username, cfg.cwa_password, "/opds", cfg.proxy)
-                out.cwa = { state = code == 200 and "ok" or ((code == 401 or code == 403) and "refused" or (code == 429 and "locked" or "down")), code = code }
-            end
-            if cfg.token and cfg.token ~= "" then
-                local data, err = doHardcoverGraphQL(cfg.token, "query { me { id } }")
-                out.hardcover = { state = data and "ok" or (tostring(err):find(HC_TOKEN_REJECTED, 1, true) and "token" or "down") }
-            end
-            if cfg.annas_url and cfg.annas_url ~= "" then
-                out.annas = { state = doTestService(cfg.annas_url, cfg.proxy) and "ok" or "down" }
-            end
-            return out
-        end, _("Checking connections..."))
-        if not completed or type(res) ~= "table" then return end
-        res.at = os.time()
-        self._status_checks = res
-        -- Keep the background-login guard in step with what the check learned.
-        if res.shelfmark then
-            if res.shelfmark.state == "refused" or res.shelfmark.state == "locked" then
-                self._shelfmark_login_rejected = shelfmarkCredentialKey(self.server_url, self.username, self.password)
-            elseif res.shelfmark.state == "ok" then
-                self._shelfmark_login_rejected = nil
-            end
+        if self:checkConnections() then self:showStatus({ no_auto_check = true }) end
+    end)
+end
+
+-- After Apply in a connection's settings: test that one login straight away
+-- and say what happened, instead of a bare "Saved." (the old wording also
+-- promised a login "on your next search" that nobody had tried yet).
+function Bookbridge:saveAndVerify(key)
+    self:saveAllSettings()
+    local name = ({ shelfmark = "Shelfmark", cwa = "Calibre-Web", hardcover = "Hardcover", annas = "Anna's Archive" })[key]
+    local configured = ({
+        shelfmark = self.server_url and self.server_url ~= "" and self.username and self.username ~= "",
+        cwa = self.cwa_url and self.cwa_url ~= "" and self.cwa_username and self.cwa_username ~= "",
+        hardcover = self.hardcover_token and self.hardcover_token ~= "",
+        annas = self.annas_url and self.annas_url ~= "",
+    })[key]
+    if not configured then
+        UIManager:show(InfoMessage:new{ text = _("Saved."), timeout = 2 })
+        return
+    end
+    local NetworkMgr = require("ui/network/manager")
+    if not NetworkMgr:isOnline() then
+        UIManager:show(InfoMessage:new{ text = T(_("Saved. Connect to Wi-Fi, then use Status & setup > Check connections now to test %1."), name) })
+        return
+    end
+    local Trapper = require("ui/trapper")
+    Trapper:wrap(function()
+        local res = self:checkConnections({ [key] = true }, T(_("Checking %1..."), name))
+        local r = res and res[key]
+        if not r then return end
+        local text
+        if r.state == "ok" then
+            text = ({
+                shelfmark = T(_("Saved -- signed in to Shelfmark as %1."), tostring(self.username)),
+                cwa = T(_("Saved -- signed in to Calibre-Web as %1."), tostring(self.cwa_username)),
+                hardcover = _("Saved -- Hardcover accepted the token."),
+                annas = _("Saved -- the Anna's Archive service is reachable."),
+            })[key]
+        elseif r.state == "refused" then
+            text = T(_("Saved, but %1 refused this username or password."), name)
+        elseif r.state == "token" then
+            text = _("Saved, but Hardcover refused this token. Copy it again from hardcover.app > Settings > API.")
+        elseif r.state == "locked" then
+            text = key == "shelfmark"
+                and _("Saved, but Shelfmark has locked this account after too many wrong passwords. Try again in 30 minutes.")
+                or T(_("Saved, but %1 is limiting logins right now. Wait a minute, then check again from Status & setup."), name)
+        else
+            text = T(_("Saved, but couldn't reach %1. Check the address, and that this device is online."), name)
         end
-        if res.hardcover then
-            if res.hardcover.state == "token" then hc_rejected_token = self.hardcover_token
-            elseif res.hardcover.state == "ok" and hc_rejected_token == self.hardcover_token then hc_rejected_token = nil end
-        end
-        debugLog(string.format("[status] checked: shelfmark=%s cwa=%s hardcover=%s annas=%s",
-            res.shelfmark and res.shelfmark.state or "-", res.cwa and res.cwa.state or "-",
-            res.hardcover and res.hardcover.state or "-", res.annas and res.annas.state or "-"))
-        self:showStatus()
+        UIManager:show(InfoMessage:new{ text = text, timeout = r.state == "ok" and 3 or nil })
     end)
 end
 
