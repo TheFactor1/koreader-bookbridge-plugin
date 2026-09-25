@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build 0920cc8
+
+- **New**: books you read on the Kindle go into your Readest library on their
+  own. After a few pages in one sitting, the Kindle uploads its copy to
+  Readest (quietly), so your phone and iPad open the exact same file and
+  progress syncs -- no more "Upload to Cloud" by hand. Books already in
+  Readest are left alone; if the Kindle is offline it tries again next time
+  you read. Needs Readest's auto sync on.
+
 ## 2026-09-25 — build efaeb45
 
 - **Fix**: the after-wake Readest sync from the previous build asked too soon,
