@@ -17,6 +17,9 @@ M="$REPO/bookbridge.koplugin/main.lua"
 awk '/^function Bookbridge:onSuspend/{f=1} f{print} f&&/^end$/{exit}' "$M" > "$W/fns.lua"
 awk '/^function Bookbridge:pushReadestPositionBeforeSleep/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -E '^local READEST_PULL_DELAYS = ' "$M" >> "$W/fns.lua"
+grep -E '^local READEST_AUTO_UPLOAD_PAGES = ' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:onPageUpdate/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:autoUploadToReadest/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:pullReadestPositionWhenOnline/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -q "pushBookConfig" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
 if [ -f "$RD/main.lua" ]; then
@@ -26,7 +29,7 @@ if [ -f "$RD/main.lua" ]; then
     awk '/^function ReadestSync:scheduleBackgroundPull/{f=1} f{print} f&&/^end$/{exit}' "$RD/main.lua"; } > "$W/readest.lua"
 fi
 cd "$KDIR" || exit 1
-W="$W" ./luajit - <<'LUA'
+W="$W" RD="$RD" ./luajit - <<'LUA'
 package.path = "frontend/?.lua;common/?.lua;" .. package.path
 local W = os.getenv("W")
 local logs = {}
@@ -129,6 +132,69 @@ bb(readestPull({ auto_sync = false, access_token = "t" })):pullReadestPositionWh
 bb(readestPull({ auto_sync = true, access_token = "t" }), false):pullReadestPositionWhenOnline()
 bb(nil):pullReadestPositionWhenOnline()
 ck(#scheduled == 0, "no pull when auto sync is off, no book is open, or Readest isn't installed")
+-- auto-upload: a book you're reading goes to Readest after 5 page turns
+DataStorage = { getSettingsDir = function() return "/tmp" end }
+local RD = os.getenv("RD")
+local exts_real = io.open(RD .. "/library/exts.lua")
+if exts_real then exts_real:close(); package.loaded["library.exts"] = dofile(RD .. "/library/exts.lua")
+else package.loaded["library.exts"] = { EPUB = "epub", PDF = "pdf" } end
+package.loaded["readest_syncauth"] = { stub = true }
+package.loaded["readest_syncconfig"] = { getMetaHash = function() return "meta1" end }
+local uploads, shows = {}, 0
+package.loaded["library.syncbooks"] = { uploadAndRecord = function(row, opts, cb) uploads[#uploads + 1] = { row = row, opts = opts }; cb(true) end }
+UIManager.show = function() shows = shows + 1 end
+local function mkstore(rows)
+    local st = { rows = rows or {} }
+    function st:_getRowRaw(h) return self.rows[h] end
+    function st:upsertBook(r) local e = self.rows[r.hash] or {}; for k, v in pairs(r) do if k ~= "_clear_fields" then e[k] = v end end
+        if r._clear_fields then for _, c in ipairs(r._clear_fields) do e[c] = nil end end; self.rows[r.hash] = e end
+    return st
+end
+local function reader(store, settings)
+    local r = { settings = settings or { auto_sync = true, access_token = "t", user_id = "u" }, path = "/p" }
+    r.getLibraryStore = function() return store end
+    local b = setmetatable({ ui = { readest = r,
+        document = { file = "/mnt/us/books/Some Book.epub" },
+        doc_settings = { readSetting = function(_s, k) if k == "partial_md5_checksum" then return "abc123" end
+            if k == "doc_props" then return { title = "Some Book" } end end } } }, { __index = Bookbridge })
+    return b
+end
+local store = mkstore()
+local b = reader(store)
+for i = 1, 4 do b:onPageUpdate(i) end
+ck(#uploads == 0, "4 page updates (opening + 3 turns): not yet -- a peek doesn't upload")
+b:onPageUpdate(5)
+ck(#uploads == 1, "5th page update: the book is uploaded")
+local u = uploads[1]
+ck(u and u.row.hash == "abc123" and u.row.format == "EPUB" and u.row.file_path == "/mnt/us/books/Some Book.epub"
+    and u.row.title == "Some Book" and u.row.meta_hash == "meta1" and u.row.local_present == 1,
+    "...with the Kindle's own file, hash, format, title and meta hash")
+ck(u and u.opts.store == store and u.opts.sync_path == "/p" and u.opts.settings.user_id == "u", "...through Readest's own store and upload code")
+for i = 6, 30 do b:onPageUpdate(i) end
+ck(#uploads == 1, "once per sitting, not on every page after")
+ck(shows == 0, "no popups at all")
+uploads = {}
+local b2 = reader(mkstore({ abc123 = { hash = "abc123", title = "Some Book", uploaded_at = 1 } }))
+for i = 1, 6 do b2:onPageUpdate(i) end
+ck(#uploads == 0 and logs[#logs]:find("already in Readest", 1, true), "already uploaded: skipped")
+local b3 = reader(mkstore({ abc123 = { hash = "abc123", title = "Some Book", uploaded_at = 1, deleted_at = 5 } }))
+for i = 1, 6 do b3:onPageUpdate(i) end
+ck(#uploads == 1 and uploads[1].row.deleted_at == nil, "removed from Readest earlier and read again: uploaded again")
+uploads = {}; ONLINE = false
+local b4 = reader(mkstore())
+for i = 1, 6 do b4:onPageUpdate(i) end
+ck(#uploads == 0 and logs[#logs]:find("offline", 1, true), "offline: nothing sent")
+ONLINE = true
+for i = 1, 5 do b4:onPageUpdate(i) end
+ck(#uploads == 1, "...and the next sitting's reading uploads it")
+uploads = {}
+local b5 = reader(mkstore(), { auto_sync = false, access_token = "t", user_id = "u" })
+for i = 1, 6 do b5:onPageUpdate(i) end
+ck(#uploads == 0, "Readest auto sync off: nothing uploaded")
+package.loaded["library.syncbooks"] = { uploadAndRecord = function() error("readest changed") end }
+local b6 = reader(mkstore())
+local okp = pcall(function() for i = 1, 6 do b6:onPageUpdate(i) end end)
+ck(okp and logs[#logs]:find("auto-upload failed", 1, true), "a Readest error is caught and logged")
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)
 LUA

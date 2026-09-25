@@ -11706,6 +11706,84 @@ function Bookbridge:pullReadestPositionWhenOnline()
     debugLog("[readest] network back: position pulls scheduled (+5s, +15s)")
 end
 
+-- Reading a book on the Kindle puts it in Readest: after a few page turns in
+-- one sitting (a peek doesn't count), the Kindle's exact file is uploaded the
+-- way Readest's own "Upload to Cloud" does it, so the phone/iPad open the same
+-- bytes and progress syncs. Quiet (no popups); skipped when the book is
+-- already uploaded, Readest auto-sync is off, or the device is offline (the
+-- next sitting tries again). Uses the Readest plugin's own store and upload
+-- code; everything is duck-typed and pcall'd, so a Readest update that moves
+-- these internals turns this off rather than breaking anything.
+local READEST_AUTO_UPLOAD_PAGES = 5
+function Bookbridge:onPageUpdate()
+    local ui = self.ui
+    if not (ui and ui.document) or self._rd_upload_done then return end
+    self._rd_pages = (self._rd_pages or 0) + 1
+    if self._rd_pages < READEST_AUTO_UPLOAD_PAGES then return end
+    self._rd_upload_done = true   -- once per sitting, whatever happens
+    self:autoUploadToReadest()
+end
+
+function Bookbridge:autoUploadToReadest()
+    local ui = self.ui
+    local rs = ui and ui.document and ui.readest
+    if type(rs) ~= "table" or type(rs.getLibraryStore) ~= "function" then return end
+    local s = rs.settings
+    if type(s) ~= "table" or not s.auto_sync or not s.access_token or not s.user_id then return end
+    local ok, err = pcall(function()
+        local file = ui.document.file
+        local hash = ui.doc_settings and ui.doc_settings:readSetting("partial_md5_checksum")
+        if not file or not hash or hash == "" then return end
+        local ext = file:match("%.([^./\\]+)$")
+        local format
+        for fmt, e in pairs(require("library.exts")) do
+            if ext and e == ext:lower() then format = fmt end
+        end
+        if not format then return end
+        local store = rs:getLibraryStore()
+        if not store then return end
+        local existing = store:_getRowRaw(hash)
+        if existing and existing.uploaded_at and not existing.deleted_at then
+            debugLog("[readest] auto-upload: already in Readest -- " .. tostring(existing.title))
+            return
+        end
+        local NetworkMgr = require("ui/network/manager")
+        if not NetworkMgr:isOnline() then
+            debugLog("[readest] auto-upload: offline -- next sitting will try again")
+            self._rd_upload_done = nil; self._rd_pages = 0
+            return
+        end
+        local title = existing and existing.title
+        if not title or title == "" then
+            local props = ui.doc_settings:readSetting("doc_props") or {}
+            title = (props.title and props.title ~= "") and props.title
+                or (file:match("([^/]+)$") or file):gsub("%.[^.]+$", "")
+        end
+        local meta_hash
+        pcall(function() meta_hash = require("readest_syncconfig"):getMetaHash(ui, store) end)
+        local now = math.floor(os.time() * 1000)
+        store:upsertBook({
+            hash = hash, title = title, format = format, meta_hash = meta_hash,
+            file_path = file, local_present = 1,
+            created_at = (existing and existing.created_at) or now, updated_at = now,
+            _clear_fields = { "deleted_at" },
+        })
+        local row = store:_getRowRaw(hash)
+        debugLog("[readest] auto-upload: uploading " .. tostring(title))
+        require("library.syncbooks").uploadAndRecord(row, {
+            sync_auth  = require("readest_syncauth"),
+            sync_path  = rs.path,
+            settings   = s,
+            store      = store,
+            covers_dir = DataStorage:getSettingsDir() .. "/readest_covers",
+        }, function(success, msg, status)
+            debugLog("[readest] auto-upload: " .. tostring(title) .. " "
+                .. (success and "uploaded" or ("failed: " .. tostring(msg or status))))
+        end)
+    end)
+    if not ok then debugLog("[readest] auto-upload failed: " .. tostring(err)) end
+end
+
 -- The Readest plugin saves the reading position 5 s after a page turn (at
 -- most once per 30 s) and on close, never on sleep -- so the last pages read
 -- before pressing power stayed on the Kindle until it woke. Push it now,
