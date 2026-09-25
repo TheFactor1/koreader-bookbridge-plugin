@@ -4,6 +4,12 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build ae4c182
+
+- **Fix**: the Anna's Archive check only confirms the service answers, and now
+  says so ("Up, key untested"); your download key is checked on your first
+  download, since testing it would use one up.
+
 ## 2026-09-25 — build 16ec9aa
 
 - **New**: saving Shelfmark, Calibre-Web, Hardcover or Anna's Archive
