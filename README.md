@@ -27,6 +27,9 @@ for tracking what you read. Runs on Kindle, Android and desktop KOReader.
   installed.
 - About 15 minutes.
 
+*The pictures below are real screenshots: the wizard as it runs, and
+Bookbridge in KOReader, using the example address `100.64.0.10`.*
+
 ### Step 1 -- Install Docker on the computer
 
 Docker runs the server programs for you. Install it from
@@ -77,12 +80,20 @@ The wizard has five parts, top to bottom:
    **Library sync** too if you want your books to land in a library the
    reader can download from (recommended). Anna's Archive and AI suggestions
    are optional extras.
+
+   <img src="docs/images/setup-1-wizard-choose.png" alt="The setup wizard: this machine's address, and what to run" width="480">
+
 3. **Configure & start** -- press the button and wait. The first time takes
    a few minutes while the programs download.
 4. **Check the services** -- every line should say it answered. If one
    doesn't, wait a minute and press **Re-check**.
+
+   <img src="docs/images/setup-2-wizard-check.png" alt="Configure & start, then every service checked and up" width="480">
+
 5. **Pair your Kindle** -- a **6-character code** appears. Leave this page
    open. The code works for 10 minutes; press **New code** if it runs out.
+
+   <img src="docs/images/setup-3-wizard-code.png" alt="The 6-character pairing code, with what to do on the reader" width="480">
 
 ### Step 6 -- Make your Shelfmark account
 
@@ -104,16 +115,27 @@ a username and password -- you'll type them on your reader in Step 9.
 
 Bookbridge opens **Status & setup** by itself the first time.
 
+<img src="docs/images/setup-4-reader-first-start.png" alt="Status & setup on the first start, with Start here at the top" width="360">
+
 1. Tap **Start here: import settings from your server**.
 2. Type the address from Step 5 (just the address, e.g. `100.64.0.10`) and
    the 6-character code, then tap **Import**.
-3. The list checks everything and shows what works.
+
+   <img src="docs/images/setup-5-reader-import.png" alt="Import from server: the address and the code" width="360">
+
+3. The list checks everything and shows what works -- here the library is
+   signed in, and only the Shelfmark login is left:
+
+   <img src="docs/images/setup-6-reader-after-import.png" alt="Status & setup after importing: Shelfmark needs login, Calibre-Web signed in" width="360">
+
 
 ### Step 9 -- Sign in to Shelfmark
 
 On the same list, the **Shelfmark** line says **Needs login**. Tap it, enter
 the username and password from Step 6, and tap **Apply**. It should say
 **Signed in to Shelfmark**.
+
+<img src="docs/images/setup-7-reader-shelfmark-login.png" alt="Shelfmark settings: address, username and password" width="360">
 
 **That's it.** Open the **Bookbridge** menu and choose **Search & request a
 book**. When you're finished setting up you can close the wizard -- your
