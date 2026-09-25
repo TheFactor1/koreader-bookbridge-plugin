@@ -4,6 +4,18 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — v0.4.0, build 4b5a6b5
+
+- **New**: setting up from nothing is now one server command and one code.
+  Run the setup wizard from shelfmark-stack, unzip Bookbridge into KOReader,
+  and enter the wizard's 6-character code under **Status & setup > Start
+  here**. It fills in the servers, finds Tailscale by itself, and shows what's
+  left to do.
+- **New**: installs without their own update server now update themselves
+  from the published GitHub releases -- checked and verified the same way.
+- **Fix**: "Import from server" with just an address (no port) now finds the
+  wizard; before, it looked in the wrong place and always failed.
+
 ## 2026-09-25 — build 1a45005
 
 - **New**: **Status & setup > What you need to host** explains, on the
