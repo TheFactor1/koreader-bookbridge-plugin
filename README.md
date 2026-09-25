@@ -48,11 +48,11 @@ Skip this step if you'll only ever use it at home on the same Wi-Fi.
 Open a terminal on the computer and run:
 
 ```bash
-git clone https://github.com/TheFactor1/shelfmark-stack
-cd shelfmark-stack
+git clone https://github.com/TheFactor1/bookbridge-server
+cd bookbridge-server
 ```
 
-(No `git`? On the [shelfmark-stack page](https://github.com/TheFactor1/shelfmark-stack)
+(No `git`? On the [bookbridge-server page](https://github.com/TheFactor1/bookbridge-server)
 click **Code > Download ZIP**, unzip it, and open a terminal in that folder.)
 
 ### Step 4 -- Start the setup wizard
@@ -175,7 +175,7 @@ Accounts, not servers:
   (from [readest/readest](https://github.com/readest/readest) releases), sign
   in under Tools > Readest and turn its auto sync on. See *Readest* below.
 
-**Easiest:** [shelfmark-stack](https://github.com/TheFactor1/shelfmark-stack)
+**Easiest:** [bookbridge-server](https://github.com/TheFactor1/bookbridge-server)
 runs all of the servers above from one compose file, with a browser setup
 wizard that hands the reader its settings by a 6-character code (*Import from
 server*). It also includes the pairing relay (behind *Set up another device*

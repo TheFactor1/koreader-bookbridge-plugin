@@ -3709,7 +3709,7 @@ end
 -- checks each file's SHA-256, so a truncated or stale-manifest download is
 -- refused outright rather than parse-checked and hoped for.
 -- Fetches the settings the setup wizard staged under a short pairing code
--- (see shelfmark-stack/setup): GET <base>/claim/<code> returns
+-- (see bookbridge-server/setup): GET <base>/claim/<code> returns
 -- {"shelfmark": {...}} exactly once -- the wizard invalidates the code on
 -- read -- so a failure here often just means the code was already used or
 -- expired. Runs inside the caller's Trapper subprocess like every network call.
@@ -7233,7 +7233,7 @@ function Bookbridge:importFromServer()
     local dialog
     dialog = MultiInputDialog:new{
         title = _("Import from server"),
-        description = _("Run the setup wizard on your server (github.com/TheFactor1/shelfmark-stack), then enter the server's address and the 6-character code the wizard shows."),
+        description = _("Run the setup wizard on your server (github.com/TheFactor1/bookbridge-server), then enter the server's address and the 6-character code the wizard shows."),
         fields = {
             { text = prefill:gsub("^https?://", ""), hint = _("Server address, e.g. 100.x.y.z (the setup wizard's, port 8090)") },
             { text = "", hint = _("6-character code") },
@@ -7551,7 +7551,7 @@ function Bookbridge:promptPairingRelayUrl(on_success)
     local dialog
     dialog = InputDialog:new{
         title = _("Pairing relay URL"),
-        description = _("The pairing relay from the Shelfmark server stack (port 8086). Filled in by itself when you import settings from the server; only asked once."),
+        description = _("The pairing relay from the Bookbridge server (port 8086). Filled in by itself when you import settings from the server; only asked once."),
         input = "",
         input_hint = _("e.g. http://homeserver:8086"),
         buttons = {
@@ -12419,7 +12419,7 @@ REACHING IT AWAY FROM HOME
 Tailscale on the server, and the Tailscale VPN KOReader plugin on a Kindle or Kobo. Bookbridge fills in its proxy by itself.
 
 EASIEST: ONE COMMAND
-github.com/TheFactor1/shelfmark-stack runs all of the servers above from one file. Its setup wizard (port 8090) starts what you pick, tests it, and shows a 6-character code: enter it under "Start here: import settings from your server". It also runs the pairing relay ("Set up another device") and, if you want it, the AI relay.
+github.com/TheFactor1/bookbridge-server runs all of the servers above from one file. Its setup wizard (port 8090) starts what you pick, tests it, and shows a 6-character code: enter it under "Start here: import settings from your server". It also runs the pairing relay ("Set up another device") and, if you want it, the AI relay.
 
 Full guide: github.com/TheFactor1/koreader-bookbridge-plugin]]),
     })
