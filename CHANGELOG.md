@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build 16ec9aa
+
+- **New**: saving Shelfmark, Calibre-Web, Hardcover or Anna's Archive
+  settings now tests the login right away and tells you: "signed in as …",
+  "refused this username or password", "locked, try again in 30 minutes" or
+  "couldn't reach". No more finding out on the next search.
+- **Fix**: Status & setup checks the connections when you open it, so lines
+  say "Signed in" instead of "Set up" (which read like an instruction).
+
 ## 2026-09-25 — build d906eda
 
 - **New**: **Status & setup**, the first item in the Bookbridge menu. One
