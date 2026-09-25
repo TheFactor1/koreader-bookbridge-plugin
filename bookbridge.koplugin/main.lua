@@ -12055,7 +12055,7 @@ function Bookbridge:collectStatusRows()
 
     -- Anna's Archive (optional)
     add({ text = _("Anna's Archive -- extra source (optional)"),
-        mandatory = (self.annas_url and self.annas_url ~= "") and (statusCheckedLabel(checks.annas, _("Reachable")) or _("Saved")) or _("Not set up"),
+        mandatory = (self.annas_url and self.annas_url ~= "") and (statusCheckedLabel(checks.annas, _("Up, key untested")) or _("Saved")) or _("Not set up"),
         action = function() self:editAnnasSettings() end })
 
     -- Updates
@@ -12225,7 +12225,7 @@ function Bookbridge:saveAndVerify(key)
                 shelfmark = T(_("Saved -- signed in to Shelfmark as %1."), tostring(self.username)),
                 cwa = T(_("Saved -- signed in to Calibre-Web as %1."), tostring(self.cwa_username)),
                 hardcover = _("Saved -- Hardcover accepted the token."),
-                annas = _("Saved -- the Anna's Archive service is reachable."),
+                annas = _("Saved -- the Anna's Archive service is reachable. Your download key isn't tested here (that would use up one of your downloads); it's checked on your first download."),
             })[key]
         elseif r.state == "refused" then
             text = T(_("Saved, but %1 refused this username or password."), name)

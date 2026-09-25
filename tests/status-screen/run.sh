@@ -168,6 +168,11 @@ b.hardcover_token = "tok"; ONLINE = false
 b:saveAndVerify("cwa")
 ck(last():find("Connect to Wi-Fi", 1, true), "offline: saved, with how to test later")
 ONLINE = true
+b.annas_url = "http://a"; NET = { annas_ok = true }
+b:saveAndVerify("annas")
+ck(last():find("key isn't tested", 1, true), "save Anna's Archive: reachable, and says the key isn't tested")
+b:runStatusChecks()
+ck(row(b:collectStatusRows(), "Anna's Archive").mandatory == "Up, key untested", "status: Anna's Archive 'Up, key untested', not 'Reachable'")
 -- only the saved service is tested
 local logins, cwas = 0, 0
 local rl, rc = doLogin, doCwaRequest
