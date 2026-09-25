@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build daeef7b
+
+- **New**: putting the Kindle to sleep now saves your reading position to
+  Readest straight away, so your phone or iPad picks up exactly where you
+  stopped -- before, the last page or two before pressing power only synced
+  after the Kindle woke up again. Quiet (no pop-ups), and only when Readest's
+  auto sync is on and the Kindle is online.
+
 ## 2026-09-25 — build c8b7783
 
 - **Fix**: when Bookbridge replaces a book on the Kindle with Calibre-Web's
