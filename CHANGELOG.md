@@ -4,6 +4,18 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build 488817e
+
+- **Fix**: finishing a book no longer pops up "marked Read" and flashes the
+  screen -- it's recorded on Hardcover silently, like reading progress.
+- **Fix**: the few Hardcover notes that remain (errors, "waiting under Review
+  matches") no longer flash the whole Kindle screen; only the small note in
+  the corner is drawn.
+- **Fix**: if Hardcover stops accepting your API token, you're now told once
+  and Bookbridge stops trying until you enter a new one. Before, a newly
+  opened book kept retrying silently on every close and wake, and sync just
+  quietly stopped.
+
 ## 2026-09-23 — build 217322b
 
 - **Fix**: closing a book for the first time no longer pops up "Hardcover:
