@@ -4,6 +4,17 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build d906eda
+
+- **New**: **Status & setup**, the first item in the Bookbridge menu. One
+  screen shows every part -- Shelfmark, Calibre-Web, Hardcover, Readest,
+  Anna's Archive, updates, the phone clipboard and the download folder --
+  with its state on the right. Tap a line to fix it: it opens the right
+  settings, the Hardcover review list, or turns Readest's auto sync on. A new
+  device starts with "Start here: import settings from your server".
+  "Check connections now" tests each login once and shows what it found
+  (Signed in / Wrong login / Locked / Can't reach / Token refused).
+
 ## 2026-09-25 — build 0920cc8
 
 - **New**: books you read on the Kindle go into your Readest library on their
