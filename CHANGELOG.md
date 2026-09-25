@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build c8b7783
+
+- **Fix**: when Bookbridge replaces a book on the Kindle with Calibre-Web's
+  copy (after an edit in Calibre-Web, or after a book you sent is imported),
+  KOReader now recognises it as the new file. Before, a book you'd already
+  opened kept the old file's identity, so Readest treated it as a different
+  book from the one your phone or iPad downloaded and wouldn't sync it.
+  Hardcover keeps its match for the book.
+
 ## 2026-09-25 — build 488817e
 
 - **Fix**: finishing a book no longer pops up "marked Read" and flashes the
