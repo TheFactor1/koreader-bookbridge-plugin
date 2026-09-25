@@ -27,6 +27,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 # below resolve to (a stub here once disagreed with it about "timed out").
 awk '/^local function hardcoverErrorIsTransient/{f=1} f{print} f&&/^end$/{exit}' \
     "$REPO/bookbridge.koplugin/main.lua" > "$W/confirm.lua"
+grep -E '^local HC_TOKEN_REJECTED = |^local hc_rejected_token = ' "$REPO/bookbridge.koplugin/main.lua" >> "$W/confirm.lua"
 awk '/^function Bookbridge:resolveHardcoverMatch/{f=1} f{print} f&&/^end$/{exit}' \
     "$REPO/bookbridge.koplugin/main.lua" >> "$W/confirm.lua"
 awk '/^function Bookbridge:pickHardcoverCandidate/{f=1} f{print} f&&/^end$/{exit}' \
@@ -63,6 +64,17 @@ doHardcoverPushProgress = function() return true, 8, 382 end
 -- Added to the plugin after this harness was written: slug caching at match
 -- time. (The transient/permanent classifier is the real one, extracted above.)
 doHardcoverGetBookSlug = function() return "test-slug" end
+-- The corner note's widgets (showAfterCloseNotice builds one on every device
+-- but Android-with-toast). Without these the suite died at the first in-app
+-- notice and every check after it silently never ran.
+local function sized(t) t.getSize = function() return { w = 200, h = 40 } end; return t end
+FrameContainer = { new = function(_s, t) return sized(t) end }
+TextBoxWidget = { new = function(_s, t) return t end }
+Blitbuffer = { COLOR_WHITE = 0 }
+Size = { border = { default = 1 }, padding = { small = 2 }, margin = { small = 2, default = 4 } }
+Font = { getFace = function() return {} end }
+Geom = { new = function(_s, t) return t end }
+hc_notice_stack = {}
 Bookbridge = {}
 assert(load(io.open(SRC):read("*a")))()
 
@@ -147,7 +159,8 @@ do
         scheduleIn = function(_s, d, f) timers[#timers+1] = { d = d, f = f } end,
         setDirty = function(_s, w, m) if w == "all" and m == "ui" then dirty = dirty + 1 end end }
     package.loaded["device"] = { isDesktop = function() return false end, isAndroid = function() return true end,
-        screen = { _updateWindow = function() posts = posts + 1 end, refreshWaitForLast = function() end } }
+        screen = { _updateWindow = function() posts = posts + 1 end, refreshWaitForLast = function() end,
+                   getWidth = function() return 1072 end, getHeight = function() return 1448 end } }
     -- Android with the launcher's toast: the OS draws it; nothing in-app at all
     local toasts, shown_msgs = {}, 0
     UIManager.show = function() shown_msgs = shown_msgs + 1 end
@@ -165,16 +178,26 @@ do
     for _, t in ipairs(timers) do t.f() end
     ck(nudges == 2, "Android: brightness re-applied twice (window nudge) -- got " .. nudges)
     ck(posts == 2, "Android: buffer posted again twice -- got " .. posts)
-    ck(dirty == 2, "whole-stack repaint twice -- got " .. dirty)
+    ck(dirty == 0, "no whole-screen repaint -- got " .. dirty)
     local order = {}; for _, t in ipairs(timers) do order[#order+1] = t.d end
-    ck(order[1] == 0.3 and order[2] == 0.7 and order[3] == 1, "nudge (0.3s) lands before the post (0.7s) and the repaint (1s)")
-    ck(logs[2] and logs[2]:find("window nudge at %+0.3s ok %(48%)"), "the nudge is logged with the brightness it re-applied")
-    -- Kindle: no nudge, no explicit post, just the repaints
+    ck(order[1] == 0.3 and order[2] == 0.7, "nudge (0.3s) lands before the post (0.7s)")
+    local nudge_logged = false; for _, l in ipairs(logs) do if l:find("window nudge at %+0.3s ok %(48%)") then nudge_logged = true end end
+    ck(nudge_logged, "the nudge is logged with the brightness it re-applied")
+    -- Kindle: the note's own region is drawn at once -- no whole-screen
+    -- flashui, no eips, no nudge/post
     timers, nudges, posts, dirty = {}, 0, 0, 0
+    local repaints, execs, flash = 0, {}, 0
+    UIManager.forceRePaint = function() repaints = repaints + 1 end
+    UIManager.setDirty = function(_s, w, m) if w == "all" then flash = flash + 1 end end
+    local old_exec = os.execute; os.execute = function(c) execs[#execs+1] = c; return 0 end
     package.loaded["device"].isAndroid = function() return false end
+    package.loaded["device"].isKindle = function() return true end
     Bookbridge.showAfterCloseNotice({}, "hi")
-    for _, t in ipairs(timers) do t.f() end
-    ck(nudges == 0 and posts == 0 and dirty == 2, "Kindle: repaints only (nudges=" .. nudges .. " posts=" .. posts .. " dirty=" .. dirty .. ")")
+    for _, t in ipairs(timers) do if t.d < 6 then t.f() end end
+    os.execute = old_exec
+    ck(repaints == 1, "Kindle: the note is drawn immediately (one forceRePaint) -- got " .. repaints)
+    ck(flash == 0 and #execs == 0, "Kindle: no whole-screen flash and no eips (setDirty all=" .. flash .. ", exec=" .. #execs .. ")")
+    ck(nudges == 0 and posts == 0, "Kindle: no Android nudge/post")
     UIManager, package.loaded["device"], debugLog, android = old_UI, old_dev, old_log, nil
 end
 
@@ -194,6 +217,28 @@ do
     doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return nil, nil, nil, "No matching book found on Hardcover.", {}, false, false end
     Bookbridge.resolveHardcoverMatch({ hardcover_token = "t", hardcover_language = "en", _hc_prefetch = {}, clearHardcoverPending=function(_s, md5) CLEARED[#CLEARED+1]=md5 end, showAfterCloseNotice=Bookbridge.showAfterCloseNotice }, "miss1", { title = "Zqxv Nonexistent", author = "Nobody", percent = 0.1 })
     ck(MAP.miss1 and MAP.miss1.decision == "review" and #MAP.miss1.ranked == 0, "genuine miss: parked for review (empty list, re-searched when opened)")
+    doHardcoverFindBook = old
+end
+
+-- A refused token during a NEW book's lookup is not "unreachable": one notice,
+-- then paused (it used to be retried silently on every close and wake)
+do
+    local old = doHardcoverFindBook
+    local TOK = "Hardcover rejected the API token (HTTP 401) -- update it under Bookbridge > Settings."
+    doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return nil, nil, nil, TOK, nil, false, true end
+    local noticed = {}
+    local function inst(token) return { hardcover_token = token, hardcover_language = "en", _hc_prefetch = {},
+        clearHardcoverPending = function() end, showAfterCloseNotice = function(_s, t) noticed[#noticed+1] = t end } end
+    MAP = {}
+    Bookbridge.resolveHardcoverMatch(inst("dead"), "tk1", { title = "A", percent = 0.1 })
+    Bookbridge.resolveHardcoverMatch(inst("dead"), "tk2", { title = "B", percent = 0.1 })  -- a new instance, as every close makes
+    ck(#noticed == 1 and noticed[1] == TOK, "rejected token on lookup: ONE notice across closes (got " .. #noticed .. ")")
+    ck(MAP.tk1 == nil and MAP.tk2 == nil, "...and no book is parked for review on it")
+    Bookbridge.resolveHardcoverMatch(inst("fresh"), "tk3", { title = "C", percent = 0.1 })
+    ck(#noticed == 2, "a different token that is also refused is said once more")
+    doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return nil, nil, nil, "Couldn't reach Hardcover.", nil, false, true end
+    Bookbridge.resolveHardcoverMatch(inst("ok"), "tk4", { title = "D", percent = 0.1 })
+    ck(#noticed == 2, "a plain network failure still says nothing")
     doHardcoverFindBook = old
 end
 

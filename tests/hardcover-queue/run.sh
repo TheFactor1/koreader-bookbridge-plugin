@@ -21,12 +21,13 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
 awk '/^local function hardcoverErrorIsTransient/{f=1}   f{print} f&&/^end$/{exit}' "$M" >  "$W/fns.lua"
 grep -E '^local HC_PROCESS_STALE = ' "$M" >> "$W/fns.lua"
-grep -E '^local HC_TOKEN_REJECTED = ' "$M" >> "$W/fns.lua"
+grep -E '^local HC_TOKEN_REJECTED = |^local hc_rejected_token = ' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:processHardcoverPending/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:drainHardcoverPending/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:checkHardcoverFinishedBook/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 echo 'HC_TRANSIENT = hardcoverErrorIsTransient   -- export the chunk-local classifier to the test' >> "$W/fns.lua"
 awk '/^function Bookbridge:onNetworkConnected/{f=1}     f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:writeHardcoverFinish/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:showAfterCloseNotice/{f=1}    f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:captureReadingProgress/{f=1}   f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^local function bookshelfPark/{f=1}                 f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
@@ -240,11 +241,34 @@ do
   ck(notes == 1, "3 queued books x 4 closes with a bad token: ONE notice (got " .. notes .. ")")
   ck(PUSHES == 1, "...and one request in total, not one per book per close (sent " .. PUSHES .. ")")
   ck(PENDING.a and PENDING.b and PENDING.c, "...all three stay queued for when the token is fixed")
+  -- every close builds a new plugin instance; the pause must survive that
+  local st2 = setmetatable({ hardcover_progress_sync = true, hardcover_token = "old",
+      confirmHardcoverMatch = function() end, resolveHardcoverMatch = function() end }, { __index = Bookbridge })
+  PUSHES = 0; st2:processHardcoverPending()
+  ck(PUSHES == 0, "...and a fresh instance (the next close) doesn't retry the dead token either (sent " .. PUSHES .. ")")
   -- a new token in Settings resumes straight away
   doHardcoverPushProgress = function() PUSHES = PUSHES + 1; return true, 8, 382 end
   st.hardcover_token = "new"; PUSHES = 0
   st:processHardcoverPending()
   ck(PUSHES == 3 and next(PENDING) == nil, "new token: syncing resumes at once and the queue drains")
+end
+
+-- 3g. finishing a book: marked Read silently; a permanent failure said once
+do
+  local notes = {}
+  local sf = { hardcover_token = "t", clearHardcoverPending = function() end,
+               showAfterCloseNotice = function(_s, t) notes[#notes+1] = t end }
+  local MARKS = 0
+  doHardcoverMarkFinished = function() MARKS = MARKS + 1; return true end
+  local entry = { book_id = 5, title = "Done" }
+  local map = { f = entry }
+  Bookbridge.writeHardcoverFinish(sf, "f", { finished_date = "2026-09-25" }, entry, map)
+  ck(MARKS == 1 and entry.finished_synced and #notes == 0, "finished book: marked Read with no note (it flashed the Kindle)")
+  doHardcoverMarkFinished = function() return false, "Book not found" end
+  entry = { book_id = 5, title = "Done" }; map = { f = entry }
+  Bookbridge.writeHardcoverFinish(sf, "f", { finished_date = "2026-09-25" }, entry, map)
+  Bookbridge.writeHardcoverFinish(sf, "f", { finished_date = "2026-09-25" }, entry, map)
+  ck(#notes == 1, "a permanent mark-Read failure is said once (got " .. #notes .. ")")
 end
 
 -- 4. Wi-Fi back -> flush, but only when there is something queued

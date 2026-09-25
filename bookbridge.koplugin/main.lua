@@ -10238,9 +10238,8 @@ function Bookbridge:writeHardcoverFinish(md5, rec, entry, map)
             self:clearHardcoverPending(md5)
             debugLog(string.format("[hc] marked finished: %s (rating=%s, review=%s)",
                 tostring(title), tostring(answer.rating), answer.review and "yes" or "no"))
-            self:showAfterCloseNotice(answer.rating
-                and T(_("Hardcover: \"%1\" marked Read (%2/5)."), title, tostring(answer.rating))
-                or T(_("Hardcover: \"%1\" marked Read."), title))
+            -- Silent on success, like every other Hardcover sync: on a Kindle
+            -- the toast's repaint is a screen flash.
         else
             debugLog("[hc] mark-finished failed for " .. tostring(title) .. ": " .. tostring(err) ..
                 " (transient=" .. tostring(hardcoverErrorIsTransient(err)) .. ")")
@@ -10672,12 +10671,16 @@ end
 
 -- Marks a push failure caused by the token itself (see the request layer).
 local HC_TOKEN_REJECTED = "rejected the API token"
+-- The token Hardcover last refused, for this whole KOReader run: every book
+-- open/close builds a new plugin instance, so a per-instance flag was forgotten
+-- on the next close and each one retried the dead token. Cleared by a new token.
+local hc_rejected_token = nil
 function Bookbridge:drainHardcoverPending()
     if not self.hardcover_progress_sync or not self.hardcover_token or self.hardcover_token == "" then return end
     -- A token Hardcover has refused would fail for every book, so after the
     -- one notice (below) nothing is sent with it again this session. In memory
     -- only: a new token in Settings resumes at once; a restart tries once more.
-    if self._hc_token_rejected and self._hc_token_rejected == self.hardcover_token then
+    if hc_rejected_token and hc_rejected_token == self.hardcover_token then
         debugLog("[hc] process: skipped -- Hardcover rejected this API token; waiting for a new one")
         return
     end
@@ -10829,7 +10832,7 @@ function Bookbridge:drainHardcoverPending()
                 -- here (one notice, not one per queued book) and pause
                 -- Hardcover until the token changes. The records stay queued.
                 if completed and tostring(a):find(HC_TOKEN_REJECTED, 1, true) then
-                    self._hc_token_rejected = token
+                    hc_rejected_token = token
                     break
                 end
             end
@@ -10839,7 +10842,7 @@ function Bookbridge:drainHardcoverPending()
     end
     saveHardcoverPending(pending)
     -- A token rejected in the loop above would fail this lookup too.
-    if self._hc_token_rejected and self._hc_token_rejected == token then unmapped = nil end
+    if hc_rejected_token and hc_rejected_token == token then unmapped = nil end
     if unmapped then
         -- If the open-time lookup for this book is STILL running, wait for it
         -- instead of starting a competing second search. Hardcover throttles
@@ -11011,100 +11014,18 @@ function Bookbridge:showAfterCloseNotice(text)
     local function still_up()
         return type(UIManager.isWidgetShown) ~= "function" or UIManager:isWidgetShown(msg)
     end
-    -- Kindle: the notice's own refresh reaches the driver and never shows;
-    -- a repaint of the whole stack from the home screen up does. Re-applied
-    -- 2026-09-18 (reverted earlier the same day along with two unrelated
-    -- changes, over a report that turned out to be about a different device
-    -- -- this fix itself was never shown to be wrong). Diagnostic logging
-    -- (build 0539fab) proved these retries fire on time, find the widget
-    -- still up, and both refreshWaitForLast and setDirty report success --
-    -- every time -- while the notice still took 25-32s to actually appear,
-    -- confirmed twice, two different books. "ui" is KOReader's fast/partial
-    -- refresh mode, which this Kindle's e-ink driver can coalesce or defer
-    -- instead of actually flashing, silently, with no error to catch.
-    -- "flashui" is the first-class escalation of exactly that mode for
-    -- exactly this case (see UIManager's own promotion logic, which upgrades
-    -- repeated plain "ui" refreshes to "flashui" for the same reason) --
-    -- forces the real flash "ui" was quietly skipping, still scoped to a
-    -- "ui"-tier refresh rather than a disruptive full-screen "full".
-    -- (G_reader_settings avoid_flashing_ui, which silently downgrades
-    -- flashui back to ui, is not set on Matt's Kindle -- confirmed live.)
-    --
-    -- Still not enough on its own: confirmed live 2026-09-18 that
-    -- setDirty (flashui included) only QUEUES a refresh for UIManager's own
-    -- next tick -- it does not paint anything itself. With the dismiss-grace
-    -- fix above, still_up was finally true and both calls reported success
-    -- at +1s/+3s, and the flash still didn't land for 30-40s: with no other
-    -- input or scheduled work due, the device sits in input:waitEvent()
-    -- and nothing drains that queued refresh until something else happens
-    -- to wake the loop. UIManager:forceRePaint() ("Explicitly drain the
-    -- paint & refresh queues *now*, instead of waiting for the next UI
-    -- tick" -- its own doc comment) is the direct fix: it's what actually
-    -- executes the refresh setDirty only queued.
-    --
-    -- Don't wait a second to try this at all -- forceRePaint makes the
-    -- attempt synchronous, and dismiss-grace already protects the widget
-    -- from the reader -> FileManager transition's queued input -- so this
-    -- runs once, immediately (+0s), right on the close itself. (The
-    -- +1s/+3s scheduled follow-ups that used to run after this are gone:
-    -- with two notices each retrying three times, one ordinary book close
-    -- flashed the screen up to six times -- Matt counted five, live.)
-    --
-    -- refreshWaitForLast/setDirty/forceRePaint all report success every
-    -- time, on every device generation of this fix -- but confirmed live
-    -- 2026-09-18, twice, that this can still be a false success: the exact
-    -- same call sequence, completing in under a second per this function's
-    -- own debug log, produced a visible flash in under a second once and
-    -- took Matt a further ~26s the very next time, no difference in
-    -- anything this code did or reported either time. That means the
-    -- delay is happening below these calls entirely -- everything here
-    -- routes through UIManager, which on Kindle hands off to Amazon's own
-    -- "pillow" display compositor, and that layer is what appears to be
-    -- queuing the actual panel flash on its own schedule (lipc's own
-    -- interrogatePillow call, tried live, just hung -- consistent with it
-    -- being busy/backed up, not idle). Nothing reachable through
-    -- UIManager/Device.screen can be more forceful than what's already
-    -- been tried here.
-    --
-    -- eips is the escape hatch: a stock Kindle CLI tool (part of the base
-    -- firmware, not this plugin) that talks to the mxcfb/EPDC kernel
-    -- driver directly -- "eips -s w=...,h=... -f" pushes the CURRENT
-    -- framebuffer to the panel as an immediate full flash, bypassing
-    -- pillow's own queue entirely rather than asking it (nicely, so far)
-    -- to hurry up. KOReader's own forceRePaint has already painted the
-    -- notice into that framebuffer by the time this runs, so eips isn't
-    -- drawing anything new, just forcing the panel to actually show what's
-    -- already there. Confirmed live: runs in well under a second and
-    -- exits cleanly. Kindle-only (Device:isKindle(), not just "not
-    -- desktop, not Android") since eips is Kindle-specific -- nothing
-    -- about this touches other e-readers this plugin might run on.
-    local shown_at = os.time()
+    -- Draw the note now: setDirty only queues its "ui" refresh, and with
+    -- nothing else due the device can sit in waitEvent without draining it.
+    -- Only the note's own region repaints -- no whole-screen flashui, no
+    -- eips. Those forced a full-screen flash for a corner note, and the
+    -- 20-40 s late flash they chased happens with no notice at all (a
+    -- system refresh, not this code; confirmed 2026-09-22).
     local up = still_up()
-    debugLog(string.format("[hc] notice: kindle repaint attempt +0s, still_up=%s", tostring(up)))
     if up then
-        local ok_r, rerr = pcall(function() if Device.screen and Device.screen.refreshWaitForLast then Device.screen:refreshWaitForLast() end end)
-        local ok_d, derr = pcall(function() UIManager:setDirty("all", "flashui") end)
         local ok_f, ferr = pcall(function() UIManager:forceRePaint() end)
-        local ok_e, eerr = true, nil
-        if Device.isKindle and Device:isKindle() then
-            ok_e, eerr = pcall(function()
-                local w = Device.screen and Device.screen.getWidth and Device.screen:getWidth()
-                local h = Device.screen and Device.screen.getHeight and Device.screen:getHeight()
-                if not w or not h then error("no screen dimensions") end
-                local cmd = string.format("eips -s w=%d,h=%d -f >/dev/null 2>&1", w, h)
-                local ok_exec = os.execute(cmd)
-                -- os.execute's return shape differs across Lua versions (a
-                -- single number pre-5.2 vs true/exit-type/code after) --
-                -- normalize rather than assume one.
-                if not (ok_exec == true or ok_exec == 0) then error("eips exited non-zero") end
-            end)
-        end
-        debugLog(string.format("[hc] notice: kindle repaint attempt +0s done at +%ss -- refreshWaitForLast=%s%s setDirty(flashui)=%s%s forceRePaint=%s%s eips=%s%s",
-            tostring(os.time() - shown_at),
-            tostring(ok_r), ok_r and "" or (" (" .. tostring(rerr) .. ")"),
-            tostring(ok_d), ok_d and "" or (" (" .. tostring(derr) .. ")"),
-            tostring(ok_f), ok_f and "" or (" (" .. tostring(ferr) .. ")"),
-            tostring(ok_e), ok_e and "" or (" (" .. tostring(eerr) .. ")")))
+        debugLog("[hc] notice: repainted" .. (ok_f and "" or (" -- forceRePaint failed: " .. tostring(ferr))))
+    else
+        debugLog("[hc] notice: already closed before the repaint")
     end
     -- Android: the frame carrying the notice is posted (the blits lock and
     -- post fine) but not composited until a touch or a window event. The
@@ -11157,6 +11078,17 @@ function Bookbridge:resolveHardcoverMatch(md5, rec)
         end, {})
         if not completed then return end
         if unreachable then
+            -- A refused token is not "unreachable": say so once and pause
+            -- Hardcover until it changes, as a matched book's push does --
+            -- otherwise a new book retried the dead token silently forever.
+            if tostring(_err):find(HC_TOKEN_REJECTED, 1, true) then
+                debugLog("[hc] lookup: " .. tostring(_err) .. "; pausing Hardcover until the token changes")
+                if hc_rejected_token ~= token then
+                    hc_rejected_token = token
+                    self:showAfterCloseNotice(tostring(_err))
+                end
+                return
+            end
             -- Not a verdict: the book stays queued and is looked up again on
             -- the next reconnect/wake, like a queued progress push.
             debugLog("[hc] Hardcover unreachable (" .. tostring(_err) .. "); keeping " .. tostring(rec.title) .. " queued")
@@ -11358,6 +11290,7 @@ end
 function Bookbridge:prefetchHardcoverMatch()
     if not self.hardcover_progress_sync then return end
     if not self.hardcover_token or self.hardcover_token == "" then return end
+    if hc_rejected_token and hc_rejected_token == self.hardcover_token then return end
     local ui = self.ui
     if not ui or not ui.document or not ui.doc_settings then return end
     local md5 = ui.doc_settings:readSetting("partial_md5_checksum")
