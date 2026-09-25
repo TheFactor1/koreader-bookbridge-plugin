@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "version": "0.4.0",
-  "build": "cf974fc+dirty",
+  "build": "12f4031",
   "generated": "2026-09-25T15:23:52-04:00",
   "files": {
     "main.lua": { "sha256": "9f6a70b409b2935bf845453b2107bb435d262b397619f4526f4e905f5c03e0fa", "size": 633085 },
