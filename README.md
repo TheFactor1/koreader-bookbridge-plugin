@@ -16,6 +16,140 @@ A KOReader plugin that ties the device to a self-hosted reading stack:
 Calibre-Web-Automated (CWA) for the library, and [Hardcover](https://hardcover.app)
 for tracking what you read. Runs on Kindle, Android and desktop KOReader.
 
+## Set it up, step by step
+
+**What you need**
+
+- A computer that stays switched on -- Linux or Mac (on Windows, use
+  [WSL](https://learn.microsoft.com/windows/wsl/install)). This becomes your
+  "server".
+- A Kindle, Kobo or Android device with [KOReader](https://github.com/koreader/koreader)
+  installed.
+- About 15 minutes.
+
+### Step 1 -- Install Docker on the computer
+
+Docker runs the server programs for you. Install it from
+[docs.docker.com/get-docker](https://docs.docker.com/get-docker/) and open it
+once so it's running.
+
+### Step 2 -- Install Tailscale (recommended)
+
+Tailscale lets your reader reach the computer from anywhere, privately.
+Skip this step if you'll only ever use it at home on the same Wi-Fi.
+
+- On the computer: install it from [tailscale.com/download](https://tailscale.com/download)
+  and sign in.
+- On a Kindle or Kobo: install the *Tailscale VPN* KOReader plugin and sign
+  in to the same Tailscale account. Bookbridge finds it by itself later.
+
+### Step 3 -- Download the server files
+
+Open a terminal on the computer and run:
+
+```bash
+git clone https://github.com/TheFactor1/shelfmark-stack
+cd shelfmark-stack
+```
+
+(No `git`? On the [shelfmark-stack page](https://github.com/TheFactor1/shelfmark-stack)
+click **Code > Download ZIP**, unzip it, and open a terminal in that folder.)
+
+### Step 4 -- Start the setup wizard
+
+In the same terminal:
+
+```bash
+docker compose -f docker-compose.setup.yml up -d
+```
+
+Then open **http://localhost:8090** in a web browser on that computer.
+
+### Step 5 -- Follow the wizard
+
+The wizard has five parts, top to bottom:
+
+1. **This machine's address** -- the address your reader will use to reach
+   the computer. With Tailscale it starts with `100.` (the Tailscale app shows
+   it). Without Tailscale it's the computer's home-network address, like
+   `192.168.1.20`.
+2. **What to run** -- Shelfmark (search & request books) is always on. Tick
+   **Library sync** too if you want your books to land in a library the
+   reader can download from (recommended). Anna's Archive and AI suggestions
+   are optional extras.
+3. **Configure & start** -- press the button and wait. The first time takes
+   a few minutes while the programs download.
+4. **Check the services** -- every line should say it answered. If one
+   doesn't, wait a minute and press **Re-check**.
+5. **Pair your Kindle** -- a **6-character code** appears. Leave this page
+   open. The code works for 10 minutes; press **New code** if it runs out.
+
+### Step 6 -- Make your Shelfmark account
+
+Open **http://localhost:8084** and follow Shelfmark's first-time setup. Choose
+a username and password -- you'll type them on your reader in Step 9.
+
+### Step 7 -- Put Bookbridge on your reader
+
+1. Download **bookbridge.koplugin.zip** from the
+   [latest release](https://github.com/TheFactor1/koreader-bookbridge-plugin/releases/latest).
+2. Unzip it. You get a folder called `bookbridge.koplugin`.
+3. Plug the reader into the computer by USB and copy that folder into
+   KOReader's `plugins` folder:
+   - Kindle: `koreader/plugins`
+   - Kobo: `.adds/koreader/plugins`
+4. Eject the reader, then restart KOReader (menu > **Exit** > **Restart KOReader**).
+
+### Step 8 -- Connect the reader to your server
+
+Bookbridge opens **Status & setup** by itself the first time.
+
+1. Tap **Start here: import settings from your server**.
+2. Type the address from Step 5 (just the address, e.g. `100.64.0.10`) and
+   the 6-character code, then tap **Import**.
+3. The list checks everything and shows what works.
+
+### Step 9 -- Sign in to Shelfmark
+
+On the same list, the **Shelfmark** line says **Needs login**. Tap it, enter
+the username and password from Step 6, and tap **Apply**. It should say
+**Signed in to Shelfmark**.
+
+**That's it.** Open the **Bookbridge** menu and choose **Search & request a
+book**. When you're finished setting up you can close the wizard -- your
+servers keep running:
+
+```bash
+docker compose -f docker-compose.setup.yml down
+```
+
+### Extras (all optional)
+
+- **Hardcover** (track what you read): make a token at
+  [hardcover.app/account/api](https://hardcover.app/account/api), then
+  **Bookbridge > Hardcover > Hardcover settings** and paste it.
+- **Readest** (keep your place in sync with a phone or tablet): install the
+  Readest KOReader plugin from its [releases](https://github.com/readest/readest/releases),
+  sign in under **Tools > Readest** and turn on its auto sync.
+- **Anna's Archive** (if you ticked it in Step 5): enter your Anna's Archive
+  account key under **Settings > Connections > Anna's Archive settings**.
+- **Library login**: if you ticked Library sync, its first login is `admin`
+  / `admin123`. Change it at **http://localhost:8083**, then enter the new
+  one on the reader under **Settings > Connections > Calibre-Web settings**.
+
+### If a line on Status & setup says...
+
+| It says | What to do |
+|---|---|
+| **Can't reach** | Make sure the computer is on and Docker is running, and that the reader is on the same Wi-Fi -- or that Tailscale is on for both. |
+| **Wrong login** | Tap the line and re-type the username and password. |
+| **Locked -- try later** | Too many wrong passwords. Wait 30 minutes, then try again. |
+| **Needs login** | Tap it and sign in (Step 9). |
+| **Not installed** / **Not set up** | Optional -- only needed for that extra feature. |
+
+Import said the code didn't work? Codes are single-use and last 10 minutes --
+press **New code** in the wizard (Step 5, part 5) and try again.
+
 ## What you need to host
 
 Bookbridge is only the part on the reader. Everything it does talks to a
@@ -46,7 +180,7 @@ runs all of the servers above from one compose file, with a browser setup
 wizard that hands the reader its settings by a 6-character code (*Import from
 server*). It also includes the pairing relay (behind *Set up another device*
 and *Send debug log to server*) and the optional AI relay (*Match
-suggestions*). See **Install** below.
+suggestions*). See **Set it up, step by step** above.
 
 Once it's set up, **Bookbridge > Status & setup** shows each piece, whether it
 works (it really logs in -- and tests the Anna's Archive key without spending
@@ -166,35 +300,9 @@ signed in, none of this runs.
 
 ## Install
 
-The whole path for someone starting from nothing, about fifteen minutes:
-
-1. **The server** (a computer that runs Docker and stays on):
-   ```bash
-   git clone https://github.com/TheFactor1/shelfmark-stack
-   cd shelfmark-stack
-   HOST_ADDRESS=$(tailscale ip -4 2>/dev/null | head -1) \
-     docker compose -f docker-compose.setup.yml up -d
-   ```
-   Open `http://<that computer>:8090`. The wizard asks what you want
-   (library sync, Anna's Archive, AI suggestions), starts it, tests it, and
-   shows a **6-character code**. Finish Shelfmark's own first-run setup at
-   `http://<that computer>:8084` and make yourself a login there.
-2. **The reader**: install [KOReader](https://github.com/koreader/koreader)
-   if it isn't already. Away from home? Add Tailscale to the server and the
-   Tailscale VPN KOReader plugin to a Kindle/Kobo.
-3. **Bookbridge**: download `bookbridge.koplugin.zip` from the
-   [latest release](https://github.com/TheFactor1/koreader-bookbridge-plugin/releases/latest),
-   unzip it into KOReader's `plugins/` folder (on a Kindle,
-   `/mnt/us/koreader/plugins/`) and restart KOReader.
-4. **Connect**: Bookbridge opens **Status & setup** by itself the first
-   time. Tap **Start here: import settings from your server**, enter the
-   server's address and the wizard's code. It fills in everything the server
-   can, then shows what works -- usually just your Shelfmark login is left:
-   tap that line and enter it.
-
-From then on Bookbridge updates itself from this repository's releases (only
-published releases, never work in progress). To use your own update server
-instead, set **Settings > Update source**.
+See **Set it up, step by step** above. Bookbridge then keeps itself up to date
+from this repository's published releases (never unreleased work). To use your
+own update server instead, set **Settings > Update source**.
 
 ## Development
 
