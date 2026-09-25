@@ -41,13 +41,12 @@ Accounts, not servers:
   (from [readest/readest](https://github.com/readest/readest) releases), sign
   in under Tools > Readest and turn its auto sync on. See *Readest* below.
 
-**Not public yet.** Three helper services this plugin can use live in the
-author's private configuration and aren't published: the one-file server
-stack with a browser setup wizard (the target of *Import from server*), the
-pairing relay (behind *Set up another device* and *Send debug log to
-server*), and the AI relay (behind *Match suggestions*). Without them those
-menu entries can't work; everything else can. Enter the addresses by hand
-instead of importing them.
+**Easiest:** [shelfmark-stack](https://github.com/TheFactor1/shelfmark-stack)
+runs all of the servers above from one compose file, with a browser setup
+wizard that hands the reader its settings by a 6-character code (*Import from
+server*). It also includes the pairing relay (behind *Set up another device*
+and *Send debug log to server*) and the optional AI relay (*Match
+suggestions*). See **Install** below.
 
 Once it's set up, **Bookbridge > Status & setup** shows each piece, whether it
 works (it really logs in -- and tests the Anna's Archive key without spending
@@ -167,10 +166,35 @@ signed in, none of this runs.
 
 ## Install
 
-Copy `bookbridge.koplugin/` into your KOReader install's `plugins/` directory
-and restart KOReader, or point **Settings → Update source** at a server
-hosting this repo's `bookbridge.koplugin/` and use **Check for updates** from
-then on. Configure the servers under **Bookbridge → Settings → Connections**.
+The whole path for someone starting from nothing, about fifteen minutes:
+
+1. **The server** (a computer that runs Docker and stays on):
+   ```bash
+   git clone https://github.com/TheFactor1/shelfmark-stack
+   cd shelfmark-stack
+   HOST_ADDRESS=$(tailscale ip -4 2>/dev/null | head -1) \
+     docker compose -f docker-compose.setup.yml up -d
+   ```
+   Open `http://<that computer>:8090`. The wizard asks what you want
+   (library sync, Anna's Archive, AI suggestions), starts it, tests it, and
+   shows a **6-character code**. Finish Shelfmark's own first-run setup at
+   `http://<that computer>:8084` and make yourself a login there.
+2. **The reader**: install [KOReader](https://github.com/koreader/koreader)
+   if it isn't already. Away from home? Add Tailscale to the server and the
+   Tailscale VPN KOReader plugin to a Kindle/Kobo.
+3. **Bookbridge**: download `bookbridge.koplugin.zip` from the
+   [latest release](https://github.com/TheFactor1/koreader-bookbridge-plugin/releases/latest),
+   unzip it into KOReader's `plugins/` folder (on a Kindle,
+   `/mnt/us/koreader/plugins/`) and restart KOReader.
+4. **Connect**: Bookbridge opens **Status & setup** by itself the first
+   time. Tap **Start here: import settings from your server**, enter the
+   server's address and the wizard's code. It fills in everything the server
+   can, then shows what works -- usually just your Shelfmark login is left:
+   tap that line and enter it.
+
+From then on Bookbridge updates itself from this repository's releases (only
+published releases, never work in progress). To use your own update server
+instead, set **Settings > Update source**.
 
 ## Development
 

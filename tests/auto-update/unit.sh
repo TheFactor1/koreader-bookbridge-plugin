@@ -54,8 +54,11 @@ Bookbridge.autoCheckForUpdate(dev, "wake")
 ck(#LOG >= 1, "a retry wait stranded a day ahead by a clock correction doesn't block the next check")
 NOW = B + 400 * 24 * 3600
 
-LOG = {}; NOW = NOW + 24 * 3600; Bookbridge.autoCheckForUpdate(plugin({ auto_update = false, update_url = "http://srv" }), "wake"); Bookbridge.autoCheckForUpdate(plugin({ auto_update = true, update_url = "" }), "wake")
-ck(#LOG == 0, "off, or no update source: never checks")
+LOG = {}; NOW = NOW + 24 * 3600; Bookbridge.autoCheckForUpdate(plugin({ auto_update = false, update_url = "http://srv" }), "wake")
+ck(#LOG == 0, "switched off: never checks")
+LOG = {}; NOW = NOW + 24 * 3600; CHECK = { manifest = true, changed = {}, build = "rel" }
+Bookbridge.autoCheckForUpdate(plugin({ auto_update = true, update_url = "", saveAllSettings = function() end }), "wake")
+ck(#LOG > 0 and tostring(LOG[1]):find("GitHub releases", 1, true), "no update source (a new install): checks the published GitHub releases")
 print(("=== AUTO UPDATE UNIT %d/%d"):format(n - fails, n), fails == 0 and "PASS" or "FAIL"); os.exit(fails == 0 and 0 or 1)
 LUA
 (cd "$KDIR" && FN="$W/fn.lua" ./luajit "$W/t.lua")

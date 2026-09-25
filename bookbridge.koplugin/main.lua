@@ -168,7 +168,7 @@ function Bookbridge:init()
     self.ui.menu:registerToMainMenu(self)
     -- Automatic update check a little after start; the interval inside makes
     -- this free on every start but the first in six hours.
-    if self.auto_update and self.update_url and self.update_url ~= "" then
+    if self.auto_update then
         UIManager:scheduleIn(30, function() self:autoCheckForUpdate("startup") end)
     end
     self:registerFileDialogButtons()
@@ -605,7 +605,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.3.0"
+local PLUGIN_VERSION = "0.4.0"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -3683,7 +3683,18 @@ local function doCheckForUpdate(update_url, socks5_proxy)
         debugLog("[update] <- couldn't parse response")
         return nil, code, _("Couldn't parse GitHub's response.")
     end
-    return stripJsonNull(decoded), code
+    decoded = stripJsonNull(decoded)
+    -- The release's own manifest.json, when it has one: then a GitHub install
+    -- goes through the same checksum-verified path as a self-hosted source,
+    -- and "is there anything new" is decided by content, not version text.
+    -- No proxy -- GitHub is on the internet, not the tailnet.
+    local minfo = doCheckManifest("https://raw.githubusercontent.com/" .. UPDATE_REPO .. "/"
+        .. decoded.tag_name .. "/bookbridge.koplugin", nil)
+    if minfo then
+        minfo.release = decoded.tag_name
+        return minfo, code
+    end
+    return decoded, code
 end
 
 -- Downloads the tagged release's main.lua/_meta.lua to temp files first,
@@ -3706,6 +3717,9 @@ local function doClaimFromServer(base_url, code, socks5_proxy)
     local base = (base_url or ""):gsub("%s", ""):gsub("/*$", "")
     if base == "" then return nil, _("No server address given.") end
     if not base:match("^https?://") then base = "http://" .. base end
+    -- The dialog asks for just the address; the wizard listens on 8090.
+    -- Without this a bare "100.x.y.z" went to port 80 and never found it.
+    if base:match("^http://") and not base:match("^http://[^/]+:%d+") then base = base:gsub("^(http://[^/]+)", "%1:8090") end
     local url = base .. "/claim/" .. (code or ""):gsub("%s", "")
     local body, http_code, err = doHttpGetString(url, socks5_proxy, "[pair]", 8, 15)
     if not body then
@@ -7219,9 +7233,9 @@ function Bookbridge:importFromServer()
     local dialog
     dialog = MultiInputDialog:new{
         title = _("Import from server"),
-        description = _("Run the setup wizard on your computer, then enter this machine's address and the code it shows."),
+        description = _("Run the setup wizard on your server (github.com/TheFactor1/shelfmark-stack), then enter the server's address and the 6-character code the wizard shows."),
         fields = {
-            { text = prefill:gsub("^https?://", ""), hint = _("Server address, e.g. 100.90.18.11") },
+            { text = prefill:gsub("^https?://", ""), hint = _("Server address, e.g. 100.x.y.z (the setup wizard's, port 8090)") },
             { text = "", hint = _("6-character code") },
         },
         buttons = {{
@@ -7251,6 +7265,9 @@ function Bookbridge:applyServerClaim(addr, code)
         UIManager:show(InfoMessage:new{ text = _("Enter both the address and the code.") })
         return
     end
+    -- A brand-new reader has no proxy yet, and nothing configured for the
+    -- auto-fill to go on: judge it from the address being imported from.
+    self:autoTailscaleProxy(addr)
     local socks5_proxy = self.socks5_proxy
     local Trapper = require("ui/trapper")
     local completed, settings, err = Trapper:dismissableRunInSubprocess(function()
@@ -7264,7 +7281,7 @@ function Bookbridge:applyServerClaim(addr, code)
     -- Only the keys the claim actually carries are written; anything already
     -- set that the claim doesn't mention is left alone.
     local fields = { "server_url", "cwa_url", "cwa_username", "cwa_password",
-                     "annas_url", "ai_relay_url", "ai_relay_token" }
+                     "annas_url", "ai_relay_url", "ai_relay_token", "pairing_relay_url" }
     local applied = 0
     for _, k in ipairs(fields) do
         if type(settings[k]) == "string" and settings[k] ~= "" then
@@ -7276,7 +7293,12 @@ function Bookbridge:applyServerClaim(addr, code)
         UIManager:show(InfoMessage:new{ text = _("The server sent nothing to import.") })
         return
     end
-    self:saveAllSettings(T(_("Imported %1 setting(s) from the server."), tostring(applied)))
+    self:saveAllSettings()
+    debugLog("[setup] imported " .. applied .. " setting(s) from the server")
+    -- Straight to the checked status: it says what now works and what's
+    -- left (the Shelfmark login, which the server can't hand over).
+    self._status_checks = nil
+    self:showStatus()
 end
 
 -- One screen: each configured service, whether it answers, and what it
@@ -7454,12 +7476,12 @@ local AUTO_UPDATE_RETRY = 10 * 60   -- after a check that couldn't reach the ser
 -- Quiet check-and-install from the self-hosted update source. Called with a
 -- reason ("wake", "network", "startup") from the hooks below; safe to call
 -- often -- the interval and the running flag make it a no-op almost always.
--- True when an automatic check could do anything at all: the switch is on
--- and a self-hosted source is set. The hooks test the same two fields inline
--- before scheduling (they are exercised on bare tables by the test suites),
--- so a device without an update source never runs a timer.
+-- True when an automatic check could do anything at all: the switch is on.
+-- With a self-hosted "Update source" that's where it looks; without one (a
+-- new install) it follows this plugin's published GitHub releases, so only
+-- versions deliberately released reach other people's devices.
 function Bookbridge:autoUpdateWanted()
-    return self.auto_update and self.update_url and self.update_url ~= "" and true or false
+    return self.auto_update and true or false
 end
 
 function Bookbridge:autoCheckForUpdate(reason)
@@ -7489,7 +7511,7 @@ function Bookbridge:autoCheckForUpdate(reason)
     if now - last < AUTO_UPDATE_INTERVAL then return end
     if auto_update_state.not_before and now < auto_update_state.not_before then return end
     auto_update_state.running = true
-    debugLog("[update] auto (" .. reason .. "): checking " .. tostring(self.update_url))
+    debugLog("[update] auto (" .. reason .. "): checking " .. ((self.update_url and self.update_url ~= "") and self.update_url or "GitHub releases"))
     local Trapper = require("ui/trapper")
     Trapper:wrap(function()
         local update_url, socks5_proxy = self.update_url, self.socks5_proxy
@@ -7529,7 +7551,7 @@ function Bookbridge:promptPairingRelayUrl(on_success)
     local dialog
     dialog = InputDialog:new{
         title = _("Pairing relay URL"),
-        description = _("A small always-on service both devices can reach (homeserver-configs/shelfmark-pairing-relay). Only asked once -- saved after this."),
+        description = _("The pairing relay from the Shelfmark server stack (port 8086). Filled in by itself when you import settings from the server; only asked once."),
         input = "",
         input_hint = _("e.g. http://homeserver:8086"),
         buttons = {
@@ -8136,9 +8158,9 @@ function Bookbridge:addToMainMenu(menu_items)
                     },
                     {
                         text = _("Install updates automatically"),
-                        help_text = _("Checks the self-hosted update source quietly when the device wakes, reconnects, or starts (at most every six hours) and installs what it finds. Only the restart is asked about."),
+                        help_text = _("Checks for a new version quietly when the device wakes, reconnects, or starts (at most every six hours) and installs what it finds -- from your own update source if one is set, otherwise from the published GitHub releases. Only the restart is asked about."),
                         checked_func = function() return self.auto_update and true or false end,
-                        enabled_func = function() return self.update_url and self.update_url ~= "" end,
+
                         keep_menu_open = true,
                         callback = function()
                             self.auto_update = not self.auto_update
@@ -11423,7 +11445,7 @@ end
 -- plane sat there until you happened to close another book.
 function Bookbridge:onNetworkConnected()
     self:pullReadestPositionWhenOnline()
-    if self.auto_update and self.update_url and self.update_url ~= "" then
+    if self.auto_update then
         UIManager:scheduleIn(5, function() self:autoCheckForUpdate("network") end)
     end
     if not self.hardcover_progress_sync then return end
@@ -11859,7 +11881,7 @@ function Bookbridge:onResume()
     UIManager:scheduleIn(1, function() self:startClipboardReceiver() end)
     -- Updates: a quiet look at the self-hosted source once the network has
     -- had a moment to come back (throttled inside).
-    if self.auto_update and self.update_url and self.update_url ~= "" then
+    if self.auto_update then
         UIManager:scheduleIn(10, function() self:autoCheckForUpdate("wake") end)
     end
     -- Push any progress captured on suspend/close. No throttle needed -- at
@@ -12106,8 +12128,9 @@ function Bookbridge:collectStatusRows()
     local marker = io.open(tostring(self.path or "") .. "/installed-build", "r")
     if marker then build = (marker:read("*l") or ""):gsub("%s", ""); marker:close() end
     add({ text = _("Updates"),
-        mandatory = (not self.update_url or self.update_url == "") and _("No update source")
-            or ((self.auto_update and _("Automatic") or _("Manual")) .. ((build and build ~= "") and (" -- " .. build) or "")),
+        mandatory = (self.auto_update and _("Automatic") or _("Manual"))
+            .. ((not self.update_url or self.update_url == "") and (" -- " .. _("GitHub"))
+                or ((build and build ~= "") and (" -- " .. build) or "")),
         action = function()
             local Trapper = require("ui/trapper")
             Trapper:wrap(function() self:checkForUpdate() end)
@@ -12317,7 +12340,7 @@ end
 -- server is a Tailscale address (100.64.0.0/10 or *.ts.net). Not on desktop
 -- or Android (they route the tailnet themselves), and not after the user
 -- emptied the field on purpose (Advanced settings) this session.
-function Bookbridge:autoTailscaleProxy()
+function Bookbridge:autoTailscaleProxy(extra_url)
     if self.socks5_proxy and self.socks5_proxy ~= "" then return false end
     if self._proxy_autoset_off then return false end
     local ok_dev, Device = pcall(require, "device")
@@ -12329,7 +12352,7 @@ function Bookbridge:autoTailscaleProxy()
         local a, b = host:match("^(%d+)%.(%d+)%.%d+%.%d+$")
         return a == "100" and tonumber(b) >= 64 and tonumber(b) <= 127
     end
-    if not (tailnet(self.server_url) or tailnet(self.cwa_url) or tailnet(self.annas_url)) then return false end
+    if not (tailnet(self.server_url) or tailnet(self.cwa_url) or tailnet(self.annas_url) or tailnet(extra_url)) then return false end
     local listening = false
     pcall(function()
         local sock = socket.tcp()
@@ -12395,8 +12418,8 @@ Readest -- the Readest KOReader plugin, signed in with auto sync on: your place 
 REACHING IT AWAY FROM HOME
 Tailscale on the server, and the Tailscale VPN KOReader plugin on a Kindle or Kobo. Bookbridge fills in its proxy by itself.
 
-NOT PUBLIC YET
-The one-file server stack with a setup wizard ("Import from server"), the pairing relay ("Set up another device", sending the debug log) and the AI relay ("Match suggestions") aren't published. Enter addresses by hand instead.
+EASIEST: ONE COMMAND
+github.com/TheFactor1/shelfmark-stack runs all of the servers above from one file. Its setup wizard (port 8090) starts what you pick, tests it, and shows a 6-character code: enter it under "Start here: import settings from your server". It also runs the pairing relay ("Set up another device") and, if you want it, the AI relay.
 
 Full guide: github.com/TheFactor1/koreader-bookbridge-plugin]]),
     })

@@ -215,6 +215,8 @@ SOCK_OK = true
 ck(p:autoTailscaleProxy() == true and p.socks5_proxy == "127.0.0.1:1055", "Tailscale proxy listening + tailnet server: filled in")
 local q = bb({ server_url = "http://192.168.1.5:8084", saveAllSettings = function() end })
 ck(q:autoTailscaleProxy() == false and q.socks5_proxy == nil, "LAN server address: left alone")
+local fresh_kindle = bb({ saveAllSettings = function() end })
+ck(fresh_kindle:autoTailscaleProxy("100.90.18.11") == true and fresh_kindle.socks5_proxy == "127.0.0.1:1055", "brand-new reader importing from a Tailscale address: proxy filled in first")
 SOCK_OK = false
 local r = bb({ server_url = "http://100.90.18.11:8084", saveAllSettings = function() end })
 ck(r:autoTailscaleProxy() == false and r.socks5_proxy == nil, "no proxy listening: left alone")
@@ -248,8 +250,8 @@ package.loaded["ui/widget/textviewer"] = { new = function(_s, x) TV = x; return 
 local hg = row(bb({ server_url = "http://s" }):collectStatusRows(), "What you need to host")
 ck(hg ~= nil, "Status & setup has a 'What you need to host' line")
 hg.action()
-ck(TV and TV.text:find("REQUIRED", 1, true) and TV.text:find("Shelfmark", 1, true) and TV.text:find("NOT PUBLIC YET", 1, true)
-   and TV.text:find("annas-archive-api", 1, true) and TV.text:find("Readest", 1, true), "...which names every piece, what's required, and what isn't public")
+ck(TV and TV.text:find("REQUIRED", 1, true) and TV.text:find("Shelfmark", 1, true) and TV.text:find("shelfmark-stack", 1, true)
+   and TV.text:find("annas-archive-api", 1, true) and TV.text:find("Readest", 1, true), "...which names every piece, what's required, and the one-command stack")
 -- The Shelfmark dialog asks only for what a new user needs
 bb({ server_url = "http://s", username = "u", password = "p" }):editServerSettings()
 ck(MID and #MID.fields == 3, "Shelfmark settings: address, username, password only")
