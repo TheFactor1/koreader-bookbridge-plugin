@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build efaeb45
+
+- **Fix**: the after-wake Readest sync from the previous build asked too soon,
+  while the Kindle was still reconnecting, so it could still miss the iPad's
+  page. It now waits a few seconds for the connection to settle and checks
+  twice.
+
 ## 2026-09-25 — build 797486d
 
 - **Fix**: after reading further on your phone or iPad, waking the Kindle now
