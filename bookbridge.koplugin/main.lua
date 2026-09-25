@@ -227,7 +227,7 @@ function Bookbridge:editServerSettings()
     self.settings_dialog = MultiInputDialog:new{
         title = _("Shelfmark server settings"),
         fields = {
-            { text = self.server_url, hint = _("Server address, e.g. http://100.90.18.11:8084") },
+            { text = self.server_url, hint = _("Server address, e.g. http://100.64.0.10:8084") },
             { text = self.username, hint = _("Username") },
             { text = self.password, text_type = "password", hint = _("Password") },
         },

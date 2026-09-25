@@ -210,22 +210,22 @@ NET = { cwa_code = 200 }
 b:saveAndVerify("cwa")
 ck(logins == 0 and cwas == 1, "saving Calibre-Web tests only Calibre-Web (no Shelfmark login)")
 -- Tailscale proxy fills itself in
-local p = bb({ server_url = "http://100.90.18.11:8084", saveAllSettings = function() end })
+local p = bb({ server_url = "http://100.64.0.10:8084", saveAllSettings = function() end })
 SOCK_OK = true
 ck(p:autoTailscaleProxy() == true and p.socks5_proxy == "127.0.0.1:1055", "Tailscale proxy listening + tailnet server: filled in")
 local q = bb({ server_url = "http://192.168.1.5:8084", saveAllSettings = function() end })
 ck(q:autoTailscaleProxy() == false and q.socks5_proxy == nil, "LAN server address: left alone")
 local fresh_kindle = bb({ saveAllSettings = function() end })
-ck(fresh_kindle:autoTailscaleProxy("100.90.18.11") == true and fresh_kindle.socks5_proxy == "127.0.0.1:1055", "brand-new reader importing from a Tailscale address: proxy filled in first")
+ck(fresh_kindle:autoTailscaleProxy("100.64.0.10") == true and fresh_kindle.socks5_proxy == "127.0.0.1:1055", "brand-new reader importing from a Tailscale address: proxy filled in first")
 SOCK_OK = false
-local r = bb({ server_url = "http://100.90.18.11:8084", saveAllSettings = function() end })
+local r = bb({ server_url = "http://100.64.0.10:8084", saveAllSettings = function() end })
 ck(r:autoTailscaleProxy() == false and r.socks5_proxy == nil, "no proxy listening: left alone")
 SOCK_OK = true
 DEVICE.isDesktop = function() return true end
-ck(bb({ server_url = "http://100.90.18.11:8084", saveAllSettings = function() end }):autoTailscaleProxy() == false, "desktop: never")
+ck(bb({ server_url = "http://100.64.0.10:8084", saveAllSettings = function() end }):autoTailscaleProxy() == false, "desktop: never")
 DEVICE.isDesktop = function() return false end
-ck(bb({ server_url = "http://100.90.18.11:8084", socks5_proxy = "10.0.0.1:9", saveAllSettings = function() end }):autoTailscaleProxy() == false, "a proxy already set: never overwritten")
-ck(bb({ server_url = "http://100.90.18.11:8084", _proxy_autoset_off = true, saveAllSettings = function() end }):autoTailscaleProxy() == false, "emptied on purpose in Advanced: not refilled")
+ck(bb({ server_url = "http://100.64.0.10:8084", socks5_proxy = "10.0.0.1:9", saveAllSettings = function() end }):autoTailscaleProxy() == false, "a proxy already set: never overwritten")
+ck(bb({ server_url = "http://100.64.0.10:8084", _proxy_autoset_off = true, saveAllSettings = function() end }):autoTailscaleProxy() == false, "emptied on purpose in Advanced: not refilled")
 SOCK_OK = false
 
 -- Errors from what you just did offer Status & setup
