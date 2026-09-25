@@ -85,6 +85,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, real
 elif [ $rc -eq 3 ]; then echo "SKIPPED  fingerprint-refresh (no local KOReader)"; skipped="${skipped:+$skipped, }fingerprint-refresh"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Readest sleep push (the reading position leaves before the Kindle sleeps)"
+out=$(bash tests/readest-sleep-push/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, $(echo "$out" | grep -q 'real Readest' && echo 'real Readest pushBookConfig' || echo 'stand-in (Readest plugin not installed locally)')"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  readest-sleep-push (no local KOReader)"; skipped="${skipped:+$skipped, }readest-sleep-push"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Calibre-Web auth stop (a wrong password ends a sync after one request)"
 out=$(bash tests/cwa-auth-stop/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, real doSyncLibrary + doCwaRequest vs a refusing server"

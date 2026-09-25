@@ -11672,6 +11672,32 @@ end
 function Bookbridge:onSuspend()
     self:stopClipboardReceiver()
     self:captureReadingProgress()
+    self:pushReadestPositionBeforeSleep()
+end
+
+-- The Readest plugin saves the reading position 5 s after a page turn (at
+-- most once per 30 s) and on close, never on sleep -- so the last pages read
+-- before pressing power stayed on the Kindle until it woke. Push it now,
+-- quietly (non-interactive: no popups), only when Readest auto-sync is on and
+-- the device is online. Its 30 s throttle is reset first or this final push
+-- would usually be swallowed. Everything is duck-typed and pcall'd: a Readest
+-- update that changes these internals makes this a no-op, never an error.
+function Bookbridge:pushReadestPositionBeforeSleep()
+    local ui = self.ui
+    local rs = ui and ui.document and ui.readest
+    if type(rs) ~= "table" or type(rs.pushBookConfig) ~= "function" then return end
+    local s = rs.settings
+    if type(s) ~= "table" or not s.auto_sync or not s.access_token then return end
+    local ok_nm, NetworkMgr = pcall(require, "ui/network/manager")
+    if not ok_nm or not NetworkMgr.isOnline or not NetworkMgr:isOnline() then
+        debugLog("[readest] sleep: offline -- position left for the next sync")
+        return
+    end
+    local ok, err = pcall(function()
+        rs.last_sync_timestamp = 0
+        rs:pushBookConfig(false)
+    end)
+    debugLog("[readest] sleep: position push " .. (ok and "started" or ("failed: " .. tostring(err))))
 end
 
 function Bookbridge:onResume()
