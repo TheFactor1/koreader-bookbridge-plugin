@@ -11,7 +11,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
 { grep -E '^local HC_TOKEN_REJECTED = |^local hc_rejected_token = |^local CLIPBOARD_RECEIVER_PORT = |^local STATUS_CHECK_MAX_AGE = |^local STATUS_MAX = ' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -37,6 +37,24 @@ doLogin = function() return NET.sm_ok, nil, nil, NET.sm_code end
 doCwaRequest = function() return "", NET.cwa_code end
 doHardcoverGraphQL = function() if NET.hc_ok then return { me = {} } end return nil, NET.hc_err end
 doTestService = function() return NET.annas_ok end
+local ANNAS_CALLS = 0
+doAnnasSearch = function(url, key, tld, q, proxy, opts)
+    ANNAS_CALLS = ANNAS_CALLS + 1; NET.annas_opts = opts
+    if NET.annas == "ok" then return { {} }, 200 end
+    if NET.annas == "mirror" then return nil, 502, "mirror", "MIRROR_DOWN" end
+    if NET.annas == "token" then return nil, 401, "Anna's Archive rejected the download key -- check it in Settings." end
+    if NET.annas == "challenge" then return nil, 401, "challenge" end
+    return nil, nil, "down"
+end
+local SOCK_OK = false
+socket = { tcp = function() return { settimeout = function() end, connect = function() return SOCK_OK and 1 or nil end, close = function() end } end }
+G_reader_settings = { _d = {}, isTrue = function(self, k) return self._d[k] == true end, saveSetting = function(self, k, v) self._d[k] = v end }
+local DEVICE = { isDesktop = function() return false end, isAndroid = function() return false end }
+package.loaded["device"] = DEVICE
+local CB = {}
+package.loaded["ui/widget/confirmbox"] = { new = function(_s, t) CB[#CB + 1] = t; return t end }
+local MID
+MultiInputDialog = { new = function(_s, t) MID = t; t.onShowKeyboard = function() end; t.getFields = function() return t._vals end; return t end }
 local ONLINE = true
 package.loaded["ui/network/manager"] = { isOnline = function() return ONLINE end }
 package.loaded["ui/trapper"] = { wrap = function(_s, f) return f() end, dismissableRunInSubprocess = function(_s, f) return true, f() end }
@@ -168,11 +186,21 @@ b.hardcover_token = "tok"; ONLINE = false
 b:saveAndVerify("cwa")
 ck(last():find("Connect to Wi-Fi", 1, true), "offline: saved, with how to test later")
 ONLINE = true
-b.annas_url = "http://a"; NET = { annas_ok = true }
+-- Anna's Archive: the key itself is tested (a one-result search logs in with it)
+b.annas_url = "http://a"; b.annas_download_key = "k"; b.annas_tld = "gd"
+NET = { annas = "ok" }
 b:saveAndVerify("annas")
-ck(last():find("key isn't tested", 1, true), "save Anna's Archive: reachable, and says the key isn't tested")
-b:runStatusChecks()
-ck(row(b:collectStatusRows(), "Anna's Archive").mandatory == "Up, key untested", "status: Anna's Archive 'Up, key untested', not 'Reachable'")
+ck(last() == "Saved -- Anna's Archive accepted your download key.", "save Anna's Archive, good key: accepted")
+ck(NET.annas_opts and NET.annas_opts.probe == true, "...via the one-result probe search (no download used)")
+ck(row(b:collectStatusRows(), "Anna's Archive").mandatory == "Key works", "status: 'Key works'")
+NET = { annas = "token" }; b:saveAndVerify("annas")
+ck(last():find("rejected this download key", 1, true) and row(b:collectStatusRows(), "Anna's Archive").mandatory == "Key refused", "bad key: 'rejected this download key' / 'Key refused'")
+NET = { annas = "mirror" }; b:saveAndVerify("annas")
+ck(last():find("mirror (.gd) isn't answering", 1, true) and row(b:collectStatusRows(), "Anna's Archive").mandatory == "Mirror down", "mirror down: says which and what to try")
+NET = { annas = "challenge" }; b:saveAndVerify("annas")
+ck(last():find("bot check", 1, true), "bot challenge: key couldn't be tested right now")
+b.annas_download_key = nil; NET = { annas_ok = true }; b:saveAndVerify("annas")
+ck(last():find("Add your download key", 1, true) and row(b:collectStatusRows(), "Anna's Archive").mandatory == "No key yet", "no key: reachable, asks for the key")
 -- only the saved service is tested
 local logins, cwas = 0, 0
 local rl, rc = doLogin, doCwaRequest
@@ -181,6 +209,44 @@ doCwaRequest = function(...) cwas = cwas + 1; return rc(...) end
 NET = { cwa_code = 200 }
 b:saveAndVerify("cwa")
 ck(logins == 0 and cwas == 1, "saving Calibre-Web tests only Calibre-Web (no Shelfmark login)")
+-- Tailscale proxy fills itself in
+local p = bb({ server_url = "http://100.90.18.11:8084", saveAllSettings = function() end })
+SOCK_OK = true
+ck(p:autoTailscaleProxy() == true and p.socks5_proxy == "127.0.0.1:1055", "Tailscale proxy listening + tailnet server: filled in")
+local q = bb({ server_url = "http://192.168.1.5:8084", saveAllSettings = function() end })
+ck(q:autoTailscaleProxy() == false and q.socks5_proxy == nil, "LAN server address: left alone")
+SOCK_OK = false
+local r = bb({ server_url = "http://100.90.18.11:8084", saveAllSettings = function() end })
+ck(r:autoTailscaleProxy() == false and r.socks5_proxy == nil, "no proxy listening: left alone")
+SOCK_OK = true
+DEVICE.isDesktop = function() return true end
+ck(bb({ server_url = "http://100.90.18.11:8084", saveAllSettings = function() end }):autoTailscaleProxy() == false, "desktop: never")
+DEVICE.isDesktop = function() return false end
+ck(bb({ server_url = "http://100.90.18.11:8084", socks5_proxy = "10.0.0.1:9", saveAllSettings = function() end }):autoTailscaleProxy() == false, "a proxy already set: never overwritten")
+ck(bb({ server_url = "http://100.90.18.11:8084", _proxy_autoset_off = true, saveAllSettings = function() end }):autoTailscaleProxy() == false, "emptied on purpose in Advanced: not refilled")
+SOCK_OK = false
+
+-- Errors from what you just did offer Status & setup
+CB = {}
+local e = bb({})
+e:showServiceError("Couldn't reach Shelfmark.")
+ck(CB[1] and CB[1].text == "Couldn't reach Shelfmark." and CB[1].ok_text == "Status & setup" and CB[1].cancel_text == "Close", "an error offers 'Status & setup' / 'Close'")
+
+-- First start with nothing set up opens Status & setup, once
+local sched = {}
+UIManager.scheduleIn = function(_s, d, f) sched[#sched + 1] = f end
+local fresh = bb({ ui = {} })
+fresh:maybeShowFirstRunSetup(); fresh:maybeShowFirstRunSetup()
+ck(#sched == 1, "first start, nothing configured: Status & setup opens once")
+bb({ ui = {}, server_url = "http://s" }):maybeShowFirstRunSetup()
+bb({ ui = { document = {} } }):maybeShowFirstRunSetup()
+ck(#sched == 1, "configured, or in a book: never")
+
+-- The Shelfmark dialog asks only for what a new user needs
+bb({ server_url = "http://s", username = "u", password = "p" }):editServerSettings()
+ck(MID and #MID.fields == 3, "Shelfmark settings: address, username, password only")
+local btns = {}; for _, x in ipairs(MID.buttons[1]) do btns[#btns + 1] = x.text end
+ck(table.concat(btns, ",") == "Cancel,Advanced,Apply", "...with an Advanced button for the proxy and relay")
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)
 LUA

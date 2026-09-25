@@ -174,6 +174,7 @@ function Bookbridge:init()
     self:registerFileDialogButtons()
     -- Always-on clipboard receiver so a phone can push text into the clipboard.
     self:startClipboardReceiver()
+    self:maybeShowFirstRunSetup()
 end
 
 -- Writes every self.* setting field currently in memory -- shared by both
@@ -226,20 +227,9 @@ function Bookbridge:editServerSettings()
     self.settings_dialog = MultiInputDialog:new{
         title = _("Shelfmark server settings"),
         fields = {
-            { text = self.server_url, hint = _("Server URL, e.g. http://shelfmark:8084") },
+            { text = self.server_url, hint = _("Server address, e.g. http://100.90.18.11:8084") },
             { text = self.username, hint = _("Username") },
             { text = self.password, text_type = "password", hint = _("Password") },
-            {
-                text = self.socks5_proxy,
-                hint = _("SOCKS5 proxy host:port (optional, e.g. 127.0.0.1:1055 for Tailscale userspace mode)"),
-            },
-            {
-                -- Used by device pairing and "Send debug log to server". Was
-                -- only ever set by a one-time prompt, so a wrong value had no
-                -- way back.
-                text = self.pairing_relay_url,
-                hint = _("Pairing relay URL (optional, e.g. http://homeserver:8086 -- pairing and debug-log upload)"),
-            },
         },
         buttons = {
             {
@@ -251,14 +241,21 @@ function Bookbridge:editServerSettings()
                     end,
                 },
                 {
+                    -- The proxy and pairing relay used to be fields 4 and 5
+                    -- here: jargon a new user had to read past to find Apply.
+                    text = _("Advanced"),
+                    callback = function()
+                        UIManager:close(self.settings_dialog)
+                        self:editAdvancedConnectionSettings()
+                    end,
+                },
+                {
                     text = _("Apply"),
                     callback = function()
                         local fields = self.settings_dialog:getFields()
                         self.server_url = fields[1]:gsub("/*$", "")
                         self.username = fields[2]
                         self.password = fields[3]
-                        self.socks5_proxy = fields[4] ~= "" and fields[4] or nil
-                        self.pairing_relay_url = fields[5] ~= "" and fields[5]:gsub("/*$", "") or nil
                         UIManager:close(self.settings_dialog)
                         self:saveAndVerify("shelfmark")
                     end,
@@ -268,6 +265,42 @@ function Bookbridge:editServerSettings()
     }
     UIManager:show(self.settings_dialog)
     self.settings_dialog:onShowKeyboard()
+end
+
+function Bookbridge:editAdvancedConnectionSettings()
+    local dialog
+    dialog = MultiInputDialog:new{
+        title = _("Advanced connection settings"),
+        fields = {
+            {
+                text = self.socks5_proxy,
+                hint = _("SOCKS5 proxy host:port -- leave empty; filled in by itself when Tailscale runs on this device"),
+            },
+            {
+                -- Used by device pairing and "Send debug log to server".
+                text = self.pairing_relay_url,
+                hint = _("Pairing relay URL (optional, e.g. http://homeserver:8086 -- pairing and debug-log upload)"),
+            },
+        },
+        buttons = {
+            {
+                { text = _("Cancel"), id = "close", callback = function() UIManager:close(dialog) end },
+                {
+                    text = _("Apply"),
+                    callback = function()
+                        local fields = dialog:getFields()
+                        self.socks5_proxy = fields[1] ~= "" and fields[1] or nil
+                        self.pairing_relay_url = fields[2] ~= "" and fields[2]:gsub("/*$", "") or nil
+                        self._proxy_autoset_off = self.socks5_proxy == nil or nil
+                        UIManager:close(dialog)
+                        self:saveAllSettings(_("Saved."))
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 function Bookbridge:editCwaSettings()
@@ -1356,12 +1389,14 @@ end
 -- no proxy involved at all -- same as how CWA-delivered files already
 -- work.
 
-local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
+local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy, opts)
     if not annas_url or annas_url == "" then
         return nil, nil, _("Anna's Archive API URL isn't set.")
     end
+    -- opts.probe: the key check -- one result, no live download counts.
+    local probe = opts and opts.probe
     local url = annas_url .. "/api/search?query=" .. socketurl.escape(query)
-        .. "&limit=20&tld=" .. socketurl.escape(tld or "")
+        .. "&limit=" .. (probe and "1&downloads=false" or "20") .. "&tld=" .. socketurl.escape(tld or "")
     local headers = {}
     if download_key and download_key ~= "" then
         headers["authorization"] = "Bearer " .. download_key
@@ -7714,7 +7749,7 @@ function Bookbridge:downloadFromCwa(title, caller_menu)
 
     local body, code, err = self:cwaRequest("/opds/search/" .. socketurl.escape(title))
     if err then
-        UIManager:show(InfoMessage:new{ text = err })
+        self:showServiceError(err)
         return
     end
     if code ~= 200 or not body then
@@ -7788,7 +7823,7 @@ function Bookbridge:saveCwaEntry(entry, caller_menu)
 
     local ok, code, err = self:cwaFileDownload(entry.href, save_path)
     if err then
-        UIManager:show(InfoMessage:new{ text = err })
+        self:showServiceError(err)
         return
     end
     if not ok or code ~= 200 then
@@ -8032,6 +8067,11 @@ function Bookbridge:addToMainMenu(menu_items)
                                 text = _("Anna's Archive settings"),
                                 keep_menu_open = true,
                                 callback = function() self:editAnnasSettings() end,
+                            },
+                            {
+                                text = _("Advanced (proxy, pairing relay)"),
+                                keep_menu_open = true,
+                                callback = function() self:editAdvancedConnectionSettings() end,
                             },
                             {
                                 text = _("Match suggestions (AI)"),
@@ -8431,7 +8471,7 @@ function Bookbridge:doSearch(params, existing_books, caller_menu)
 
     local resp, code, err = self:apiRequest("GET", "/api/metadata/search?" .. table.concat(qs, "&"))
     if err then
-        UIManager:show(InfoMessage:new{ text = err })
+        self:showServiceError(err)
         return
     end
     if code ~= 200 or not resp or not resp.books then
@@ -8881,7 +8921,7 @@ function Bookbridge:browseReleasesContinue(book, manual_query, aa_results)
             _("Searching release sources (Prowlarr, Anna's Archive, etc. -- can take a couple of minutes)..."),
             30, 150)
         if err then
-            UIManager:show(InfoMessage:new{ text = err })
+            self:showServiceError(err)
             return
         end
         if code ~= 200 or not resp or not resp.releases then
@@ -9149,7 +9189,7 @@ end
 local function confirmAndLogBookOnHardcover(self, title, author, status_id, status_label)
     local id, found_title, found_author, err = self:hardcoverFindBook(title, author)
     if not id then
-        UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
+        self:showServiceError(err or _("Search failed."))
         return
     end
     local ConfirmBox = require("ui/widget/confirmbox")
@@ -9181,7 +9221,7 @@ end
 local function confirmAndFollowAuthorOnHardcover(self, author_name)
     local candidates, err = self:hardcoverFindAuthors(author_name)
     if not candidates then
-        UIManager:show(InfoMessage:new{ text = err or _("Search failed.") })
+        self:showServiceError(err or _("Search failed."))
         return
     end
     if #candidates == 0 then
@@ -9286,7 +9326,7 @@ function Bookbridge:browseHardcoverLists()
     end
     local lists, err = self:hardcoverListLists()
     if not lists then
-        UIManager:show(InfoMessage:new{ text = err or _("Couldn't load Hardcover lists.") })
+        self:showServiceError(err or _("Couldn't load Hardcover lists."))
         return
     end
     if #lists == 0 then
@@ -9352,7 +9392,7 @@ function Bookbridge:browseHardcoverListBooks(list_id, list_name, offset, existin
             list_id, HARDCOVER_LIST_PAGE_SIZE, offset or 0)
     end
     if not new_books then
-        UIManager:show(InfoMessage:new{ text = err or _("Couldn't load this list.") })
+        self:showServiceError(err or _("Couldn't load this list."))
         return
     end
 
@@ -9428,7 +9468,7 @@ function Bookbridge:browseFollowedAuthors()
     end
     local authors, err = self:hardcoverListFollowedAuthors()
     if not authors then
-        UIManager:show(InfoMessage:new{ text = err or _("Couldn't load followed authors.") })
+        self:showServiceError(err or _("Couldn't load followed authors."))
         return
     end
     if #authors == 0 then
@@ -9478,7 +9518,7 @@ function Bookbridge:browseAuthorBibliography(author_id, author_name, offset, exi
     local new_books, total, resolved_name, err = self:hardcoverAuthorBibliography(
         author_id, HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE, offset or 0)
     if not new_books then
-        UIManager:show(InfoMessage:new{ text = err or _("Couldn't load this author's books.") })
+        self:showServiceError(err or _("Couldn't load this author's books."))
         return
     end
 
@@ -9745,7 +9785,7 @@ end
 function Bookbridge:downloadFromAnnasArchive(release)
     local dl_url, _code, err = self:annasFetchDownloadUrl(release.md5)
     if err then
-        UIManager:show(InfoMessage:new{ text = err })
+        self:showServiceError(err)
         return
     end
     if not dl_url then
@@ -9950,7 +9990,7 @@ function Bookbridge:submitRequest(book, release)
 
     local resp, code, err = self:apiRequest("POST", "/api/requests", body)
     if err then
-        UIManager:show(InfoMessage:new{ text = err })
+        self:showServiceError(err)
         return
     end
     if code == 200 or code == 201 then
@@ -11849,7 +11889,7 @@ end
 function Bookbridge:showMyRequests()
     local resp, code, err = self:apiRequest("GET", "/api/requests")
     if err then
-        UIManager:show(InfoMessage:new{ text = err })
+        self:showServiceError(err)
         return
     end
     if code ~= 200 or not resp then
@@ -12055,7 +12095,10 @@ function Bookbridge:collectStatusRows()
 
     -- Anna's Archive (optional)
     add({ text = _("Anna's Archive -- extra source (optional)"),
-        mandatory = (self.annas_url and self.annas_url ~= "") and (statusCheckedLabel(checks.annas, _("Up, key untested")) or _("Saved")) or _("Not set up"),
+        mandatory = (self.annas_url and self.annas_url ~= "") and (checks.annas and ({
+                ok = _("Key works"), token = _("Key refused"), mirror = _("Mirror down"),
+                challenge = _("Bot check -- retry"), nokey = _("No key yet"), down = _("Can't reach"),
+            })[checks.annas.state] or _("Saved")) or _("Not set up"),
         action = function() self:editAnnasSettings() end })
 
     -- Updates
@@ -12132,13 +12175,14 @@ end
 -- step with what it learned. Must run inside a Trapper:wrap. Returns the
 -- results table, or nil if cancelled.
 function Bookbridge:checkConnections(which, progress_text)
+    self:autoTailscaleProxy()
     local Trapper = require("ui/trapper")
     local want = function(k) return which == nil or which[k] end
     local cfg = {
         server_url = want("shelfmark") and self.server_url, username = self.username, password = self.password,
         cwa_url = want("cwa") and self.cwa_url, cwa_username = self.cwa_username, cwa_password = self.cwa_password,
         token = want("hardcover") and self.hardcover_token, annas_url = want("annas") and self.annas_url,
-        proxy = self.socks5_proxy,
+        annas_key = self.annas_download_key, annas_tld = self.annas_tld, proxy = self.socks5_proxy,
     }
     local completed, res = Trapper:dismissableRunInSubprocess(function()
         local out = {}
@@ -12155,7 +12199,21 @@ function Bookbridge:checkConnections(which, progress_text)
             out.hardcover = { state = data and "ok" or (tostring(err):find(HC_TOKEN_REJECTED, 1, true) and "token" or "down") }
         end
         if cfg.annas_url and cfg.annas_url ~= "" then
-            out.annas = { state = doTestService(cfg.annas_url, cfg.proxy) and "ok" or "down" }
+            if cfg.annas_key and cfg.annas_key ~= "" then
+                -- The service logs in to Anna's Archive with the key for a
+                -- search (POST /account/) -- that tests the key without
+                -- spending one of the account's downloads.
+                local results, code, err, err_code = doAnnasSearch(cfg.annas_url, cfg.annas_key, cfg.annas_tld, "the", cfg.proxy, { probe = true })
+                local state
+                if results then state = "ok"
+                elseif err_code == "MIRROR_DOWN" then state = "mirror"
+                elseif code == 401 and tostring(err):find("rejected the download key", 1, true) then state = "token"
+                elseif code == 401 then state = "challenge"
+                else state = "down" end
+                out.annas = { state = state, code = code }
+            else
+                out.annas = { state = doTestService(cfg.annas_url, cfg.proxy) and "nokey" or "down" }
+            end
         end
         return out
     end, progress_text or _("Checking connections..."))
@@ -12225,10 +12283,18 @@ function Bookbridge:saveAndVerify(key)
                 shelfmark = T(_("Saved -- signed in to Shelfmark as %1."), tostring(self.username)),
                 cwa = T(_("Saved -- signed in to Calibre-Web as %1."), tostring(self.cwa_username)),
                 hardcover = _("Saved -- Hardcover accepted the token."),
-                annas = _("Saved -- the Anna's Archive service is reachable. Your download key isn't tested here (that would use up one of your downloads); it's checked on your first download."),
+                annas = _("Saved -- Anna's Archive accepted your download key."),
             })[key]
+        elseif r.state == "nokey" then
+            text = _("Saved -- the Anna's Archive service is reachable. Add your download key to search and download.")
+        elseif r.state == "mirror" then
+            text = T(_("Saved, but the Anna's Archive mirror (.%1) isn't answering. Try another domain ending in these settings, e.g. gl or li."), tostring(self.annas_tld or "gd"))
+        elseif r.state == "challenge" then
+            text = _("Saved, but Anna's Archive asked for a bot check, so the key couldn't be tested right now. Try again in a few minutes.")
         elseif r.state == "refused" then
             text = T(_("Saved, but %1 refused this username or password."), name)
+        elseif r.state == "token" and key == "annas" then
+            text = _("Saved, but Anna's Archive rejected this download key. Copy it again from your account page on Anna's Archive.")
         elseif r.state == "token" then
             text = _("Saved, but Hardcover refused this token. Copy it again from hardcover.app > Settings > API.")
         elseif r.state == "locked" then
@@ -12240,6 +12306,67 @@ function Bookbridge:saveAndVerify(key)
         end
         UIManager:show(InfoMessage:new{ text = text, timeout = r.state == "ok" and 3 or nil })
     end)
+end
+
+-- On a Kindle/Kobo reaching the server over Tailscale's userspace mode, every
+-- request has to go through its local SOCKS5 proxy (127.0.0.1:1055, from the
+-- Tailscale plugin) -- a field new users had to fill in by hand with nothing
+-- to tell them so. Fill it in when the proxy is listening and a configured
+-- server is a Tailscale address (100.64.0.0/10 or *.ts.net). Not on desktop
+-- or Android (they route the tailnet themselves), and not after the user
+-- emptied the field on purpose (Advanced settings) this session.
+function Bookbridge:autoTailscaleProxy()
+    if self.socks5_proxy and self.socks5_proxy ~= "" then return false end
+    if self._proxy_autoset_off then return false end
+    local ok_dev, Device = pcall(require, "device")
+    if not ok_dev or (Device.isDesktop and Device:isDesktop()) or (Device.isAndroid and Device:isAndroid()) then return false end
+    local function tailnet(url)
+        local host = type(url) == "string" and url:match("^%a+://([^/:]+)") or (type(url) == "string" and url:match("^([^/:]+)"))
+        if not host then return false end
+        if host:match("%.ts%.net$") then return true end
+        local a, b = host:match("^(%d+)%.(%d+)%.%d+%.%d+$")
+        return a == "100" and tonumber(b) >= 64 and tonumber(b) <= 127
+    end
+    if not (tailnet(self.server_url) or tailnet(self.cwa_url) or tailnet(self.annas_url)) then return false end
+    local listening = false
+    pcall(function()
+        local sock = socket.tcp()
+        sock:settimeout(0.5)
+        listening = sock:connect("127.0.0.1", 1055) == 1
+        sock:close()
+    end)
+    if not listening then return false end
+    self.socks5_proxy = "127.0.0.1:1055"
+    self:saveAllSettings()
+    debugLog("[setup] Tailscale proxy found on 127.0.0.1:1055; using it")
+    return true
+end
+
+-- A failure from something the user just asked for (a search, a request, a
+-- download, a Hardcover list): same message, plus a way straight to the screen
+-- that says what's wrong and fixes it.
+function Bookbridge:showServiceError(text)
+    local ok, ConfirmBox = pcall(require, "ui/widget/confirmbox")
+    if not ok or type(ConfirmBox) ~= "table" or not ConfirmBox.new then
+        UIManager:show(InfoMessage:new{ text = text })
+        return
+    end
+    UIManager:show(ConfirmBox:new{
+        text = text,
+        ok_text = _("Status & setup"),
+        cancel_text = _("Close"),
+        ok_callback = function() self:showStatus() end,
+    })
+end
+
+-- First start with nothing configured: open Status & setup once, so a new
+-- user lands on "Start here" instead of hunting through menus.
+function Bookbridge:maybeShowFirstRunSetup()
+    if self.ui and self.ui.document then return end          -- file browser only
+    if (self.server_url and self.server_url ~= "") or (self.cwa_url and self.cwa_url ~= "") then return end
+    if G_reader_settings:isTrue("bookbridge_first_run_shown") then return end
+    G_reader_settings:saveSetting("bookbridge_first_run_shown", true)
+    UIManager:scheduleIn(1, function() self:showStatus({ no_auto_check = true }) end)
 end
 
 return Bookbridge
