@@ -7828,6 +7828,11 @@ function Bookbridge:addToMainMenu(menu_items)
         text = _("Bookbridge"),
         sub_item_table = {
             {
+                text = _("Status & setup"),
+                callback = function() self:showStatus() end,
+                separator = true,
+            },
+            {
                 text = _("Search & request a book"),
                 keep_menu_open = true,
                 callback = function() self:startSearch() end,
@@ -8038,7 +8043,7 @@ function Bookbridge:addToMainMenu(menu_items)
                                 keep_menu_open = true,
                                 callback = function()
                                     local Trapper = require("ui/trapper")
-                                    Trapper:wrap(function() self:showConnectionStatus() end)
+                                    Trapper:wrap(function() self:showStatus() end)
                                 end,
                             },
                         },
@@ -11937,6 +11942,224 @@ function Bookbridge:showMyRequests()
         end,
     }
     UIManager:show(requests_menu)
+end
+
+-- ===== Status & setup =====
+-- One screen for the whole plugin: every part Bookbridge connects to, what
+-- state it is in, and what tapping it does to fix that. Opening it is instant
+-- and offline -- it only reads settings and local state. The network checks
+-- (logins, token) run only from "Check connections now", once each, so this
+-- screen never re-sends a refused password in the background.
+local STATUS_CHECK_MAX_AGE = 10 * 60
+
+local function statusCheckedLabel(check, ok_text)
+    if not check then return nil end
+    if check.state == "ok" then return ok_text end
+    if check.state == "refused" then return _("Wrong login") end
+    if check.state == "locked" then return _("Locked -- try later") end
+    if check.state == "token" then return _("Token refused") end
+    return _("Can't reach")
+end
+
+-- The right-hand status must stay short: a long one (a download path) left
+-- the row's label no width at all, and KOReader's text layout crashes on a
+-- zero-width line (found on the desktop before release). Keep the end of a
+-- path, where the useful part is.
+local STATUS_MAX = 22
+local function statusShort(t, keep_end)
+    t = tostring(t or "")
+    if #t <= STATUS_MAX then return t end
+    if keep_end then return "..." .. t:sub(-(STATUS_MAX - 3)) end
+    return t:sub(1, STATUS_MAX - 3) .. "..."
+end
+
+function Bookbridge:collectStatusRows()
+    local rows = {}
+    local checks = self._status_checks
+    if checks and os.time() - (checks.at or 0) > STATUS_CHECK_MAX_AGE then checks = nil end
+    checks = checks or {}
+    local function add(t) rows[#rows + 1] = t end
+    local nothing_set = (not self.server_url or self.server_url == "") and (not self.cwa_url or self.cwa_url == "")
+    if nothing_set then
+        add({ text = _("Start here: import settings from your server"), mandatory = _("Tap"),
+            action = function() self:importFromServer() end })
+    end
+
+    -- Shelfmark
+    local sm, sm_act = nil, function() self:editServerSettings() end
+    if not self.server_url or self.server_url == "" then sm = _("Not set up")
+    elseif not self.username or self.username == "" then sm = _("Needs login")
+    else
+        sm = statusCheckedLabel(checks.shelfmark, _("Signed in"))
+            or (self:shelfmarkLoginKnownBad() and _("Wrong login")) or _("Set up")
+    end
+    add({ text = _("Shelfmark -- search & requests"), mandatory = sm, action = sm_act })
+
+    -- Calibre-Web
+    local cw
+    if not self.cwa_url or self.cwa_url == "" then cw = _("Not set up")
+    elseif not self.cwa_username or self.cwa_username == "" then cw = _("Needs login")
+    else
+        local n = 0
+        for _unused in pairs(loadSyncRegistry() or {}) do n = n + 1 end
+        cw = statusCheckedLabel(checks.cwa, T(_("Signed in, %1 books"), n)) or T(_("%1 books synced"), n)
+    end
+    add({ text = _("Calibre-Web -- your library"), mandatory = cw, action = function() self:editCwaSettings() end })
+
+    -- Hardcover
+    local hc, hc_act = nil, function() self:editHardcoverSettings() end
+    if not self.hardcover_token or self.hardcover_token == "" then hc = _("Not set up")
+    elseif hc_rejected_token == self.hardcover_token then hc = _("Token refused")
+    elseif not self.hardcover_progress_sync then hc = _("Sync off")
+    else
+        local review = 0
+        for _unused, e in pairs(loadHardcoverMap()) do if e.decision == "review" then review = review + 1 end end
+        if review > 0 then
+            hc = T(_("%1 to review"), review)
+            hc_act = function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:reviewHardcoverMatches() end)
+            end
+        else
+            hc = statusCheckedLabel(checks.hardcover, _("Syncing")) or _("Syncing")
+        end
+    end
+    add({ text = _("Hardcover -- reading progress"), mandatory = hc, action = hc_act })
+
+    -- Readest (a separate plugin; Bookbridge fills its gaps)
+    local rs = self.ui and self.ui.readest
+    local rd, rd_act
+    if type(rs) ~= "table" or type(rs.settings) ~= "table" then
+        rd = _("Not installed")
+        rd_act = function()
+            UIManager:show(InfoMessage:new{ text = _("Readest keeps your place in sync with the Readest app on your phone or tablet.\n\nInstall the Readest KOReader plugin (readest.koplugin), restart KOReader, then sign in under Tools > Readest.") })
+        end
+    elseif not rs.settings.access_token then
+        rd = _("Not signed in")
+        rd_act = function()
+            UIManager:show(InfoMessage:new{ text = _("Sign in under Tools > Readest with the same account as the Readest app on your phone or tablet.") })
+        end
+    elseif not rs.settings.auto_sync then
+        rd = _("Auto sync off")
+        rd_act = function()
+            pcall(function() rs:onReadestSyncToggleAutoSync(true) end)
+            self:showStatus()
+        end
+    else
+        rd = _("Syncing")
+        rd_act = function()
+            UIManager:show(InfoMessage:new{ text = _("Books you read here go to your Readest library by themselves, and your place is saved when the Kindle sleeps.\n\nOn your phone or tablet, open books from the Readest library -- not from the Calibre-Web catalog -- so both have the same file.") })
+        end
+    end
+    add({ text = _("Readest -- sync with phone & tablet"), mandatory = rd, action = rd_act })
+
+    -- Anna's Archive (optional)
+    add({ text = _("Anna's Archive -- extra source (optional)"),
+        mandatory = (self.annas_url and self.annas_url ~= "") and (statusCheckedLabel(checks.annas, _("Reachable")) or _("Set up")) or _("Not set up"),
+        action = function() self:editAnnasSettings() end })
+
+    -- Updates
+    local build
+    local marker = io.open(tostring(self.path or "") .. "/installed-build", "r")
+    if marker then build = (marker:read("*l") or ""):gsub("%s", ""); marker:close() end
+    add({ text = _("Updates"),
+        mandatory = (not self.update_url or self.update_url == "") and _("No update source")
+            or ((self.auto_update and _("Automatic") or _("Manual")) .. ((build and build ~= "") and (" -- " .. build) or "")),
+        action = function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:checkForUpdate() end)
+        end })
+
+    -- Phone clipboard
+    add({ text = _("Phone clipboard"),
+        mandatory = self.clipboard_server and T(_("Listening on %1"), CLIPBOARD_RECEIVER_PORT) or _("Not running"),
+        action = function()
+            UIManager:show(InfoMessage:new{ text = T(_("Share text from your phone to http://<this device's address>:%1/clip?text=... and it lands in the field you're typing in (or the clipboard)."), CLIPBOARD_RECEIVER_PORT) })
+        end })
+
+    -- Download folder
+    local dir = self.download_dir or self:defaultDownloadDir()
+    add({ text = _("Download folder"),
+        mandatory = (lfs.attributes(dir, "mode") == "directory") and statusShort(dir, true) or _("Missing"),
+        action = function() self:chooseDownloadDir() end })
+
+    add({ text = _("Check connections now"), mandatory = checks.at and os.date("%H:%M", checks.at) or "",
+        action = function() self:runStatusChecks() end })
+    for _unused, r in ipairs(rows) do r.mandatory = statusShort(r.mandatory) end
+    return rows
+end
+
+function Bookbridge:showStatus()
+    if self._status_menu then UIManager:close(self._status_menu); self._status_menu = nil end
+    local menu
+    menu = Menu:new{
+        title = _("Bookbridge status"),
+        item_table = self:collectStatusRows(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuSelect = function(_m, item)
+            if item.action then
+                UIManager:close(menu); self._status_menu = nil
+                item.action()
+            end
+        end,
+        close_callback = function() self._status_menu = nil end,
+    }
+    self._status_menu = menu
+    UIManager:show(menu)
+end
+
+-- The only network part of the status screen, and only when asked: one login
+-- per service, in a subprocess with a dismissable "Checking..." note.
+function Bookbridge:runStatusChecks()
+    local Trapper = require("ui/trapper")
+    Trapper:wrap(function()
+        local cfg = {
+            server_url = self.server_url, username = self.username, password = self.password,
+            cwa_url = self.cwa_url, cwa_username = self.cwa_username, cwa_password = self.cwa_password,
+            token = self.hardcover_token, annas_url = self.annas_url, proxy = self.socks5_proxy,
+        }
+        local completed, res = Trapper:dismissableRunInSubprocess(function()
+            local out = {}
+            if cfg.server_url and cfg.server_url ~= "" and cfg.username and cfg.username ~= "" then
+                local ok, _cookie, _err, code = doLogin(cfg.server_url, cfg.username, cfg.password, cfg.proxy)
+                out.shelfmark = { state = ok and "ok" or (code == 401 and "refused" or (code == 429 and "locked" or "down")), code = code }
+            end
+            if cfg.cwa_url and cfg.cwa_url ~= "" and cfg.cwa_username and cfg.cwa_username ~= "" then
+                local _body, code = doCwaRequest(cfg.cwa_url, cfg.cwa_username, cfg.cwa_password, "/opds", cfg.proxy)
+                out.cwa = { state = code == 200 and "ok" or ((code == 401 or code == 403) and "refused" or (code == 429 and "locked" or "down")), code = code }
+            end
+            if cfg.token and cfg.token ~= "" then
+                local data, err = doHardcoverGraphQL(cfg.token, "query { me { id } }")
+                out.hardcover = { state = data and "ok" or (tostring(err):find(HC_TOKEN_REJECTED, 1, true) and "token" or "down") }
+            end
+            if cfg.annas_url and cfg.annas_url ~= "" then
+                out.annas = { state = doTestService(cfg.annas_url, cfg.proxy) and "ok" or "down" }
+            end
+            return out
+        end, _("Checking connections..."))
+        if not completed or type(res) ~= "table" then return end
+        res.at = os.time()
+        self._status_checks = res
+        -- Keep the background-login guard in step with what the check learned.
+        if res.shelfmark then
+            if res.shelfmark.state == "refused" or res.shelfmark.state == "locked" then
+                self._shelfmark_login_rejected = shelfmarkCredentialKey(self.server_url, self.username, self.password)
+            elseif res.shelfmark.state == "ok" then
+                self._shelfmark_login_rejected = nil
+            end
+        end
+        if res.hardcover then
+            if res.hardcover.state == "token" then hc_rejected_token = self.hardcover_token
+            elseif res.hardcover.state == "ok" and hc_rejected_token == self.hardcover_token then hc_rejected_token = nil end
+        end
+        debugLog(string.format("[status] checked: shelfmark=%s cwa=%s hardcover=%s annas=%s",
+            res.shelfmark and res.shelfmark.state or "-", res.cwa and res.cwa.state or "-",
+            res.hardcover and res.hardcover.state or "-", res.annas and res.annas.state or "-"))
+        self:showStatus()
+    end)
 end
 
 return Bookbridge

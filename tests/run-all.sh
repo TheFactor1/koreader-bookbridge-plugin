@@ -91,6 +91,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, $(ec
 elif [ $rc -eq 3 ]; then echo "SKIPPED  readest-sleep-push (no local KOReader)"; skipped="${skipped:+$skipped, }readest-sleep-push"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Status & setup screen (every part's state and its fix)"
+out=$(bash tests/status-screen/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  status-screen (no local KOReader)"; skipped="${skipped:+$skipped, }status-screen"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Calibre-Web auth stop (a wrong password ends a sync after one request)"
 out=$(bash tests/cwa-auth-stop/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, real doSyncLibrary + doCwaRequest vs a refusing server"
