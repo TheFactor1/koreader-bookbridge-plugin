@@ -11,7 +11,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
 { grep -E '^local HC_TOKEN_REJECTED = |^local hc_rejected_token = |^local CLIPBOARD_RECEIVER_PORT = |^local STATUS_CHECK_MAX_AGE = |^local STATUS_MAX = ' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings showHostingGuide; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -242,6 +242,14 @@ bb({ ui = {}, server_url = "http://s" }):maybeShowFirstRunSetup()
 bb({ ui = { document = {} } }):maybeShowFirstRunSetup()
 ck(#sched == 1, "configured, or in a book: never")
 
+-- What you need to host: reachable from the screen, names every piece
+local TV
+package.loaded["ui/widget/textviewer"] = { new = function(_s, x) TV = x; return x end }
+local hg = row(bb({ server_url = "http://s" }):collectStatusRows(), "What you need to host")
+ck(hg ~= nil, "Status & setup has a 'What you need to host' line")
+hg.action()
+ck(TV and TV.text:find("REQUIRED", 1, true) and TV.text:find("Shelfmark", 1, true) and TV.text:find("NOT PUBLIC YET", 1, true)
+   and TV.text:find("annas-archive-api", 1, true) and TV.text:find("Readest", 1, true), "...which names every piece, what's required, and what isn't public")
 -- The Shelfmark dialog asks only for what a new user needs
 bb({ server_url = "http://s", username = "u", password = "p" }):editServerSettings()
 ck(MID and #MID.fields == 3, "Shelfmark settings: address, username, password only")

@@ -16,6 +16,43 @@ A KOReader plugin that ties the device to a self-hosted reading stack:
 Calibre-Web-Automated (CWA) for the library, and [Hardcover](https://hardcover.app)
 for tracking what you read. Runs on Kindle, Android and desktop KOReader.
 
+## What you need to host
+
+Bookbridge is only the part on the reader. Everything it does talks to a
+server you run yourself, or to an account you already have. **You need a
+computer that runs Docker and stays on** -- the plugin can't replace that.
+Only Shelfmark is required; each other piece switches on one feature.
+
+| Piece | Needed? | What Bookbridge gains | Where it comes from | What you enter in Bookbridge |
+|---|---|---|---|---|
+| [Shelfmark](https://github.com/calibrain/shelfmark) | **Required** | Search & request books from the reader | Its own Docker image; see its README. Default port 8084 | Settings > Connections > Shelfmark: address, username, password |
+| A Calibre-Web server -- [Calibre-Web-Automated](https://github.com/crocodilestick/Calibre-Web-Automated) or [Calibre-Web-NextGen](https://github.com/new-usemame/Calibre-Web-NextGen) | Optional | Library sync, downloads of delivered books | Its own Docker image. Default port 8083. Give it the **same ingest folder** Shelfmark downloads into, so requested books land in the library | Settings > Connections > Calibre-Web: address, username, password |
+| [annas-archive-api](https://github.com/bitesized/annas-archive-api) | Optional | Anna's Archive as a search and download source | Its own Docker image (by bitesized). Default port 3000 | Settings > Connections > Anna's Archive: address and your Anna's Archive account key |
+| An update source | Optional | Automatic updates of the plugin | Any plain web server that serves this repo's `bookbridge.koplugin/` folder (with its `manifest.json`) -- e.g. nginx pointed at a checkout | Settings > Update source |
+| [Tailscale](https://tailscale.com) | Recommended | Reaching the server away from home, privately | Tailscale on the server; on a Kindle/Kobo, the Tailscale VPN KOReader plugin by Jadehawk | Nothing -- its proxy (127.0.0.1:1055) is filled in automatically |
+
+Accounts, not servers:
+
+- **[Hardcover](https://hardcover.app)** -- reading progress, lists, followed
+  authors. Paste an API token from hardcover.app/account/api into Hardcover
+  settings.
+- **[Readest](https://readest.com)** -- keeps your place in sync with the
+  Readest app on a phone or tablet. Install the Readest KOReader plugin
+  (from [readest/readest](https://github.com/readest/readest) releases), sign
+  in under Tools > Readest and turn its auto sync on. See *Readest* below.
+
+**Not public yet.** Three helper services this plugin can use live in the
+author's private configuration and aren't published: the one-file server
+stack with a browser setup wizard (the target of *Import from server*), the
+pairing relay (behind *Set up another device* and *Send debug log to
+server*), and the AI relay (behind *Match suggestions*). Without them those
+menu entries can't work; everything else can. Enter the addresses by hand
+instead of importing them.
+
+Once it's set up, **Bookbridge > Status & setup** shows each piece, whether it
+works (it really logs in -- and tests the Anna's Archive key without spending
+a download), and what to tap to fix it.
+
 ## What it does
 
 Adds a **Bookbridge** entry to KOReader's main menu.
@@ -42,9 +79,19 @@ Adds a **Bookbridge** entry to KOReader's main menu.
 - **Hardcover settings** — API token (from hardcover.app/account/api) and
   the edition language to prefer (default English).
 
+### Status & setup
+- The first item in the menu, and what a new device opens on its own the
+  first time: one line per piece above with its state (Signed in, Wrong
+  login, Can't reach, Key works, Syncing...) and the fix on tap. Saving any
+  connection's settings tests that login straight away.
+
 ### Settings
 - **Connections** — Shelfmark server, CWA, Anna's Archive, AI match
-  suggestions, and a connection-status screen that says what is reachable.
+  suggestions, and **Advanced** (the SOCKS5 proxy and pairing relay, which
+  most people never need to touch).
+- **Phone clipboard** — the reader listens on port 8090; sending
+  `GET /clip?text=...` from a phone puts the text into the field you're
+  typing in, or the clipboard.
 - **Set up another device** — shows a QR code the other device scans to
   copy this one's settings (through the small pairing relay in
   `homeserver-configs/shelfmark-pairing-relay`).
@@ -82,13 +129,31 @@ the Bookshelf home screen, which parks the reader rather than closing it.
 3. The position goes to Hardcover as *page X of Y* for the matched edition,
    and the book is marked *Currently Reading* if it wasn't. A position
    Hardcover already has is not sent again.
-4. A brief notice after the close says what happened — e.g.
-   `Hardcover: synced as "Project Hail Mary" by Andy Weir -- page 19 of 482 (4%)`.
-   On Android it is the system toast.
+4. It happens silently: on an e-ink screen every notice is a flash. Long-press
+   a book > **Hardcover sync status** to see where it stands. You're only
+   told when something needs you -- a failure, or a match waiting for review.
 
 Offline? The position is queued and pushed when the network comes back or
 the device next wakes. Nothing runs on a timer. **Forget Hardcover book
 choices** clears every match so books are decided again.
+
+## Readest (phone & tablet sync)
+
+Bookbridge works alongside the separate Readest KOReader plugin, which does the
+syncing itself; Bookbridge fills three gaps it leaves:
+
+- **A book you're reading goes into your Readest library.** After a few pages
+  in one sitting the reader's own file is uploaded (quietly), so the phone or
+  tablet opens the same bytes and progress lines up. Books already there are
+  left alone.
+- **Your place is saved when the device sleeps.** Readest itself only saves
+  a few seconds after a page turn and on close.
+- **Waking the device picks up where the phone left off**, once Wi-Fi is back.
+
+Readest matches books by the file's exact bytes, so on the phone or tablet
+open books from the Readest library, not from the Calibre-Web catalog. It only
+ever moves your place forward. If the Readest plugin isn't installed or
+signed in, none of this runs.
 
 ## Scope / limitations
 
@@ -138,14 +203,17 @@ This plugin stands on other people's work:
   features use.
 - [Open Library](https://openlibrary.org) (Internet Archive) — its open
   search API is the second opinion that resolves ambiguous titles to ISBNs.
-- The Bluetooth keyboard feature follows what the Kindle community worked
-  out: the udev rule + helper and the `ace_bt_cli` pairing approach from the
-  MobileRead thread [Connecting to Bluetooth classic keyboards](https://www.mobileread.com/forums/showthread.php?t=369712)
-  and finlater's [kindlebtcontroller.koplugin](https://github.com/finlater/kindlebtcontroller.koplugin);
-  the stack analysis from sighery's [Reverse engineering Bluetooth on Amazon Kindle eReaders](https://sighery.com/posts/reverse-engineering-bluetooth-on-kindle-ereaders/);
-  the userspace-stack alternative is zampierilucas's [kindle-hid-passthrough](https://github.com/zampierilucas/kindle-hid-passthrough).
-  KOReader's `externalkeyboard` support on Kindle landed in
-  [koreader#15248](https://github.com/koreader/koreader/pull/15248).
+- [Calibre-Web-NextGen](https://github.com/new-usemame/Calibre-Web-NextGen)
+  by new-usemame — the Calibre-Web fork the author's library runs on; its
+  OPDS and KOReader-sync endpoints are what Bookbridge is tested against.
+- [annas-archive-api](https://github.com/bitesized/annas-archive-api) by
+  bitesized — the search and download service behind the Anna's Archive
+  features.
+- [Readest](https://github.com/readest/readest) by chrox and contributors —
+  its KOReader plugin does the phone/tablet sync; Bookbridge calls its own
+  upload and sync code rather than re-implementing it.
+- The Tailscale VPN KOReader plugin by Jadehawk — its local SOCKS5 proxy is
+  how a Kindle reaches the server over Tailscale.
 
 ## Authorship
 

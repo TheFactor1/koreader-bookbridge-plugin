@@ -12126,6 +12126,8 @@ function Bookbridge:collectStatusRows()
         mandatory = (lfs.attributes(dir, "mode") == "directory") and statusShort(dir, true) or _("Missing"),
         action = function() self:chooseDownloadDir() end })
 
+    add({ text = _("What you need to host"), mandatory = _("Read"),
+        action = function() self:showHostingGuide() end })
     add({ text = _("Check connections now"), mandatory = checks.at and os.date("%H:%M", checks.at) or "",
         action = function() self:runStatusChecks() end })
     for _unused, r in ipairs(rows) do r.mandatory = statusShort(r.mandatory) end
@@ -12367,6 +12369,37 @@ function Bookbridge:maybeShowFirstRunSetup()
     if G_reader_settings:isTrue("bookbridge_first_run_shown") then return end
     G_reader_settings:saveSetting("bookbridge_first_run_shown", true)
     UIManager:scheduleIn(1, function() self:showStatus({ no_auto_check = true }) end)
+end
+
+-- The same "what runs where" the README opens with, on the device, so a new
+-- user isn't left guessing what the servers in these settings are.
+function Bookbridge:showHostingGuide()
+    local TextViewer = require("ui/widget/textviewer")
+    UIManager:show(TextViewer:new{
+        title = _("What you need to host"),
+        justified = false,
+        text = _([[Bookbridge is only the reader side. It talks to servers you run yourself on a computer that runs Docker and stays on, and to accounts you already have.
+
+REQUIRED
+Shelfmark (github.com/calibrain/shelfmark), port 8084 -- search and request books. Enter its address, username and password under Settings > Connections > Shelfmark.
+
+OPTIONAL SERVERS
+Calibre-Web -- Calibre-Web-Automated or Calibre-Web-NextGen, port 8083 -- your library: sync and downloads. Give it the same ingest folder Shelfmark downloads into.
+annas-archive-api (github.com/bitesized/annas-archive-api) -- Anna's Archive search and downloads, with your Anna's Archive account key.
+An update source -- any web server serving the plugin's bookbridge.koplugin folder -- automatic updates.
+
+ACCOUNTS
+Hardcover -- an API token from hardcover.app/account/api: reading progress.
+Readest -- the Readest KOReader plugin, signed in with auto sync on: your place syncs with the Readest app on a phone or tablet.
+
+REACHING IT AWAY FROM HOME
+Tailscale on the server, and the Tailscale VPN KOReader plugin on a Kindle or Kobo. Bookbridge fills in its proxy by itself.
+
+NOT PUBLIC YET
+The one-file server stack with a setup wizard ("Import from server"), the pairing relay ("Set up another device", sending the debug log) and the AI relay ("Match suggestions") aren't published. Enter addresses by hand instead.
+
+Full guide: github.com/TheFactor1/koreader-bookbridge-plugin]]),
+    })
 end
 
 return Bookbridge
