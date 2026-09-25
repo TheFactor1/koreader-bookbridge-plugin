@@ -4,6 +4,13 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-25 — build 797486d
+
+- **Fix**: after reading further on your phone or iPad, waking the Kindle now
+  moves it to that page once Wi-Fi reconnects. Before, the Readest plugin
+  asked for the new position a moment too early, while Wi-Fi was still coming
+  back, and never asked again -- the Kindle stayed where you left it.
+
 ## 2026-09-25 — build daeef7b
 
 - **New**: putting the Kindle to sleep now saves your reading position to
