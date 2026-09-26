@@ -2060,13 +2060,16 @@ end
 -- written -- deliberately not automatic (e.g. no "detect when a book is
 -- finished" heuristic), since that class of guess is exactly where a
 -- reading-tracker silently logs the wrong thing.
+-- Hardcover helpers used from a single place each live on this table rather
+-- than as top-level locals: the main chunk is capped at 200 locals by LuaJIT.
+local HC = {}
 local HARDCOVER_API_URL = "https://api.hardcover.app/v1/graphql"
 
 -- status_id values per Hardcover's own docs: 1 Want to Read, 2 Currently
 -- Reading, 3 Read, 4 Paused, 5 Did Not Finish. Only the two that matter for
 -- "track your reading habits" are exposed in the menu for now.
-local HARDCOVER_STATUS_CURRENTLY_READING = 2
-local HARDCOVER_STATUS_READ = 3
+HC.HARDCOVER_STATUS_CURRENTLY_READING = 2
+HC.HARDCOVER_STATUS_READ = 3
 
 local function doHardcoverGraphQL(token, query, variables)
     if not token or token == "" then
@@ -2529,12 +2532,12 @@ end
 -- top hit is often a study-guide/"summary of" account instead -- letting the
 -- reader pick (with a book count to tell a 102-book author from a 1-book
 -- imitator) is far more forgiving than blindly following hit #1.
-local HARDCOVER_AUTHOR_MATCH_LIMIT = 12
+HC.HARDCOVER_AUTHOR_MATCH_LIMIT = 12
 
 -- Returns an ordered list of { id, name, books_count } candidates (relevance
 -- order preserved), an empty list when nothing matched, or nil + an error.
-local function doHardcoverFindAuthors(token, name, limit)
-    limit = limit or HARDCOVER_AUTHOR_MATCH_LIMIT
+function HC.doHardcoverFindAuthors(token, name, limit)
+    limit = limit or HC.HARDCOVER_AUTHOR_MATCH_LIMIT
     local search_data, err = doHardcoverGraphQL(token, [[
         query Search($q: String!, $n: Int!) {
             search(query: $q, query_type: "Author", per_page: $n) { ids }
@@ -2786,7 +2789,7 @@ local function doHardcoverGetBookSlug(token, book_id)
     return b and b.slug, nil
 end
 
-local function doHardcoverFollowAuthor(token, author_id)
+function HC.doHardcoverFollowAuthor(token, author_id)
     local data, err = doHardcoverGraphQL(token, [[
         mutation FollowAuthor($id: Int!) {
             insert_follow(followable_id: $id, followable_type: "Author") { id }
@@ -2805,7 +2808,7 @@ end
 -- nothing to keep in sync. `me`/`authors` are array-returning root fields on
 -- this schema (confirmed live: a plain `{me{id}}` query returned
 -- `{"me":[{"id":...}]}`), not single objects -- indexing [1] is required.
-local function doHardcoverListFollowedAuthors(token)
+function HC.doHardcoverListFollowedAuthors(token)
     local data, err = doHardcoverGraphQL(token, [[
         query FollowedAuthors {
             me {
@@ -2852,7 +2855,7 @@ end
 -- book already shaped the way describeBook/describeMetrics/browseReleases
 -- expect from any other source (title/authors/publish_year/display_fields/
 -- provider/provider_id) -- see the note above doSearch's book_data shape.
-local function doHardcoverAuthorBibliography(token, author_id, limit, offset)
+function HC.doHardcoverAuthorBibliography(token, author_id, limit, offset)
     local data, err = doHardcoverGraphQL(token, [[
         query AuthorBooks($authorId: Int!, $limit: Int!, $offset: Int!) {
             authors(where: {id: {_eq: $authorId}}, limit: 1) {
@@ -2969,7 +2972,7 @@ end
 -- table when the account owns and follows nothing, or nil + error.
 -- The four Hardcover status shelves, in Hardcover's own status_id order.
 -- 4 is unused upstream; 5 is "Did Not Finish".
-local HARDCOVER_SHELVES = {
+HC.HARDCOVER_SHELVES = {
     { status_id = 1, name = "Want to Read" },
     { status_id = 2, name = "Currently Reading" },
     { status_id = 3, name = "Read" },
@@ -2979,7 +2982,7 @@ local HARDCOVER_SHELVES = {
 -- Shelves first (they are what people actually mean by "my lists"), then own
 -- lists, then followed. Entries carry kind="status" or kind="list" so the
 -- renderer can dispatch without a second lookup.
-local function doHardcoverListLists(token)
+function HC.doHardcoverListLists(token)
     local data, err = doHardcoverGraphQL(token, [[
         query MyLists {
             me {
@@ -2999,7 +3002,7 @@ local function doHardcoverListLists(token)
     if not me then return {} end
     local out = {}
     local counts = { [1] = me.want_to_read, [2] = me.currently_reading, [3] = me.read, [5] = me.did_not_finish }
-    for _idx, shelf in ipairs(HARDCOVER_SHELVES) do
+    for _idx, shelf in ipairs(HC.HARDCOVER_SHELVES) do
         local agg = counts[shelf.status_id]
         local n = agg and agg.aggregate and agg.aggregate.count
         out[#out + 1] = {
@@ -3028,9 +3031,9 @@ local function doHardcoverListLists(token)
 end
 
 -- One page of a list's books, in the list's own order. Same record shape as
--- doHardcoverAuthorBibliography so the same renderer and release lookup work
+-- HC.doHardcoverAuthorBibliography so the same renderer and release lookup work
 -- unchanged. Returns books, total, list_name, or nil x3 + error.
-local function doHardcoverListBooks(token, list_id, limit, offset)
+function HC.doHardcoverListBooks(token, list_id, limit, offset)
     local data, err = doHardcoverGraphQL(token, [[
         query ListBooks($id: Int!, $limit: Int!, $offset: Int!) {
             lists_by_pk(id: $id) {
@@ -3119,7 +3122,7 @@ end
 -- winning edition differs from the one passed in; an id that's already
 -- the most popular in its own group is simply absent from the result, for
 -- the caller to leave untouched.
-local function doHardcoverBestEditions(token, provider_ids)
+function HC.doHardcoverBestEditions(token, provider_ids)
     if #provider_ids == 0 then return {} end
     local canon_data = doHardcoverGraphQL(token, [[
         query CanonIds($ids: [Int!]) {
@@ -3260,8 +3263,8 @@ function Bookbridge:registerFileDialogButtons()
         end
 
         local row = {
-            { text = _("Currently Reading"), callback = logCallback(HARDCOVER_STATUS_CURRENTLY_READING, _("Currently Reading")) },
-            { text = _("Read"), callback = logCallback(HARDCOVER_STATUS_READ, _("Read")) },
+            { text = _("Currently Reading"), callback = logCallback(HC.HARDCOVER_STATUS_CURRENTLY_READING, _("Currently Reading")) },
+            { text = _("Read"), callback = logCallback(HC.HARDCOVER_STATUS_READ, _("Read")) },
         }
 
         -- Right after the other Hardcover-native actions above, ahead of
@@ -6533,7 +6536,7 @@ function Bookbridge:hardcoverFindAuthors(name)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, list, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverFindAuthors(token, name)
+        return HC.doHardcoverFindAuthors(token, name)
     end, _("Searching Hardcover..."))
     if not completed then return nil, _("Cancelled.") end
     return list, err
@@ -6543,7 +6546,7 @@ function Bookbridge:hardcoverFollowAuthor(author_id)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverFollowAuthor(token, author_id)
+        return HC.doHardcoverFollowAuthor(token, author_id)
     end, _("Following on Hardcover..."))
     if not completed then return false, _("Cancelled.") end
     return ok, err
@@ -6553,7 +6556,7 @@ function Bookbridge:hardcoverListFollowedAuthors()
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, authors, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverListFollowedAuthors(token)
+        return HC.doHardcoverListFollowedAuthors(token)
     end, _("Loading followed authors..."))
     if not completed then return nil, _("Cancelled.") end
     return authors, err
@@ -6563,15 +6566,15 @@ function Bookbridge:hardcoverAuthorBibliography(author_id, limit, offset)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, books, total, author_name, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverAuthorBibliography(token, author_id, limit, offset)
+        return HC.doHardcoverAuthorBibliography(token, author_id, limit, offset)
     end, _("Loading author's books..."))
     if not completed then return nil, nil, nil, _("Cancelled.") end
     return books, total, author_name, err
 end
 
 -- Shared: turn a Hardcover book node into the record the renderer expects.
--- Identical to the inline block in doHardcoverListBooks / the bibliography.
-local function hardcoverBookRecord(b)
+-- Identical to the inline block in HC.doHardcoverListBooks / the bibliography.
+function HC.hardcoverBookRecord(b)
     local authors = {}
     for _idx, bc in ipairs(b.contributions or {}) do
         if bc.author and bc.author.name then table.insert(authors, bc.author.name) end
@@ -6604,7 +6607,7 @@ end
 
 -- One page of the device account's own status shelf, most recently updated
 -- first. Returns books, total, shelf_name, or nil x3 + error.
-local function doHardcoverShelfBooks(token, status_id, limit, offset)
+function HC.doHardcoverShelfBooks(token, status_id, limit, offset)
     local data, err = doHardcoverGraphQL(token, [[
         query ShelfBooks($status: Int!, $limit: Int!, $offset: Int!) {
             me {
@@ -6633,13 +6636,13 @@ local function doHardcoverShelfBooks(token, status_id, limit, offset)
         local b = ub and ub.book
         if b and b.id and not seen_ids[b.id] then
             seen_ids[b.id] = true
-            books[#books + 1] = hardcoverBookRecord(b)
+            books[#books + 1] = HC.hardcoverBookRecord(b)
         end
     end
     local total = me.user_books_aggregate and me.user_books_aggregate.aggregate
         and me.user_books_aggregate.aggregate.count or #books
     local shelf_name = nil
-    for _idx, s in ipairs(HARDCOVER_SHELVES) do
+    for _idx, s in ipairs(HC.HARDCOVER_SHELVES) do
         if s.status_id == status_id then shelf_name = _(s.name) end
     end
     return books, total, shelf_name
@@ -6649,7 +6652,7 @@ function Bookbridge:hardcoverListLists()
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, lists, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverListLists(token)
+        return HC.doHardcoverListLists(token)
     end, _("Loading your Hardcover lists..."))
     if not completed then return nil, _("Cancelled.") end
     return lists, err
@@ -6659,7 +6662,7 @@ function Bookbridge:hardcoverShelfBooks(status_id, limit, offset)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, books, total, shelf_name, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverShelfBooks(token, status_id, limit, offset)
+        return HC.doHardcoverShelfBooks(token, status_id, limit, offset)
     end, _("Loading shelf..."))
     if not completed then return nil, nil, nil, _("Cancelled.") end
     return books, total, shelf_name, err
@@ -6669,7 +6672,7 @@ function Bookbridge:hardcoverListBooks(list_id, limit, offset)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, books, total, list_name, err = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverListBooks(token, list_id, limit, offset)
+        return HC.doHardcoverListBooks(token, list_id, limit, offset)
     end, _("Loading list..."))
     if not completed then return nil, nil, nil, _("Cancelled.") end
     return books, total, list_name, err
@@ -6679,7 +6682,7 @@ function Bookbridge:hardcoverBestEditions(provider_ids)
     local Trapper = require("ui/trapper")
     local token = self.hardcover_token
     local completed, result = Trapper:dismissableRunInSubprocess(function()
-        return doHardcoverBestEditions(token, provider_ids)
+        return HC.doHardcoverBestEditions(token, provider_ids)
     end, _("Checking for a more popular edition..."))
     if not completed then return {} end
     return result or {}
@@ -8655,18 +8658,6 @@ end
 --  * Values are interpolated into a PTF (bold-markup) string, so a value
 --    containing PTF bytes itself could corrupt the bold spans for the rest
 --    of the dialog. They're stripped per value.
---
--- Unknown fields are deliberately surfaced rather than hidden: Shelfmark's
--- /api/releases schema isn't documented anywhere local, so anything scalar
--- that isn't already rendered above gets listed at the end. That way a field
--- this file has never heard of still shows up instead of being silently
--- dropped.
-local RELEASE_DETAIL_KNOWN = {
-    title = true, format = true, size = true, indexer = true, peers = true,
-    seeders = true, source = true, md5 = true, extra = true,
-    annas_author = true, annas_url = true, cover_url = true,
-    year = true, language = true, content_type = true, meta_line = true,
-}
 
 -- Compact rendering of one release for the confirm dialog. Deliberately
 -- short: this is a decision aid, not a record dump. Everything that helps
@@ -9165,7 +9156,7 @@ end
 -- search, show exactly what matched, and only write on explicit
 -- confirmation -- see the section note above doHardcoverGraphQL for why
 -- nothing here happens without that confirmation step.
-local function promptHardcoverText(title, hint, on_confirm)
+function HC.promptHardcoverText(title, hint, on_confirm)
     local InputDialog = require("ui/widget/inputdialog")
     local dialog
     dialog = InputDialog:new{
@@ -9208,7 +9199,7 @@ end
 -- action below -- search, show exactly what matched, write only on explicit
 -- confirmation. Must already be running inside a Trapper-wrapped coroutine
 -- (both call sites ensure this).
-local function confirmAndLogBookOnHardcover(self, title, author, status_id, status_label)
+function HC.confirmAndLogBookOnHardcover(self, title, author, status_id, status_label)
     local id, found_title, found_author, err = self:hardcoverFindBook(title, author)
     if not id then
         self:showServiceError(err or _("Search failed."))
@@ -9240,7 +9231,7 @@ end
 
 -- Shared by the manual "Follow an author..." menu flow and the long-press
 -- action below -- same search/confirm/write shape as the function above.
-local function confirmAndFollowAuthorOnHardcover(self, author_name)
+function HC.confirmAndFollowAuthorOnHardcover(self, author_name)
     local candidates, err = self:hardcoverFindAuthors(author_name)
     if not candidates then
         self:showServiceError(err or _("Search failed."))
@@ -9312,7 +9303,7 @@ function Bookbridge:promptHardcoverLogBookForFile(title, author, status_id, stat
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
     end
-    confirmAndLogBookOnHardcover(self, title, author, status_id, status_label)
+    HC.confirmAndLogBookOnHardcover(self, title, author, status_id, status_label)
 end
 
 function Bookbridge:promptHardcoverFollowAuthor()
@@ -9320,8 +9311,8 @@ function Bookbridge:promptHardcoverFollowAuthor()
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
     end
-    promptHardcoverText(_("Follow an author on Hardcover"), _("Author name"), function(name)
-        confirmAndFollowAuthorOnHardcover(self, name)
+    HC.promptHardcoverText(_("Follow an author on Hardcover"), _("Author name"), function(name)
+        HC.confirmAndFollowAuthorOnHardcover(self, name)
     end)
 end
 
@@ -9331,7 +9322,7 @@ function Bookbridge:promptHardcoverFollowAuthorForFile(author_name)
         UIManager:show(InfoMessage:new{ text = _("Set your Hardcover API token in Settings first.") })
         return
     end
-    confirmAndFollowAuthorOnHardcover(self, author_name)
+    HC.confirmAndFollowAuthorOnHardcover(self, author_name)
 end
 
 -- Browses the lists the DEVICE OWNER's Hardcover account owns or follows,
@@ -9393,7 +9384,7 @@ function Bookbridge:browseHardcoverLists()
 end
 
 -- Page size for browseHardcoverListBooks' "Load more" pagination.
-local HARDCOVER_LIST_PAGE_SIZE = 25
+HC.HARDCOVER_LIST_PAGE_SIZE = 25
 
 -- Renders one list's books straight from Hardcover, mirroring
 -- browseAuthorBibliography: same paginated menu, same cover prefetch, and a
@@ -9408,10 +9399,10 @@ function Bookbridge:browseHardcoverListBooks(list_id, list_name, offset, existin
     local new_books, total, resolved_name, err
     if kind == "status" and status_id then
         new_books, total, resolved_name, err = self:hardcoverShelfBooks(
-            status_id, HARDCOVER_LIST_PAGE_SIZE, offset or 0)
+            status_id, HC.HARDCOVER_LIST_PAGE_SIZE, offset or 0)
     else
         new_books, total, resolved_name, err = self:hardcoverListBooks(
-            list_id, HARDCOVER_LIST_PAGE_SIZE, offset or 0)
+            list_id, HC.HARDCOVER_LIST_PAGE_SIZE, offset or 0)
     end
     if not new_books then
         self:showServiceError(err or _("Couldn't load this list."))
@@ -9477,10 +9468,10 @@ end
 
 -- Fixed page size for browseAuthorBibliography's "Load more" pagination --
 -- matches Hardcover's own documented per-page convention.
-local HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE = 25
+HC.HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE = 25
 
 -- Reads "who do I follow" fresh from Hardcover every time (see the note
--- above doHardcoverListFollowedAuthors) -- no local list to keep in sync,
+-- above HC.doHardcoverListFollowedAuthors) -- no local list to keep in sync,
 -- so a follow made here, on hardcover.app's own website, or via the
 -- long-press "Follow Author" action all show up the same way.
 function Bookbridge:browseFollowedAuthors()
@@ -9530,7 +9521,7 @@ end
 -- that function) so tapping a book here reaches browseReleases with the
 -- exact same book_data shape a normal search result already carries --
 -- title/authors/publish_year/display_fields/provider/provider_id, all
--- built by doHardcoverAuthorBibliography to match what
+-- built by HC.doHardcoverAuthorBibliography to match what
 -- describeBook/describeMetrics already expect.
 -- caller_menu, when given, is closed here rather than by the caller before
 -- invoking this -- see the identical note on doSearch's own caller_menu.
@@ -9538,7 +9529,7 @@ function Bookbridge:browseAuthorBibliography(author_id, author_name, offset, exi
     if caller_menu then UIManager:close(caller_menu) end
 
     local new_books, total, resolved_name, err = self:hardcoverAuthorBibliography(
-        author_id, HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE, offset or 0)
+        author_id, HC.HARDCOVER_BIBLIOGRAPHY_PAGE_SIZE, offset or 0)
     if not new_books then
         self:showServiceError(err or _("Couldn't load this author's books."))
         return
@@ -10523,7 +10514,7 @@ HardcoverReviewQR.onClose = HardcoverReviewQR.onTapClose
 -- way. Every line below is pre-1929 (safely public domain in the US) and
 -- checked against the source for exact wording -- misquoting a real book
 -- is its own kind of wrong.
-local HARDCOVER_FINISH_QUOTES = {
+HC.HARDCOVER_FINISH_QUOTES = {
     { text = _("Why, sometimes I've believed as many as six impossible things before breakfast."),
       attribution = "Lewis Carroll, Through the Looking-Glass" },
     { text = _("It is a truth universally acknowledged, that a single man in possession of a good fortune must be in want of a wife."),
@@ -10538,13 +10529,13 @@ local HARDCOVER_FINISH_QUOTES = {
       attribution = "Charles Dickens, A Tale of Two Cities" },
 }
 
-local hc_finish_quotes_seeded = false
-local function pickHardcoverFinishQuote()
-    if not hc_finish_quotes_seeded then
+HC.hc_finish_quotes_seeded = false
+function HC.pickHardcoverFinishQuote()
+    if not HC.hc_finish_quotes_seeded then
         math.randomseed(os.time())
-        hc_finish_quotes_seeded = true
+        HC.hc_finish_quotes_seeded = true
     end
-    local q = HARDCOVER_FINISH_QUOTES[math.random(#HARDCOVER_FINISH_QUOTES)]
+    local q = HC.HARDCOVER_FINISH_QUOTES[math.random(#HC.HARDCOVER_FINISH_QUOTES)]
     return T(_("\"%1\"\n-- %2"), q.text, q.attribution)
 end
 
@@ -10577,7 +10568,7 @@ function Bookbridge:showHardcoverReviewQR(slug, title, author, is_guess)
     local Screen = require("device").screen
     local side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.4)
     local body = T(_("Congratulations, you've finished \"%1\"!\n\n%2\n\nConsider reviewing it on Hardcover."),
-        book_title, pickHardcoverFinishQuote())
+        book_title, HC.pickHardcoverFinishQuote())
     if slug and is_guess then
         body = body .. "\n\n" .. _("(Best guess -- not a confirmed match. Wrong book? Search for it on Hardcover instead.)")
     end
