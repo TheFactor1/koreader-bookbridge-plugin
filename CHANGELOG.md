@@ -4,6 +4,12 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-26 — build 5481a79
+
+- **Internal**: no change to what Bookbridge does. Reorganised the code to
+  free up room in the plugin's main file, which had hit LuaJIT's limit of 200
+  top-level variables and would have refused to load on the next addition.
+
 ## 2026-09-25 — v0.4.0, build 4b5a6b5
 
 - **New**: setting up from nothing is now one server command and one code.
