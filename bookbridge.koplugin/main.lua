@@ -891,8 +891,14 @@ local function loadDownloadIsbnHints()
     local c = f:read("*a"); f:close()
     if not c or c == "" then return {} end
     local ok, d = pcall(JSON.decode, c)
-    if ok and type(d) == "table" then return d end
-    return {}
+    if not ok or type(d) ~= "table" then return {} end
+    -- Drop anything that isn't an ISBN string: earlier builds could save a
+    -- JSON null here, which decodes to the truthy null sentinel.
+    local hints = {}
+    for p, isbn in pairs(d) do
+        if type(p) == "string" and type(isbn) == "string" and isbn ~= "" then hints[p] = isbn end
+    end
+    return hints
 end
 local function saveDownloadIsbnHints(t)
     local out = io.open(DOWNLOAD_ISBN_HINTS_PATH, "w")
@@ -1575,7 +1581,13 @@ local function doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy)
         return nil
     end
     local decode_ok, decoded = pcall(JSON.decode, table.concat(sink_table))
-    if not decode_ok or not decoded or not decoded.isbn13 or decoded.isbn13 == "" then return nil end
+    -- The service answers {"isbn13": null} when it knows none, and JSON null
+    -- decodes to KOReader's null sentinel (truthy, a function) -- so only a
+    -- real string counts.
+    if not decode_ok or type(decoded) ~= "table" or type(decoded.isbn13) ~= "string"
+            or decoded.isbn13 == "" then
+        return nil
+    end
     return decoded.isbn13
 end
 
@@ -7483,8 +7495,13 @@ local AUTO_UPDATE_RETRY = 10 * 60   -- after a check that couldn't reach the ser
 -- With a self-hosted "Update source" that's where it looks; without one (a
 -- new install) it follows this plugin's published GitHub releases, so only
 -- versions deliberately released reach other people's devices.
+-- Never in a source checkout (a plugin folder linked from a git clone, as on
+-- a development desktop): an install would overwrite the working copy with
+-- the released build -- test runs with no Update source did exactly that.
 function Bookbridge:autoUpdateWanted()
-    return self.auto_update and true or false
+    if not self.auto_update then return false end
+    if self.path and lfs.attributes(self.path .. "/../.git") then return false end
+    return true
 end
 
 function Bookbridge:autoCheckForUpdate(reason)

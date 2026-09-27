@@ -13,6 +13,7 @@ cat > "$W/t.lua" <<'LUA'
 local fails, n = 0, 0
 local function ck(c, msg) n = n + 1; if c then print("PASS  " .. msg) else print("FAIL  " .. msg); fails = fails + 1 end end
 Bookbridge = {}; LOG = {}
+FS = {}; lfs = { attributes = function(p) return FS[p] end }
 function debugLog(m) LOG[#LOG + 1] = m end
 B = 1700000000  -- a real-looking clock: "never checked" is time 0, six hours before any small number
 NOW = B; os.time = function() return NOW end
@@ -59,6 +60,12 @@ ck(#LOG == 0, "switched off: never checks")
 LOG = {}; NOW = NOW + 24 * 3600; CHECK = { manifest = true, changed = {}, build = "rel" }
 Bookbridge.autoCheckForUpdate(plugin({ auto_update = true, update_url = "", saveAllSettings = function() end }), "wake")
 ck(#LOG > 0 and tostring(LOG[1]):find("GitHub releases", 1, true), "no update source (a new install): checks the published GitHub releases")
+LOG = {}; NOW = NOW + 24 * 3600; FS["/src/bookbridge.koplugin/../.git"] = "directory"
+Bookbridge.autoCheckForUpdate(plugin({ auto_update = true, update_url = "", path = "/src/bookbridge.koplugin", saveAllSettings = function() end }), "wake")
+ck(#LOG == 0, "running from a git checkout: never self-updates (it overwrote the repo copy before)")
+LOG = {}; NOW = NOW + 24 * 3600
+Bookbridge.autoCheckForUpdate(plugin({ auto_update = true, update_url = "", path = "/mnt/us/koreader/plugins/bookbridge.koplugin", saveAllSettings = function() end }), "wake")
+ck(#LOG > 0, "an ordinary install (no .git above it) still updates")
 print(("=== AUTO UPDATE UNIT %d/%d"):format(n - fails, n), fails == 0 and "PASS" or "FAIL"); os.exit(fails == 0 and 0 or 1)
 LUA
 (cd "$KDIR" && FN="$W/fn.lua" ./luajit "$W/t.lua")
