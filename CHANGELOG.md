@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-09-27 — build e5a52f4
+
+- **Fix**: downloading from Anna's Archive no longer hits an error in the
+  background when the book has no known ISBN. That error had also saved a
+  bad value as the book's ISBN, which could confuse Hardcover matching;
+  such values are now ignored and cleaned up.
+- **Internal**: Bookbridge no longer updates itself when it runs from a
+  copy of its source code (a developer's desktop), where an update would
+  overwrite the work in progress.
+
 ## 2026-09-26 — build 5481a79
 
 - **Internal**: no change to what Bookbridge does. Reorganised the code to
