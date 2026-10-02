@@ -4,6 +4,12 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-02 — build 4c5c45e
+
+- **Fix**: when Anna's Archive is slow, choosing a book no longer comes back
+  with no Anna's Archive results. Bookbridge gave up after 10 seconds; the
+  server needed about 10.5. It now waits up to 30.
+
 ## 2026-09-27 — build e5a52f4
 
 - **Fix**: downloading from Anna's Archive no longer hits an error in the
