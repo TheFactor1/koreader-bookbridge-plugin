@@ -1409,7 +1409,15 @@ local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy, 
     end
     debugLog("[annas] -> GET " .. url)
 
-    socketutil:set_timeout(10, 30)
+    -- The service answers all at once, after it has searched Anna's Archive
+    -- and looked up each result's download count: ~10.5 s for 20 results on
+    -- a slow day (2026-10-02), so a 10 s silence limit gave up just before
+    -- the answer arrived. The key check (probe) is one result, no counts.
+    if probe then
+        socketutil:set_timeout(10, 30)
+    else
+        socketutil:set_timeout(30, 45)
+    end
     local sink, sink_table = socketutil.table_sink()
     local request = { method = "GET", url = url, headers = headers, sink = sink }
     if socks5_proxy and socks5_proxy ~= "" then

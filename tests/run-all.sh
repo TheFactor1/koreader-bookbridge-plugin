@@ -144,6 +144,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  isbn-hints (no local KOReader)"; skipped="${skipped:+$skipped, }isbn-hints"
 else echo "$out" | grep -E '^FAIL|attempt to|rror'; echo "FAIL"; fail=1; fi
 
+section "Anna's search timeout (a slow service's answer still arrives)"
+out=$(bash tests/annas-search-timeout/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  annas-search-timeout (no local KOReader)"; skipped="${skipped:+$skipped, }annas-search-timeout"
+else echo "$out" | grep -E '^FAIL|attempt to|rror'; echo "FAIL"; fail=1; fi
+
 section "Rename migration (a Bookbridge build inside the old shelfmark.koplugin folder moves itself)"
 out=$(bash tests/rename-migration/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks -- copies itself, disables the old folder, offers a restart, then removes the old folder"
