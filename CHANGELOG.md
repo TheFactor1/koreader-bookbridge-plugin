@@ -4,6 +4,24 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-05 — build 3d6029c
+
+- **New**: **Connect a book server.** Bookbridge finds your server on the
+  Wi-Fi and shows a code (with a QR code); approve it on your phone with the
+  server password and the reader gets every address and login by itself.
+  Needs the server's new one-command install
+  ([bookbridge-server](https://github.com/TheFactor1/bookbridge-server)).
+  **Type an address instead** covers a server elsewhere, like its Tailscale
+  address.
+- **New**: **Type on your phone.** Boxes that want a key or a password
+  (Shelfmark, Calibre-Web, Hardcover, Anna's Archive, AI, connection
+  settings) have a button that shows a QR code; the page it opens on your
+  phone sends what you type straight into the box on the reader.
+- **Change**: *Import from server* is gone from the menu, along with the
+  server's setup wizard it worked with.
+- **Fix**: the phone clipboard receiver kept working only for the first
+  file browser of a session; it now belongs to KOReader as a whole.
+
 ## 2026-10-02 — build 4c5c45e
 
 - **Fix**: when Anna's Archive is slow, choosing a book no longer comes back
