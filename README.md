@@ -340,6 +340,10 @@ This plugin stands on other people's work:
 - The Tailscale VPN KOReader plugin by Jadehawk — its local SOCKS5 proxy is
   how a Kindle reaches the server over Tailscale.
 
+## License
+
+[AGPL-3.0](LICENSE), the same license as KOReader.
+
 ## Authorship
 
 **All of the code, tests and documentation in this repository were written by
