@@ -14,7 +14,7 @@
 #
 # Needs: docker, a local KOReader Linux install (~/.local/opt/koreader-*/ or
 # $KOREADER_DIR), and the server stack's compose file ($SHELFMARK_STACK_DIR,
-# default ../shelfmark-stack beside this repo). Uses ports 19083/19084 for
+# default ../shelfmark-stack beside this repo). Uses ports 19083/19084/19086 for
 # the sandbox and 8181 for KOReader's HTTP inspector.
 #
 # It stops any running local KOReader to launch its own -- matched only on
@@ -64,7 +64,7 @@ stop_koreader() {
 }
 cleanup() {
   stop_koreader
-  (cd "$STACK" && COMPOSE_PROFILES=sync CWA_PORT=$CWA_PORT SHELFMARK_PORT=19084 CALIBRE_LIBRARY="$LIB" docker compose -p $P down -v >/dev/null 2>&1)
+  (cd "$STACK" && COMPOSE_PROFILES=sync CWA_PORT=$CWA_PORT SHELFMARK_PORT=19084 PAIRING_PORT=19086 CALIBRE_LIBRARY="$LIB" docker compose -p $P down -v >/dev/null 2>&1)
   rm -f "$SET/shelfmark.lua" "$SET/shelfmark_synced_books.json" "$SET/shelfmark-debug.log"
   for f in "$W"/bak/*; do [ -e "$f" ] || continue; case "$(basename "$f")" in settings.reader.lua) cp -a "$f" "$CFG/";; *) cp -a "$f" "$SET/";; esac; done
   rm -rf "$W"
@@ -72,7 +72,7 @@ cleanup() {
 trap cleanup EXIT
 
 # --- sandbox CWA ----------------------------------------------------------
-(cd "$STACK" && COMPOSE_PROFILES=sync CWA_PORT=$CWA_PORT SHELFMARK_PORT=19084 CALIBRE_LIBRARY="$LIB" docker compose -p $P up -d >/dev/null 2>&1) || { say FAIL "sandbox compose up"; exit 1; }
+(cd "$STACK" && COMPOSE_PROFILES=sync CWA_PORT=$CWA_PORT SHELFMARK_PORT=19084 PAIRING_PORT=19086 CALIBRE_LIBRARY="$LIB" docker compose -p $P up -d >/dev/null 2>&1) || { say FAIL "sandbox compose up"; exit 1; }
 for i in $(seq 1 40); do [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -u admin:admin123 http://127.0.0.1:$CWA_PORT/opds)" = 200 ] && break; sleep 3; done
 [ "$(curl -s --max-time 5 -u admin:admin123 http://127.0.0.1:$CWA_PORT/opds/new | grep -c '<entry>')" = 0 ] && say PASS "sandbox CWA up, library empty" || { say FAIL "sandbox CWA not up/empty"; exit 1; }
 

@@ -9,9 +9,9 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 [ -x "${KDIR:-/nonexistent}/luajit" ] || { echo "SKIP  no local KOReader (set KOREADER_DIR)"; exit 3; }
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
-{ grep -E '^local HC_TOKEN_REJECTED = |^local hc_rejected_token = |^local CLIPBOARD_RECEIVER_PORT = |^local STATUS_CHECK_MAX_AGE = |^local STATUS_MAX = ' "$M"
+{ grep -E '^local HC_TOKEN_REJECTED = |^local hc_rejected_token = |^local CLIPBOARD_RECEIVER_PORT = |^local CLIP = |^local STATUS_CHECK_MAX_AGE = |^local STATUS_MAX = ' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings showHostingGuide; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -58,6 +58,7 @@ MultiInputDialog = { new = function(_s, t) MID = t; t.onShowKeyboard = function(
 local ONLINE = true
 package.loaded["ui/network/manager"] = { isOnline = function() return ONLINE end }
 package.loaded["ui/trapper"] = { wrap = function(_s, f) return f() end, dismissableRunInSubprocess = function(_s, f) return true, f() end }
+package.loaded["bookbridge.clipboard_receiver"] = {}  -- (main.lua's CLIP picks this up)
 Bookbridge = {}
 local getRej, setRej = assert(load(io.open(W .. "/fns.lua"):read("*a")))()
 local pass, fail = 0, 0
@@ -82,7 +83,9 @@ REG = { a = {}, b = {}, c = {} }
 local ok_rs = { settings = { access_token = "t", auto_sync = true } }
 local b = bb({ server_url = "http://s", username = "matt", password = "p", cwa_url = "http://c", cwa_username = "admin",
     hardcover_token = "tok", hardcover_progress_sync = true, update_url = "http://u", auto_update = true,
-    ui = { readest = ok_rs }, clipboard_server = {}, download_dir = "/mnt/us/books" })
+    ui = { readest = ok_rs }, download_dir = "/mnt/us/books" })
+-- (the receiver is one per KOReader, kept in package.loaded)
+package.loaded["bookbridge.clipboard_receiver"].server = {}
 rows = b:collectStatusRows()
 ck(not rows[1].text:find("Start here", 1, true), "configured: no 'Start here' row")
 ck(row(rows, "Shelfmark").mandatory == "Saved", "Shelfmark: 'Saved' until checked (not the ambiguous 'Set up')")
@@ -255,8 +258,9 @@ ck(TV and TV.text:find("REQUIRED", 1, true) and TV.text:find("Shelfmark", 1, tru
 -- The Shelfmark dialog asks only for what a new user needs
 bb({ server_url = "http://s", username = "u", password = "p" }):editServerSettings()
 ck(MID and #MID.fields == 3, "Shelfmark settings: address, username, password only")
-local btns = {}; for _, x in ipairs(MID.buttons[1]) do btns[#btns + 1] = x.text end
+local btns = {}; for _, x in ipairs(MID.buttons[#MID.buttons]) do btns[#btns + 1] = x.text end
 ck(table.concat(btns, ",") == "Cancel,Advanced,Apply", "...with an Advanced button for the proxy and relay")
+ck(MID.buttons[1][1].text == "Type on your phone", "...and Type on your phone above them")
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)
 LUA

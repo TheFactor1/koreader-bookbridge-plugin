@@ -3770,7 +3770,8 @@ end
 -- hello (it hands back a 6-character code), show the code, and wait while
 -- the person approves it on the server's page with the server password; the
 -- server then hands over every address and login in one go.
-local CONNECT_PORT = 8086
+-- (BOOKBRIDGE_CONNECT_PORT: another port, for testing beside a running server)
+local CONNECT_PORT = tonumber(os.getenv("BOOKBRIDGE_CONNECT_PORT")) or 8086
 
 -- This reader's own address on the network (no packet is sent: connecting a
 -- UDP socket only picks the route).
@@ -7399,32 +7400,38 @@ Bookbridge._discoverServers = function(port) return doDiscoverServers(port) end
 
 -- Connect to a book server: find it, show a code, wait for the approval on
 -- the server's page, take every address and login it hands over.
+-- (call it inside Trapper:wrap, like every other method that forks)
 function Bookbridge:connectServer()
     local Trapper = require("ui/trapper")
-    Trapper:wrap(function()
-        local completed, found, err = Trapper:dismissableRunInSubprocess(function()
-            return doDiscoverServers(CONNECT_PORT)
-        end, _("Looking for your book server on this network..."))
-        if not completed then return end
-        found = found or {}
-        if #found == 0 then
-            -- not on the same network (or a server too old to answer): ask
-            return self:connectServerByAddress(err)
-        elseif #found == 1 then
-            return self:connectServerAt(found[1].host, found[1].port, found[1].name)
-        end
-        local ButtonDialog = require("ui/widget/buttondialog")
-        local dlg
-        local buttons = {}
-        for _, f in ipairs(found) do
-            buttons[#buttons + 1] = { { text = f.name .. "  (" .. f.host .. ")", callback = function()
-                UIManager:close(dlg)
-                Trapper:wrap(function() self:connectServerAt(f.host, f.port, f.name) end)
-            end } }
-        end
-        dlg = ButtonDialog:new{ title = _("Which book server?"), buttons = buttons }
-        UIManager:show(dlg)
-    end)
+    local completed, found, err = Trapper:dismissableRunInSubprocess(function()
+        return doDiscoverServers(CONNECT_PORT)
+    end, _("Looking for your book server on this network..."))
+    if not completed then return end
+    found = found or {}
+    if #found == 0 then
+        -- not on the same network (or a server too old to answer): ask
+        return self:connectServerByAddress(err)
+    end
+    -- (one tap even with one server found: the other button is how a
+    -- reader gets the server's Tailscale address, for away from home)
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local dlg
+    local buttons = {}
+    for _, f in ipairs(found) do
+        buttons[#buttons + 1] = { { text = f.name .. "  (" .. f.host .. ")", callback = function()
+            UIManager:close(dlg)
+            Trapper:wrap(function() self:connectServerAt(f.host, f.port, f.name) end)
+        end } }
+    end
+    buttons[#buttons + 1] = { { text = _("Type an address instead"), callback = function()
+        UIManager:close(dlg)
+        self:connectServerByAddress(_("Away from home over Tailscale? Use the server's Tailscale address (it starts with 100.)."))
+    end } }
+    dlg = ButtonDialog:new{
+        title = #found == 1 and _("Found your book server") or _("Which book server?"),
+        buttons = buttons,
+    }
+    UIManager:show(dlg)
 end
 
 -- No server found nearby: type its address (a Tailscale address works too).
@@ -7452,6 +7459,80 @@ function Bookbridge:connectServerByAddress(why)
     dialog:onShowKeyboard()
 end
 
+-- The screen a reader shows while it waits for its code to be approved:
+-- the code, large; a QR code that opens the approval page with the code
+-- already filled in; the address for typing by hand. Tapping anywhere
+-- cancels (Trapper hands it a dismiss_callback, as it does its own
+-- TrapWidget).
+local ConnectCodeWidget = require("ui/widget/container/inputcontainer"):extend{
+    modal = true,
+    code = nil,     -- "YJ8 7JD"
+    url = nil,      -- the server's page
+    qr_text = nil,  -- that page with the code filled in
+    dismiss_callback = nil,
+}
+
+function ConnectCodeWidget:init()
+    local Device = require("device")
+    local Screen = Device.screen
+    local TextWidget = require("ui/widget/textwidget")
+    local VerticalGroup = require("ui/widget/verticalgroup")
+    local VerticalSpan = require("ui/widget/verticalspan")
+    local W, H = Screen:getWidth(), Screen:getHeight()
+    local w = math.floor(W * 0.84)
+    local function para(text, face)
+        return TextBoxWidget:new{ text = text, face = face, width = w, alignment = "center" }
+    end
+    local function gap(n) return VerticalSpan:new{ width = Screen:scaleBySize(n) } end
+    local side = math.floor(math.min(W, H) * 0.42)
+    self[1] = require("ui/widget/container/centercontainer"):new{
+        dimen = Screen:getSize(),
+        FrameContainer:new{
+            background = Blitbuffer.COLOR_WHITE,
+            bordersize = Size.border.window,
+            radius = 0,
+            padding = Size.padding.large,
+            VerticalGroup:new{
+                align = "center",
+                para(_("Connect this reader"), Font:getFace("tfont", 22)),
+                gap(10),
+                para(_("Point your phone's camera at the square. Or open the address below on a phone or computer and type in the code."), Font:getFace("x_smallinfofont")),
+                gap(14),
+                require("ui/widget/qrwidget"):new{ text = self.qr_text, width = side, height = side },
+                gap(14),
+                TextWidget:new{ text = self.code, face = Font:getFace("cfont", 40), bold = true },
+                gap(6),
+                para(self.url, Font:getFace("x_smallinfofont")),
+                gap(14),
+                para(_("Then type your server password there (the install printed it). Tap here to cancel."), Font:getFace("x_smallinfofont")),
+            },
+        },
+    }
+    if Device:isTouchDevice() then
+        self.ges_events.TapClose = {
+            require("ui/gesturerange"):new{ ges = "tap", range = Geom:new{ x = 0, y = 0, w = W, h = H } },
+        }
+    end
+    if Device:hasKeys() then
+        self.key_events.AnyKeyPressed = { { Device.input.group.Any } }
+    end
+end
+
+function ConnectCodeWidget:onShow()
+    UIManager:setDirty(self, function() return "ui", self[1][1].dimen end)
+    return true
+end
+
+function ConnectCodeWidget:onCloseWidget()
+    UIManager:setDirty(nil, function() return "ui", self[1][1].dimen end)
+end
+
+function ConnectCodeWidget:onTapClose()
+    if self.dismiss_callback then self.dismiss_callback() end
+    return true
+end
+ConnectCodeWidget.onAnyKeyPressed = ConnectCodeWidget.onTapClose
+
 function Bookbridge:connectServerAt(host, port, name)
     self:autoTailscaleProxy(host)
     local Trapper = require("ui/trapper")
@@ -7469,9 +7550,16 @@ function Bookbridge:connectServerAt(host, port, name)
     -- (in the log too, for whoever is helping: single use, ten minutes, and
     -- useless without the server password)
     logger.info("Bookbridge: connect code", hello.code, "waiting for approval at", url)
+    local screen = ConnectCodeWidget:new{
+        code = code, url = url,
+        qr_text = url .. "/connect?code=" .. hello.code,
+    }
+    UIManager:show(screen)
+    UIManager:forceRePaint()
     local waited, settings, werr = Trapper:dismissableRunInSubprocess(function()
         return doConnectWait(host, port, hello.token)
-    end, T(_("On your phone or computer, open\n\n%1\n\nand enter this code:\n\n%2\n\nwith your server password (the install printed it).\n\nTap to cancel."), url, code))
+    end, screen)
+    UIManager:close(screen)
     if not waited then return end
     if not settings then
         UIManager:show(InfoMessage:new{ text = werr or _("Couldn't connect.") })
@@ -7542,7 +7630,7 @@ function Bookbridge:showConnectionStatus()
     add(self.annas_url, _("Anna's Archive API"), _("Anna's Archive as primary source"))
     add(self.ai_relay_url, _("AI relay"), _("match suggestions"))
     if #services == 0 then
-        UIManager:show(InfoMessage:new{ text = _("Nothing is configured yet -- use 'Import from server' or Settings.") })
+        UIManager:show(InfoMessage:new{ text = _("Nothing is configured yet -- use 'Connect a book server' or Settings.") })
         return
     end
     local Trapper = require("ui/trapper")
@@ -8121,7 +8209,10 @@ function Bookbridge:addToMainMenu(menu_items)
             {
                 -- find the server, show a code, approve it there: no typing
                 text = _("Connect a book server"),
-                callback = function() self:connectServer() end,
+                callback = function()
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function() self:connectServer() end)
+                end,
                 separator = true,
             },
             {
@@ -8358,11 +8449,6 @@ function Bookbridge:addToMainMenu(menu_items)
                                 text = _("Import settings from text"),
                                 keep_menu_open = true,
                                                         callback = function() self:importSettingsFromText() end,
-                            },
-                            {
-                                text = _("Import from server"),
-                                keep_menu_open = true,
-                                callback = function() self:importFromServer() end,
                             },
                         },
                     },
@@ -12357,7 +12443,10 @@ function Bookbridge:collectStatusRows()
     local nothing_set = (not self.server_url or self.server_url == "") and (not self.cwa_url or self.cwa_url == "")
     if nothing_set then
         add({ text = _("Start here: connect to your book server"), mandatory = _("Tap"),
-            action = function() self:connectServer() end })
+            action = function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:connectServer() end)
+            end })
     end
 
     -- Shelfmark
@@ -12732,7 +12821,7 @@ REACHING IT AWAY FROM HOME
 Tailscale on the server, and the Tailscale VPN KOReader plugin on a Kindle or Kobo. Bookbridge fills in its proxy by itself.
 
 EASIEST: ONE COMMAND
-github.com/TheFactor1/bookbridge-server runs all of the servers above from one file. Its setup wizard (port 8090) starts what you pick, tests it, and shows a 6-character code: enter it under "Start here: import settings from your server". It also runs the pairing relay ("Set up another device") and, if you want it, the AI relay.
+github.com/TheFactor1/bookbridge-server installs all of the servers above with one command and sets their logins up. Then "Connect a book server" here finds it, shows a code, and you approve it on your phone with the password the install printed -- nothing typed on the reader.
 
 Full guide: github.com/TheFactor1/koreader-bookbridge-plugin]]),
     })
