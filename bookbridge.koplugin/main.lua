@@ -158,8 +158,23 @@ function Bookbridge:loadSettings()
     if self.hardcover_review_qr_enabled == nil then self.hardcover_review_qr_enabled = true end
 end
 
+-- Where books go unless a folder was chosen: KOReader's home folder (the one
+-- its file browser opens on), so a new book is where a new user looks.
+-- A reader that already has the old default folder keeps it (library sync
+-- reads this folder too, so it mustn't move under anyone); without a home
+-- folder, that folder in KOReader's own data.
 function Bookbridge:defaultDownloadDir()
-    return DataStorage:getFullDataDir() .. "/shelfmark_downloads"
+    local old = DataStorage:getFullDataDir() .. "/shelfmark_downloads"
+    if lfs.attributes(old, "mode") == "directory" then return old end
+    local home = G_reader_settings and G_reader_settings:readSetting("home_dir")
+    -- (no home folder chosen on a Kindle: its own books folder)
+    if (type(home) ~= "string" or home == "") and require("device"):isKindle() then
+        home = "/mnt/us/documents"
+    end
+    if type(home) == "string" and home ~= "" and lfs.attributes(home, "mode") == "directory" then
+        return home
+    end
+    return old
 end
 
 function Bookbridge:init()
@@ -3721,6 +3736,16 @@ local function doCheckForUpdate(update_url, socks5_proxy)
         .. decoded.tag_name .. "/bookbridge.koplugin", nil)
     if minfo then
         minfo.release = decoded.tag_name
+        -- Never backwards: a build newer than the latest release (one
+        -- installed by hand from the repository, or a release still being
+        -- prepared) stays as it is. (A self-hosted source is followed
+        -- build for build; it has no versions to compare.)
+        if isNewerVersion(PLUGIN_VERSION, minfo.version or decoded.tag_name) then
+            debugLog("[update] latest release " .. decoded.tag_name .. " is older than this v"
+                .. PLUGIN_VERSION .. "; staying")
+            minfo.changed = {}
+            minfo.newer_here = true
+        end
         return minfo, code
     end
     return decoded, code
@@ -7616,7 +7641,9 @@ function Bookbridge:checkForUpdate()
         if #info.changed == 0
                 and not (info.unverifiable and isNewerVersion(info.version, PLUGIN_VERSION)) then
             local text
-            if info.unverifiable then
+            if info.newer_here then
+                text = T(_("You have v%1, newer than the latest release (v%2)."), PLUGIN_VERSION, info.version)
+            elseif info.unverifiable then
                 text = T(_("No newer version offered (v%1). This device couldn't checksum its own files, so a same-version rebuild can't be detected."), info.version)
             elseif build then
                 text = T(_("You're up to date (v%1, build %2)."), info.version, build)
@@ -8046,7 +8073,7 @@ function Bookbridge:downloadFromCwa(title, caller_menu)
 
     local results_menu
     results_menu = Menu:new{
-        title = _("Matches in Calibre-Web -- tap to download"),
+        title = _("In your library -- tap to download"),
         item_table = item_table,
         multilines_forced = true,
         covers_fullscreen = true,
@@ -8104,12 +8131,18 @@ function Bookbridge:saveCwaEntry(entry, caller_menu)
     -- did its own forking internally and has already returned).
     invalidateBookInfoCache(save_path)
 
-    UIManager:show(InfoMessage:new{
-        text = T(_("Saved to %1"), save_path),
-        timeout = 4,
-    })
-
     registerSyncedBook(entry.uuid, save_path, entry.title)
+    -- (straight into it is what you want most of the time; the path is
+    -- there for when it isn't)
+    UIManager:show(require("ui/widget/confirmbox"):new{
+        text = T(_("%1 is on your reader, in %2.\n\nOpen it now?"), entry.title or _("The book"),
+            save_path:match("([^/]+)/[^/]+$") or dir),
+        ok_text = _("Open"),
+        cancel_text = _("Later"),
+        ok_callback = function()
+            require("apps/reader/readerui"):showReader(save_path)
+        end,
+    })
 
     -- The file manager (if it's the screen this was opened from, which it
     -- usually is -- Shelfmark's menu lives in the file browser's menu, not
@@ -10279,6 +10312,10 @@ function Bookbridge:submitRequest(book, release)
         })
     else
         local msg = (resp and (resp.message or resp.error)) or (_("Request failed (HTTP ") .. tostring(code) .. ")")
+        -- (Shelfmark starts with requests off; its own wording is cryptic)
+        if resp and resp.code == "requests_unavailable" then
+            msg = _("Shelfmark has requests turned off. An admin can turn them on in Shelfmark: Settings > Users & Requests.")
+        end
         UIManager:show(InfoMessage:new{ text = msg })
     end
 end
@@ -12038,14 +12075,27 @@ function Bookbridge:typeOnPhone()
     local token = (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end)):sub(1, 16)
     CLIP.session = { token = token, expires = os.time() + 600 }
     local url = "http://" .. ip .. ":" .. CLIPBOARD_RECEIVER_PORT .. "/?t=" .. token
-    -- say which box it fills (in a dialog with several, the focused one)
+    -- say which box it fills (in a dialog with several, the focused one;
+    -- a box without a hint goes by its dialog's title)
     local box = findFocusedInputText()
     local where = box and type(box.hint) == "string" and box.hint ~= "" and box.hint
+    local several = false
+    if box then
+        local stack = UIManager._window_stack
+        for i = #stack, 1, -1 do
+            local w = stack[i].widget
+            if w and w._input_widget == box then
+                if not where and type(w.title) == "string" and w.title ~= "" then where = w.title end
+                several = type(w.input_fields) == "table" and #w.input_fields > 1
+                break
+            end
+        end
+    end
     local Screen = require("device").screen
     CLIP.qr = HardcoverReviewQR:new{
         message = (where and T(_("Fills: %1"), where) .. "\n\n" or "")
             .. _("Scan this with your phone's camera (on the same Wi-Fi) and type or paste there.")
-            .. (where and "\n" .. _("To fill a different box, tap it first.") or ""),
+            .. (several and "\n" .. _("To fill a different box, tap it first.") or ""),
         qr_text = url,
         qr_side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.45),
         timeout = 600,
@@ -12553,7 +12603,8 @@ function Bookbridge:collectStatusRows()
     -- Download folder
     local dir = self.download_dir or self:defaultDownloadDir()
     add({ text = _("Download folder"),
-        mandatory = (lfs.attributes(dir, "mode") == "directory") and statusShort(dir, true) or _("Missing"),
+        mandatory = (lfs.attributes(dir, "mode") == "directory") and statusShort(dir, true)
+            or (not self.download_dir and _("Made on first download")) or _("Missing"),
         action = function() self:chooseDownloadDir() end })
 
     add({ text = _("What you need to host"), mandatory = _("Read"),
