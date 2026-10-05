@@ -232,6 +232,7 @@ function Bookbridge:editServerSettings()
             { text = self.password, text_type = "password", hint = _("Password") },
         },
         buttons = {
+            self:phoneButtonRow(),
             {
                 {
                     text = _("Cancel"),
@@ -283,6 +284,7 @@ function Bookbridge:editAdvancedConnectionSettings()
             },
         },
         buttons = {
+            self:phoneButtonRow(),
             {
                 { text = _("Cancel"), id = "close", callback = function() UIManager:close(dialog) end },
                 {
@@ -312,6 +314,7 @@ function Bookbridge:editCwaSettings()
             { text = self.cwa_password, text_type = "password", hint = _("Calibre-Web password (optional)") },
         },
         buttons = {
+            self:phoneButtonRow(),
             {
                 {
                     text = _("Cancel"),
@@ -352,6 +355,7 @@ function Bookbridge:editAiSettings()
             { text = self.ai_relay_token, text_type = "password", hint = _("Relay token") },
         },
         buttons = {
+            self:phoneButtonRow(),
             {
                 {
                     text = _("Cancel"),
@@ -420,6 +424,7 @@ function Bookbridge:editAnnasSettings()
             { text = self.annas_tld, hint = _("Mirror TLD, e.g. gd (leave blank for default)") },
         },
         buttons = {
+            self:phoneButtonRow(),
             {
                 {
                     text = _("Cancel"),
@@ -464,6 +469,7 @@ function Bookbridge:editHardcoverSettings()
             },
         },
         buttons = {
+            self:phoneButtonRow(),
             {
                 {
                     text = _("Cancel"),
@@ -11807,22 +11813,53 @@ end
 -- because the value is parsed here rather than routed through URL path
 -- segments (which split on "/"). Then long-press any input field on the
 -- device -> Clipboard -> paste.
-local CLIPBOARD_RECEIVER_PORT = 8090
+-- (BOOKBRIDGE_CLIPBOARD_PORT: another port, for a desktop where 8090 is taken)
+local CLIPBOARD_RECEIVER_PORT = tonumber(os.getenv("BOOKBRIDGE_CLIPBOARD_PORT")) or 8090
+-- One receiver per KOReader, not per plugin instance: KOReader makes a new
+-- Bookbridge each time the file browser or a book opens, and the port can
+-- only be bound once. `owner` is the newest instance, which answers.
+-- (Kept in package.loaded so two installed copies share it too.)
+local CLIP = package.loaded["bookbridge.clipboard_receiver"] or { server = nil, mq = nil, owner = nil, qr = nil }
+package.loaded["bookbridge.clipboard_receiver"] = CLIP
 
-function Bookbridge:_clipboardSend(client, code, body)
-    if not self.clipboard_server then return end
+-- The page a phone gets at http://<reader>:8090. Plain HTML, no scripts
+-- needed; {{msg}} is replaced with "Sent" (or nothing).
+local PHONE_PAGE = [==[<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Type for your reader</title>
+<style>
+body{font:17px/1.4 system-ui,sans-serif;margin:0;padding:20px;background:#f6f5f2;color:#1b1b1b}
+main{max-width:520px;margin:0 auto}
+h1{font-size:22px;margin:0 0 6px}
+p{margin:0 0 14px;color:#555}
+textarea{width:100%;box-sizing:border-box;min-height:120px;font:17px/1.4 ui-monospace,monospace;padding:12px;border:2px solid #1b1b1b;border-radius:8px;background:#fff}
+button{margin-top:12px;width:100%;padding:14px;font:600 18px system-ui,sans-serif;color:#fff;background:#1b1b1b;border:0;border-radius:8px}
+.ok{color:#17602a;font-weight:600}.bad{color:#9b1c1c;font-weight:600}
+</style></head><body><main>
+<h1>Type for your reader</h1>
+<p>Whatever you send goes straight into the box that's open on your reader. Paste a key, a password or a long address here instead of typing it there.</p>
+{{msg}}
+<form method="post" action="/type">
+<textarea name="text" autofocus autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type or paste here"></textarea>
+<button type="submit">Send to reader</button>
+</form>
+</main></body></html>]==]
+
+function Bookbridge:_clipboardSend(client, code, body, content_type)
+    if not CLIP.server then return end
     local status = ({ [200] = "200 OK", [400] = "400 Bad Request", [404] = "404 Not Found" })[code] or "200 OK"
     body = body or ""
     local response = table.concat({
         "HTTP/1.1 " .. status,
-        "Content-Type: text/plain; charset=utf-8",
+        "Content-Type: " .. (content_type or "text/plain") .. "; charset=utf-8",
+        "Cache-Control: no-store",
         "Content-Length: " .. tostring(#body),
         "Access-Control-Allow-Origin: *",
         "Connection: close",
         "",
         body,
     }, "\r\n")
-    pcall(function() self.clipboard_server:send(response, client) end)
+    pcall(function() CLIP.server:send(response, client) end)
 end
 
 -- The text field the reader is typing into right now, if any -- so a phone
@@ -11857,36 +11894,62 @@ function Bookbridge:_onClipboardRequest(data, client)
         return self:_clipboardSend(client, 400, "Bad request")
     end
     local path, query = uri:match("^([^?]*)%??(.*)$")
-    if path == "/" or path == "" then
-        return self:_clipboardSend(client, 200,
-            "Bookbridge clipboard receiver.\nUse: GET /clip?text=<your text>")
-    end
-    if path ~= "/clip" then
-        return self:_clipboardSend(client, 404, "Not found")
+    local method = data:match("^(%u+)")
+    -- The typing page: a phone on the same Wi-Fi opens http://<reader>:8090
+    -- and types there (a key, a password, a long address) instead of on the
+    -- reader's keyboard. The form posts back to /type.
+    if (path == "/" or path == "") and method == "GET" then
+        return self:_clipboardSend(client, 200, (PHONE_PAGE:gsub("{{msg}}", "")), "text/html")
     end
     local raw
+    if path == "/type" and method == "POST" then
+        -- the body follows the headers SimpleTCPServer already read
+        local len = tonumber(data:lower():match("\ncontent%-length:%s*(%d+)")) or 0
+        local body = ""
+        if len > 0 and len <= 64 * 1024 then
+            body = client:receive(len) or ""
+        end
+        query = body
+    elseif path ~= "/clip" then
+        return self:_clipboardSend(client, 404, "Not found")
+    end
     for pair in ((query or "") .. "&"):gmatch("([^&]*)&") do
         local k, v = pair:match("^([^=]*)=(.*)$")
         if k == "text" then raw = v break end
     end
-    if not raw or raw == "" then
+    if path == "/type" then
+        local sent = raw and raw ~= ""
+        local msg = sent and '<p class="ok">Sent. It went into the box on your reader.</p>'
+            or '<p class="bad">Nothing to send.</p>'
+        self:_clipboardSend(client, 200, (PHONE_PAGE:gsub("{{msg}}", msg)), "text/html")
+        if not sent then return end
+    elseif not raw or raw == "" then
         return self:_clipboardSend(client, 400, "Missing text parameter")
     end
     -- application/x-www-form-urlencoded: '+' is a space, then decode %XX.
     local text = util.urlDecode((raw:gsub("%+", " "))) or ""
+    -- (a phone's text box adds a trailing newline or space to a pasted key)
+    if path == "/type" then text = text:gsub("^%s+", ""):gsub("%s+$", "") end
     local Device = require("device")
     if Device.input and Device.input.setClipboardText then
         Device.input.setClipboardText(text)
     end
     debugLog("[clipboard] received " .. tostring(#text) .. " chars")
-    self:_clipboardSend(client, 200, "OK")
+    if path ~= "/type" then self:_clipboardSend(client, 200, "OK") end
     -- One-step paste: if a text field is open right now, put the text
     -- straight into it, so a phone share lands in the field with no taps on
     -- the device. The clipboard is set either way, so long-press → Clipboard
     -- → paste still works when nothing is focused (or for a second copy).
     local preview = text
     if #preview > 60 then preview = preview:sub(1, 60) .. "..." end
+    -- typed on the phone page: often a key or a password, so don't show it
+    if path == "/type" then preview = T(_("%1 characters from your phone"), #text) end
     UIManager:nextTick(function()
+        -- the "type on your phone" code has done its job
+        if CLIP.qr and UIManager:isWidgetShown(CLIP.qr) then
+            UIManager:close(CLIP.qr)
+        end
+        CLIP.qr = nil
         local target = findFocusedInputText()
         local pasted = false
         if target then
@@ -11902,8 +11965,39 @@ function Bookbridge:_onClipboardRequest(data, client)
     end)
 end
 
+-- "Type on your phone": shows a code for http://<this reader>:8090 over
+-- whatever text box is open. The phone's page sends what's typed straight
+-- into that box (and this code closes itself when it arrives).
+function Bookbridge:typeOnPhone()
+    self:startClipboardReceiver()
+    local ip = localAddress()
+    if not ip or not CLIP.server then
+        UIManager:show(InfoMessage:new{
+            text = not ip and _("Typing on your phone needs this reader on Wi-Fi. Connect it, then try again.")
+                or T(_("Couldn't open port %1 on this reader for the phone (something else is using it)."), CLIPBOARD_RECEIVER_PORT),
+            timeout = 4,
+        })
+        return
+    end
+    local url = "http://" .. ip .. ":" .. CLIPBOARD_RECEIVER_PORT
+    local Screen = require("device").screen
+    CLIP.qr = HardcoverReviewQR:new{
+        message = T(_("Scan with your phone's camera, or open\n%1\non a phone on the same Wi-Fi.\nWhat you send there goes into the box."), url),
+        qr_text = url,
+        qr_side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.45),
+        timeout = 600,
+    }
+    UIManager:show(CLIP.qr)
+end
+
+-- A dialog button row for it (dialogs add it under their own buttons).
+function Bookbridge:phoneButtonRow()
+    return { { text = _("Type on your phone"), callback = function() self:typeOnPhone() end } }
+end
+
 function Bookbridge:startClipboardReceiver()
-    if self.clipboard_server then return end
+    CLIP.owner = self
+    if CLIP.server then return end
     local Device = require("device")
     if Device:isKindle() then
         os.execute("iptables -A INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
@@ -11919,20 +12013,22 @@ function Bookbridge:startClipboardReceiver()
     local server = SimpleTCPServer:new{
         host = "*",
         port = CLIPBOARD_RECEIVER_PORT,
-        receiveCallback = function(d, c) return self:_onClipboardRequest(d, c) end,
+        receiveCallback = function(d, c) return CLIP.owner:_onClipboardRequest(d, c) end,
     }
     local ok, err = server:start()
     if ok then
-        self.clipboard_server = server
-        self.clipboard_mq = UIManager:insertZMQ(server)
+        CLIP.server = server
+        CLIP.mq = UIManager:insertZMQ(server)
         debugLog("[clipboard] receiver listening on " .. CLIPBOARD_RECEIVER_PORT)
     else
-        self.clipboard_server = nil
+        CLIP.server = nil
         debugLog("[clipboard] failed to start: " .. tostring(err))
     end
 end
 
 function Bookbridge:stopClipboardReceiver()
+    -- (an older instance going away leaves the newer one's receiver alone)
+    if CLIP.owner and CLIP.owner ~= self then return end
     local Device = require("device")
     if Device:isKindle() then
         os.execute("iptables -D INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
@@ -11940,13 +12036,13 @@ function Bookbridge:stopClipboardReceiver()
         os.execute("iptables -D OUTPUT -p tcp --sport " .. CLIPBOARD_RECEIVER_PORT ..
             " -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null")
     end
-    if self.clipboard_mq then
-        UIManager:removeZMQ(self.clipboard_mq)
-        self.clipboard_mq = nil
+    if CLIP.mq then
+        UIManager:removeZMQ(CLIP.mq)
+        CLIP.mq = nil
     end
-    if self.clipboard_server then
-        pcall(function() self.clipboard_server:stop() end)
-        self.clipboard_server = nil
+    if CLIP.server then
+        pcall(function() CLIP.server:stop() end)
+        CLIP.server = nil
     end
 end
 
@@ -12355,7 +12451,7 @@ function Bookbridge:collectStatusRows()
 
     -- Phone clipboard
     add({ text = _("Phone clipboard"),
-        mandatory = self.clipboard_server and T(_("Listening on %1"), CLIPBOARD_RECEIVER_PORT) or _("Not running"),
+        mandatory = CLIP.server and T(_("Listening on %1"), CLIPBOARD_RECEIVER_PORT) or _("Not running"),
         action = function()
             UIManager:show(InfoMessage:new{ text = T(_("Share text from your phone to http://<this device's address>:%1/clip?text=... and it lands in the field you're typing in (or the clipboard)."), CLIPBOARD_RECEIVER_PORT) })
         end })
