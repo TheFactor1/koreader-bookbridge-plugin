@@ -3759,6 +3759,111 @@ local function doClaimFromServer(base_url, code, socks5_proxy)
     return settings
 end
 
+-- ---- Connecting to a book server (bookbridge-server's pairing relay) -------
+-- Device first, nothing typed: find the server on the home network, say
+-- hello (it hands back a 6-character code), show the code, and wait while
+-- the person approves it on the server's page with the server password; the
+-- server then hands over every address and login in one go.
+local CONNECT_PORT = 8086
+
+-- This reader's own address on the network (no packet is sent: connecting a
+-- UDP socket only picks the route).
+local function localAddress()
+    local u = socket.udp()
+    local ok = pcall(function() u:setpeername("192.168.0.1", 9) end)
+    local ip = ok and u:getsockname() or nil
+    u:close()
+    if type(ip) ~= "string" or ip == "0.0.0.0" or ip:match("^127%.") then return nil end
+    return ip
+end
+
+-- Every address on this reader's network (/24) that answers on the
+-- connect port and says it's a Bookbridge server. All connections are tried
+-- at once, so a whole home network takes about a second. Outgoing TCP only:
+-- no firewall on either end has to change.
+local function doDiscoverServers(port)
+    port = port or CONNECT_PORT
+    local me = localAddress()
+    local prefix = me and me:match("^(%d+%.%d+%.%d+)%.%d+$")
+    if not prefix then return {}, _("This reader doesn't seem to be on a home network.") end
+    local pending = {}
+    for i = 1, 254 do
+        -- (this reader's own address too: the server can be the same machine)
+        local host = prefix .. "." .. i
+        local c = socket.tcp()
+        c:settimeout(0)
+        c:connect(host, port)
+        pending[#pending + 1] = { sock = c, host = host }
+    end
+    local open = {}
+    local deadline = socket.gettime() + 1.5
+    while #pending > 0 and socket.gettime() < deadline do
+        local list = {}
+        for _, p in ipairs(pending) do list[#list + 1] = p.sock end
+        local _, writable = socket.select(nil, list, 0.2)
+        local still = {}
+        for _, p in ipairs(pending) do
+            if writable and writable[p.sock] then
+                if p.sock:getpeername() then open[#open + 1] = p.host end
+                p.sock:close()
+            else
+                still[#still + 1] = p
+            end
+        end
+        pending = still
+    end
+    for _, p in ipairs(pending) do p.sock:close() end
+    local found = {}
+    for _, host in ipairs(open) do
+        local body = doHttpGetString("http://" .. host .. ":" .. port .. "/api/hello", nil, "[connect]", 2, 3)
+        local ok, d = pcall(JSON.decode, body or "")
+        if ok and type(d) == "table" and d.bookbridge then
+            found[#found + 1] = { host = host, port = port, name = type(d.name) == "string" and d.name or host,
+                connect = d.connect ~= false }
+        end
+    end
+    return found
+end
+
+local function doConnectHello(host, port, device)
+    local body = JSON.encode({ device = device, host = host })
+    local sink, sink_table = socketutil.table_sink()
+    socketutil:set_timeout(5, 10)
+    local ok, code = pcall(function()
+        return socket.skip(1, http.request{
+            method = "POST", url = "http://" .. host .. ":" .. port .. "/api/connect/hello",
+            headers = { ["Content-Type"] = "application/json", ["Content-Length"] = tostring(#body),
+                        ["User-Agent"] = "bookbridge.koplugin" },
+            source = ltn12.source.string(body), sink = sink,
+        })
+    end)
+    socketutil:reset_timeout()
+    if not ok or code ~= 200 then
+        return nil, T(_("The server at %1 didn't answer (%2). Is it a Bookbridge server, and up to date?"), host, tostring(code))
+    end
+    local dok, d = pcall(JSON.decode, table.concat(sink_table))
+    if not dok or type(d) ~= "table" or not d.code or not d.token then return nil, _("The server's reply couldn't be read.") end
+    return d
+end
+
+-- Waits (up to the code's ten minutes) for the person to approve on the
+-- server's page. Runs in a dismissable subprocess: a tap cancels.
+local function doConnectWait(host, port, token)
+    local deadline = os.time() + 600
+    while os.time() < deadline do
+        local body, code = doHttpGetString("http://" .. host .. ":" .. port .. "/api/connect/claim/" .. token, nil, "[connect]", 5, 8)
+        if code == 200 and body then
+            local ok, d = pcall(JSON.decode, body)
+            if ok and type(d) == "table" and type(d.shelfmark) == "table" then return d.shelfmark end
+            return nil, _("The server's reply couldn't be read.")
+        elseif code == 404 then
+            return nil, _("The code expired. Start again.")
+        end
+        socket.sleep(2)
+    end
+    return nil, _("The code expired. Start again.")
+end
+
 -- Reachability probe for the connection-status screen: does this base URL
 -- answer HTTP at all? Any status -- even 401/403 -- counts as "up"; we're
 -- testing that the service is reachable, not that credentials are right.
@@ -7283,6 +7388,117 @@ function Bookbridge:importFromServer()
     dialog:onShowKeyboard()
 end
 
+-- (for tests: the discovery step on its own, on any port)
+Bookbridge._discoverServers = function(port) return doDiscoverServers(port) end
+
+-- Connect to a book server: find it, show a code, wait for the approval on
+-- the server's page, take every address and login it hands over.
+function Bookbridge:connectServer()
+    local Trapper = require("ui/trapper")
+    Trapper:wrap(function()
+        local completed, found, err = Trapper:dismissableRunInSubprocess(function()
+            return doDiscoverServers(CONNECT_PORT)
+        end, _("Looking for your book server on this network..."))
+        if not completed then return end
+        found = found or {}
+        if #found == 0 then
+            -- not on the same network (or a server too old to answer): ask
+            return self:connectServerByAddress(err)
+        elseif #found == 1 then
+            return self:connectServerAt(found[1].host, found[1].port, found[1].name)
+        end
+        local ButtonDialog = require("ui/widget/buttondialog")
+        local dlg
+        local buttons = {}
+        for _, f in ipairs(found) do
+            buttons[#buttons + 1] = { { text = f.name .. "  (" .. f.host .. ")", callback = function()
+                UIManager:close(dlg)
+                Trapper:wrap(function() self:connectServerAt(f.host, f.port, f.name) end)
+            end } }
+        end
+        dlg = ButtonDialog:new{ title = _("Which book server?"), buttons = buttons }
+        UIManager:show(dlg)
+    end)
+end
+
+-- No server found nearby: type its address (a Tailscale address works too).
+function Bookbridge:connectServerByAddress(why)
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Your book server's address"),
+        description = (why and (why .. "\n\n") or (_("No book server answered on this network.") .. "\n\n"))
+            .. _("Type its address instead, e.g. 192.168.1.20 or a Tailscale address. The server's install shows it."),
+        input = "",
+        buttons = {{
+            { text = _("Cancel"), id = "close", callback = function() UIManager:close(dialog) end },
+            { text = _("Connect"), is_enter_default = true, callback = function()
+                local addr = dialog:getInputText():gsub("%s", ""):gsub("^https?://", ""):gsub("/.*$", "")
+                UIManager:close(dialog)
+                if addr == "" then return end
+                local host, port = addr:match("^([^:]+):(%d+)$")
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:connectServerAt(host or addr, tonumber(port) or CONNECT_PORT, host or addr) end)
+            end },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function Bookbridge:connectServerAt(host, port, name)
+    self:autoTailscaleProxy(host)
+    local Trapper = require("ui/trapper")
+    local device = require("device").model or "Reader"
+    local completed, hello, err = Trapper:dismissableRunInSubprocess(function()
+        return doConnectHello(host, port, device)
+    end, T(_("Contacting %1..."), name or host))
+    if not completed then return end
+    if not hello then
+        UIManager:show(InfoMessage:new{ text = err or _("Couldn't connect.") })
+        return
+    end
+    local code = hello.code:sub(1, 3) .. " " .. hello.code:sub(4)
+    local url = "http://" .. host .. ":" .. port
+    -- (in the log too, for whoever is helping: single use, ten minutes, and
+    -- useless without the server password)
+    logger.info("Bookbridge: connect code", hello.code, "waiting for approval at", url)
+    local waited, settings, werr = Trapper:dismissableRunInSubprocess(function()
+        return doConnectWait(host, port, hello.token)
+    end, T(_("On your phone or computer, open\n\n%1\n\nand enter this code:\n\n%2\n\nwith your server password (the install printed it).\n\nTap to cancel."), url, code))
+    if not waited then return end
+    if not settings then
+        UIManager:show(InfoMessage:new{ text = werr or _("Couldn't connect.") })
+        return
+    end
+    self:applyClaimSettings(settings, T(_("Connected to %1."), hello.name or name or host))
+end
+
+-- Writes what a server handed over (an approved connect, or a wizard code):
+-- only the keys it carries; anything else already set stays.
+function Bookbridge:applyClaimSettings(settings, done_msg)
+    local fields = { "server_url", "username", "password", "cwa_url", "cwa_username", "cwa_password",
+                     "annas_url", "ai_relay_url", "ai_relay_token", "pairing_relay_url" }
+    local applied = 0
+    for _, k in ipairs(fields) do
+        if type(settings[k]) == "string" and settings[k] ~= "" then
+            self[k] = settings[k]
+            applied = applied + 1
+        end
+    end
+    if applied == 0 then
+        UIManager:show(InfoMessage:new{ text = _("The server sent nothing to import.") })
+        return false
+    end
+    self:saveAllSettings()
+    self.session_cookie = nil     -- (a new login: sign in afresh)
+    debugLog("[setup] imported " .. applied .. " setting(s) from the server")
+    if done_msg then UIManager:show(InfoMessage:new{ text = done_msg, timeout = 3 }) end
+    self._status_checks = nil
+    self:showStatus()
+    return true
+end
+
 function Bookbridge:applyServerClaim(addr, code)
     if not addr or addr:gsub("%s", "") == "" or not code or code:gsub("%s", "") == "" then
         UIManager:show(InfoMessage:new{ text = _("Enter both the address and the code.") })
@@ -7301,27 +7517,7 @@ function Bookbridge:applyServerClaim(addr, code)
         UIManager:show(InfoMessage:new{ text = err or _("Couldn't import.") })
         return
     end
-    -- Only the keys the claim actually carries are written; anything already
-    -- set that the claim doesn't mention is left alone.
-    local fields = { "server_url", "cwa_url", "cwa_username", "cwa_password",
-                     "annas_url", "ai_relay_url", "ai_relay_token", "pairing_relay_url" }
-    local applied = 0
-    for _, k in ipairs(fields) do
-        if type(settings[k]) == "string" and settings[k] ~= "" then
-            self[k] = settings[k]
-            applied = applied + 1
-        end
-    end
-    if applied == 0 then
-        UIManager:show(InfoMessage:new{ text = _("The server sent nothing to import.") })
-        return
-    end
-    self:saveAllSettings()
-    debugLog("[setup] imported " .. applied .. " setting(s) from the server")
-    -- Straight to the checked status: it says what now works and what's
-    -- left (the Shelfmark login, which the server can't hand over).
-    self._status_checks = nil
-    self:showStatus()
+    self:applyClaimSettings(settings)
 end
 
 -- One screen: each configured service, whether it answers, and what it
@@ -7915,6 +8111,11 @@ function Bookbridge:addToMainMenu(menu_items)
             {
                 text = _("Status & setup"),
                 callback = function() self:showStatus() end,
+            },
+            {
+                -- find the server, show a code, approve it there: no typing
+                text = _("Connect a book server"),
+                callback = function() self:connectServer() end,
                 separator = true,
             },
             {
@@ -12059,8 +12260,8 @@ function Bookbridge:collectStatusRows()
     local function add(t) rows[#rows + 1] = t end
     local nothing_set = (not self.server_url or self.server_url == "") and (not self.cwa_url or self.cwa_url == "")
     if nothing_set then
-        add({ text = _("Start here: import settings from your server"), mandatory = _("Tap"),
-            action = function() self:importFromServer() end })
+        add({ text = _("Start here: connect to your book server"), mandatory = _("Tap"),
+            action = function() self:connectServer() end })
     end
 
     -- Shelfmark
