@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-05 — v0.5.0, build dd56280
+## 2026-10-05 — v0.5.0, build 13eb62d
 
 - **New**: **Connect a book server.** Bookbridge finds your server on the
   Wi-Fi and shows a code (with a QR code); approve it on your phone with the
@@ -21,6 +21,11 @@ Plain-language notes on what changed and why. Build ids refer to the
   server's setup wizard it worked with.
 - **Fix**: the phone clipboard receiver kept working only for the first
   file browser of a session; it now belongs to KOReader as a whole.
+- **New**: after a download from your library, Bookbridge offers to open
+  the book. New books land in KOReader's home folder (on a Kindle,
+  `documents` unless you chose another), where the file browser opens.
+- **Fix**: updates never go backwards -- a newer build is no longer
+  replaced by an older release.
 - **Security**: text sent to the reader's phone receiver only ever goes into
   the box on top of the screen, never into KOReader's Terminal (where a
   newline would have run it as a command), and the typing page only works
