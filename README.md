@@ -132,7 +132,7 @@ it lands in the box on the reader.
 
 | What you see | What to do |
 |---|---|
-| **No book server answered on this network** | Is the computer on, and the reader on the same Wi-Fi? If the computer has a firewall, the install printed the one line that lets readers in. It then asks for the address: type the one the install printed (just the part like `192.168.1.20`). |
+| **No book server answered on this network** | Is the computer on, and the reader on the same Wi-Fi (not a guest network)? It then asks for the address: type the one the install printed (just the part like `192.168.1.20`). |
 | **No reader is waiting with that code** | Codes work once, for 10 minutes. On the reader, choose **Connect a book server** again. |
 | **Wrong password** on the phone page | It's the server password from Step 1 (also in `~/bookbridge-server/.env` as `BB_PASSWORD`). |
 | **Can't reach** on the status screen | The computer is off or asleep, or you're away from home without Tailscale. |

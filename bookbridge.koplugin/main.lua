@@ -3737,33 +3737,6 @@ end
 -- files, verify, and only then swap -- the manifest path additionally
 -- checks each file's SHA-256, so a truncated or stale-manifest download is
 -- refused outright rather than parse-checked and hoped for.
--- Fetches the settings the setup wizard staged under a short pairing code
--- (see bookbridge-server/setup): GET <base>/claim/<code> returns
--- {"shelfmark": {...}} exactly once -- the wizard invalidates the code on
--- read -- so a failure here often just means the code was already used or
--- expired. Runs inside the caller's Trapper subprocess like every network call.
-local function doClaimFromServer(base_url, code, socks5_proxy)
-    local base = (base_url or ""):gsub("%s", ""):gsub("/*$", "")
-    if base == "" then return nil, _("No server address given.") end
-    if not base:match("^https?://") then base = "http://" .. base end
-    -- The dialog asks for just the address; the wizard listens on 8090.
-    -- Without this a bare "100.x.y.z" went to port 80 and never found it.
-    if base:match("^http://") and not base:match("^http://[^/]+:%d+") then base = base:gsub("^(http://[^/]+)", "%1:8090") end
-    local url = base .. "/claim/" .. (code or ""):gsub("%s", "")
-    local body, http_code, err = doHttpGetString(url, socks5_proxy, "[pair]", 8, 15)
-    if not body then
-        if http_code == 404 then
-            return nil, _("That code wasn't found -- it may have expired or already been used. Make a new one in the wizard.")
-        end
-        return nil, err or T(_("Couldn't reach the setup server (HTTP %1)."), tostring(http_code))
-    end
-    local ok, decoded = pcall(JSON.decode, body)
-    local settings = ok and type(decoded) == "table" and decoded.shelfmark
-    if type(settings) ~= "table" then
-        return nil, _("The server's reply couldn't be read.")
-    end
-    return settings
-end
 
 -- ---- Connecting to a book server (bookbridge-server's pairing relay) -------
 -- Device first, nothing typed: find the server on the home network, say
@@ -3832,18 +3805,24 @@ local function doDiscoverServers(port)
     return found
 end
 
-local function doConnectHello(host, port, device)
+local function doConnectHello(host, port, device, socks5_proxy)
     local body = JSON.encode({ device = device, host = host })
     local sink, sink_table = socketutil.table_sink()
+    local url = "http://" .. host .. ":" .. port .. "/api/connect/hello"
+    local request = {
+        method = "POST", url = url,
+        headers = { ["Content-Type"] = "application/json", ["Content-Length"] = tostring(#body),
+                    ["User-Agent"] = "bookbridge.koplugin" },
+        source = ltn12.source.string(body), sink = sink,
+    }
+    -- (a Kindle reaches a Tailscale address only through Tailscale's proxy)
+    local proxy = proxyForUrl(url, socks5_proxy)
+    local proxy_host, proxy_port = (proxy or ""):match("^([^:]+):(%d+)$")
+    if proxy_host then
+        request.create = function() return makeSocks5Socket(proxy_host, tonumber(proxy_port)) end
+    end
     socketutil:set_timeout(5, 10)
-    local ok, code = pcall(function()
-        return socket.skip(1, http.request{
-            method = "POST", url = "http://" .. host .. ":" .. port .. "/api/connect/hello",
-            headers = { ["Content-Type"] = "application/json", ["Content-Length"] = tostring(#body),
-                        ["User-Agent"] = "bookbridge.koplugin" },
-            source = ltn12.source.string(body), sink = sink,
-        })
-    end)
+    local ok, code = pcall(function() return socket.skip(1, http.request(request)) end)
     socketutil:reset_timeout()
     if not ok or code ~= 200 then
         return nil, T(_("The server at %1 didn't answer (%2). Is it a Bookbridge server, and up to date?"), host, tostring(code))
@@ -3855,10 +3834,10 @@ end
 
 -- Waits (up to the code's ten minutes) for the person to approve on the
 -- server's page. Runs in a dismissable subprocess: a tap cancels.
-local function doConnectWait(host, port, token)
+local function doConnectWait(host, port, token, socks5_proxy)
     local deadline = os.time() + 600
     while os.time() < deadline do
-        local body, code = doHttpGetString("http://" .. host .. ":" .. port .. "/api/connect/claim/" .. token, nil, "[connect]", 5, 8)
+        local body, code = doHttpGetString("http://" .. host .. ":" .. port .. "/api/connect/claim/" .. token, socks5_proxy, "[connect]", 5, 8)
         if code == 200 and body then
             local ok, d = pcall(JSON.decode, body)
             if ok and type(d) == "table" and type(d.shelfmark) == "table" then return d.shelfmark end
@@ -7359,41 +7338,6 @@ function Bookbridge:refreshBookMetadata(file)
 end
 
 -- Mirrors syncLibrary's Trapper-subprocess wrapping above.
--- Two-field claim of a wizard-staged config (address + code). The counterpart
--- to the setup wizard's pairing screen: it fetches /claim/<code> and writes
--- whatever settings the server put there, closing the loop the wizard opens.
-function Bookbridge:importFromServer()
-    local MultiInputDialog = require("ui/widget/multiinputdialog")
-    local prefill = self.server_url and self.server_url:match("^(https?://[^:/]+)") or ""
-    local dialog
-    dialog = MultiInputDialog:new{
-        title = _("Import from server"),
-        description = _("Run the setup wizard on your server (github.com/TheFactor1/bookbridge-server), then enter the server's address and the 6-character code the wizard shows."),
-        fields = {
-            { text = prefill:gsub("^https?://", ""), hint = _("Server address, e.g. 100.x.y.z (the setup wizard's, port 8090)") },
-            { text = "", hint = _("6-character code") },
-        },
-        buttons = {{
-            { text = _("Cancel"), id = "close", callback = function() UIManager:close(dialog) end },
-            {
-                text = _("Import"),
-                is_enter_default = true,
-                callback = function()
-                    local fields = dialog:getFields()
-                    local addr, code = fields[1], fields[2]
-                    UIManager:close(dialog)
-                    -- Wrapped: this fires from the UI loop, and applyServerClaim
-                    -- runs a Trapper subprocess that needs a coroutine to yield
-                    -- to (see the Trapper audit).
-                    local Trapper = require("ui/trapper")
-                    Trapper:wrap(function() self:applyServerClaim(addr, code) end)
-                end,
-            },
-        }},
-    }
-    UIManager:show(dialog)
-    dialog:onShowKeyboard()
-end
 
 -- (for tests: the discovery step on its own, on any port)
 Bookbridge._discoverServers = function(port) return doDiscoverServers(port) end
@@ -7420,6 +7364,10 @@ function Bookbridge:connectServer()
     for _, f in ipairs(found) do
         buttons[#buttons + 1] = { { text = f.name .. "  (" .. f.host .. ")", callback = function()
             UIManager:close(dlg)
+            if not f.connect then
+                UIManager:show(InfoMessage:new{ text = T(_("%1 can't connect readers yet: it has no server password. Run its install command again (it keeps everything) to set one."), f.name) })
+                return
+            end
             Trapper:wrap(function() self:connectServerAt(f.host, f.port, f.name) end)
         end } }
     end
@@ -7535,10 +7483,11 @@ ConnectCodeWidget.onAnyKeyPressed = ConnectCodeWidget.onTapClose
 
 function Bookbridge:connectServerAt(host, port, name)
     self:autoTailscaleProxy(host)
+    local proxy = self.socks5_proxy
     local Trapper = require("ui/trapper")
     local device = require("device").model or "Reader"
     local completed, hello, err = Trapper:dismissableRunInSubprocess(function()
-        return doConnectHello(host, port, device)
+        return doConnectHello(host, port, device, proxy)
     end, T(_("Contacting %1..."), name or host))
     if not completed then return end
     if not hello then
@@ -7557,7 +7506,7 @@ function Bookbridge:connectServerAt(host, port, name)
     UIManager:show(screen)
     UIManager:forceRePaint()
     local waited, settings, werr = Trapper:dismissableRunInSubprocess(function()
-        return doConnectWait(host, port, hello.token)
+        return doConnectWait(host, port, hello.token, proxy)
     end, screen)
     UIManager:close(screen)
     if not waited then return end
@@ -7593,26 +7542,6 @@ function Bookbridge:applyClaimSettings(settings, done_msg)
     return true
 end
 
-function Bookbridge:applyServerClaim(addr, code)
-    if not addr or addr:gsub("%s", "") == "" or not code or code:gsub("%s", "") == "" then
-        UIManager:show(InfoMessage:new{ text = _("Enter both the address and the code.") })
-        return
-    end
-    -- A brand-new reader has no proxy yet, and nothing configured for the
-    -- auto-fill to go on: judge it from the address being imported from.
-    self:autoTailscaleProxy(addr)
-    local socks5_proxy = self.socks5_proxy
-    local Trapper = require("ui/trapper")
-    local completed, settings, err = Trapper:dismissableRunInSubprocess(function()
-        return doClaimFromServer(addr, code, socks5_proxy)
-    end, _("Fetching settings..."))
-    if not completed then return end
-    if not settings then
-        UIManager:show(InfoMessage:new{ text = err or _("Couldn't import.") })
-        return
-    end
-    self:applyClaimSettings(settings)
-end
 
 -- One screen: each configured service, whether it answers, and what it
 -- enables. Read-only, run only when opened -- never on a timer (battery).
@@ -11905,7 +11834,7 @@ local CLIPBOARD_RECEIVER_PORT = tonumber(os.getenv("BOOKBRIDGE_CLIPBOARD_PORT"))
 -- Bookbridge each time the file browser or a book opens, and the port can
 -- only be bound once. `owner` is the newest instance, which answers.
 -- (Kept in package.loaded so two installed copies share it too.)
-local CLIP = package.loaded["bookbridge.clipboard_receiver"] or { server = nil, mq = nil, owner = nil, qr = nil }
+local CLIP = package.loaded["bookbridge.clipboard_receiver"] or { server = nil, mq = nil, owner = nil, qr = nil, session = nil, fw = nil }
 package.loaded["bookbridge.clipboard_receiver"] = CLIP
 
 -- The page a phone gets at http://<reader>:8090. Plain HTML, no scripts
@@ -11914,20 +11843,25 @@ local PHONE_PAGE = [==[<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Type for your reader</title>
 <style>
-body{font:17px/1.4 system-ui,sans-serif;margin:0;padding:20px;background:#f6f5f2;color:#1b1b1b}
-main{max-width:520px;margin:0 auto}
-h1{font-size:22px;margin:0 0 6px}
-p{margin:0 0 14px;color:#555}
-textarea{width:100%;box-sizing:border-box;min-height:120px;font:17px/1.4 ui-monospace,monospace;padding:12px;border:2px solid #1b1b1b;border-radius:8px;background:#fff}
-button{margin-top:12px;width:100%;padding:14px;font:600 18px system-ui,sans-serif;color:#fff;background:#1b1b1b;border:0;border-radius:8px}
-.ok{color:#17602a;font-weight:600}.bad{color:#9b1c1c;font-weight:600}
+:root{color-scheme:light dark;--ink:#1d1b18;--soft:#6b665f;--bg:#f7f5f0;--card:#fff;--line:#d9d4ca;--ok:#2e6b3a;--bad:#9a2f22}
+@media (prefers-color-scheme:dark){:root{--ink:#ece8e1;--soft:#a39e95;--bg:#191816;--card:#22211e;--line:#3a3833;--ok:#7cc48a;--bad:#e58b7d}}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.5 system-ui,sans-serif}
+main{max-width:28rem;margin:0 auto;padding:2.5rem 1rem}
+h1{font-size:1.5rem;margin:0 0 .25rem}
+p{color:var(--soft);margin:.25rem 0 1.5rem}
+form{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1.25rem}
+textarea{width:100%;box-sizing:border-box;min-height:7rem;font:1.05rem/1.4 ui-monospace,monospace;padding:.6rem .7rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+button{margin-top:1rem;width:100%;font:600 1rem system-ui,sans-serif;padding:.75rem;border:0;border-radius:6px;background:var(--ink);color:var(--bg)}
+.msg{padding:.8rem 1rem;border-radius:8px;margin:0 0 1rem;border:1px solid var(--line);background:var(--card)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
 </style></head><body><main>
 <h1>Type for your reader</h1>
-<p>Whatever you send goes straight into the box that's open on your reader. Paste a key, a password or a long address here instead of typing it there.</p>
+<p>What you send goes into the box that's open on the reader. Paste a key, a password or a long address here instead of typing it there.</p>
 {{msg}}
-<form method="post" action="/type">
+<form method="post" action="/type"{{hide}}>
+<input type="hidden" name="t" value="{{t}}">
 <textarea name="text" autofocus autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type or paste here"></textarea>
-<button type="submit">Send to reader</button>
+<button type="submit">Send to the reader</button>
 </form>
 </main></body></html>]==]
 
@@ -11948,26 +11882,28 @@ function Bookbridge:_clipboardSend(client, code, body, content_type)
     pcall(function() CLIP.server:send(response, client) end)
 end
 
--- The text field the reader is typing into right now, if any -- so a phone
--- share can land straight in it instead of parking in the clipboard for a
--- long-press → Clipboard → paste. Walks the window stack top-down: the
--- on-screen keyboard knows exactly which InputText it serves (`inputbox`);
--- an InputDialog carries its field as `_input_widget`; a bare focused
--- InputText is checked last. Duck-typed on addChars so it never depends on
--- a specific class. nil when nothing is open, and the clipboard is the
--- fallback.
+-- The text box phone text may go into: the top window's own field (the
+-- on-screen keyboard's box, or a dialog's focused field) -- never one buried
+-- under another window, and never KOReader's Terminal, whose box runs what
+-- it is given as shell commands. Skips the "type on your phone" code itself.
+-- Duck-typed on addChars, so it doesn't depend on a specific class. nil
+-- when there is none, and the clipboard is the fallback.
 local function findFocusedInputText()
     local stack = UIManager._window_stack
     if type(stack) ~= "table" then return nil end
     for i = #stack, 1, -1 do
         local win = stack[i]
         local w = type(win) == "table" and (win.widget or win) or nil
-        if type(w) == "table" then
+        if type(w) == "table" and w ~= CLIP.qr then
             local box = w.inputbox
-            if type(box) == "table" and type(box.addChars) == "function" then return box end
-            local iw = w._input_widget
-            if type(iw) == "table" and type(iw.addChars) == "function" then return iw end
-            if type(w.addChars) == "function" and w.focused then return w end
+            if not (type(box) == "table" and type(box.addChars) == "function") then
+                box = w._input_widget
+                if not (type(box) == "table" and type(box.addChars) == "function") then
+                    box = (type(w.addChars) == "function" and w.focused) and w or nil
+                end
+            end
+            if box and box.strike_callback then return nil end
+            return box
         end
     end
     return nil
@@ -11981,51 +11917,80 @@ function Bookbridge:_onClipboardRequest(data, client)
     end
     local path, query = uri:match("^([^?]*)%??(.*)$")
     local method = data:match("^(%u+)")
-    -- The typing page: a phone on the same Wi-Fi opens http://<reader>:8090
-    -- and types there (a key, a password, a long address) instead of on the
-    -- reader's keyboard. The form posts back to /type.
-    if (path == "/" or path == "") and method == "GET" then
-        return self:_clipboardSend(client, 200, (PHONE_PAGE:gsub("{{msg}}", "")), "text/html")
-    end
-    local raw
-    if path == "/type" and method == "POST" then
-        -- the body follows the headers SimpleTCPServer already read
-        local len = tonumber(data:lower():match("\ncontent%-length:%s*(%d+)")) or 0
-        local body = ""
-        if len > 0 and len <= 64 * 1024 then
-            body = client:receive(len) or ""
+    local function param(q, name)
+        for pair in ((q or "") .. "&"):gmatch("([^&]*)&") do
+            local k, v = pair:match("^([^=]*)=(.*)$")
+            -- application/x-www-form-urlencoded: '+' is a space, then %XX
+            if k == name then return util.urlDecode((v:gsub("%+", " "))) or "" end
         end
-        query = body
-    elseif path ~= "/clip" then
+    end
+    -- The typing page (a phone on the same Wi-Fi types a key, a password or
+    -- a long address there instead of on the reader's keyboard) only works
+    -- with the token in the code the reader showed: other devices on the
+    -- network, and other web pages the phone has open, can't use it.
+    local session = CLIP.session
+    if session and os.time() > session.expires then
+        CLIP.session, session = nil, nil
+    end
+    local function page(msg, token)
+        local html = PHONE_PAGE:gsub("{{msg}}", msg or ""):gsub("{{t}}", token or "")
+            :gsub("{{hide}}", token and "" or " hidden")
+        return self:_clipboardSend(client, 200, html, "text/html")
+    end
+    local no_session = '<div class="msg bad">This page works from the code on your reader: open a box there, tap <b>Type on your phone</b> and scan its code again.</div>'
+    if (path == "/" or path == "") and method == "GET" then
+        local t = param(query, "t")
+        if session and t == session.token then return page(nil, t) end
+        return page(no_session)
+    end
+    local text
+    if path == "/type" and method == "POST" then
+        -- the body follows the headers the server already read
+        local len = tonumber(data:lower():match("\ncontent%-length:%s*(%d+)")) or 0
+        if len > 64 * 1024 then
+            return page('<div class="msg bad">That is too long to send.</div>', session and session.token)
+        end
+        local body = ""
+        if len > 0 then
+            local got, _err, partial = client:receive(len)
+            body = got or partial or ""
+        end
+        if not (session and param(body, "t") == session.token) then return page(no_session) end
+        text = param(body, "text") or ""
+    elseif path == "/clip" then
+        -- (share shortcuts: GET /clip?text=..., no page)
+        text = param(query, "text")
+        if not text or text == "" then
+            return self:_clipboardSend(client, 400, "Missing text parameter")
+        end
+    else
         return self:_clipboardSend(client, 404, "Not found")
     end
-    for pair in ((query or "") .. "&"):gmatch("([^&]*)&") do
-        local k, v = pair:match("^([^=]*)=(.*)$")
-        if k == "text" then raw = v break end
-    end
-    if path == "/type" then
-        local sent = raw and raw ~= ""
-        local msg = sent and '<p class="ok">Sent. It went into the box on your reader.</p>'
-            or '<p class="bad">Nothing to send.</p>'
-        self:_clipboardSend(client, 200, (PHONE_PAGE:gsub("{{msg}}", msg)), "text/html")
-        if not sent then return end
-    elseif not raw or raw == "" then
-        return self:_clipboardSend(client, 400, "Missing text parameter")
-    end
-    -- application/x-www-form-urlencoded: '+' is a space, then decode %XX.
-    local text = util.urlDecode((raw:gsub("%+", " "))) or ""
+    -- Phone line endings, and no control characters: a newline in a one-line
+    -- box would press its Enter.
+    text = text:gsub("\r\n?", "\n"):gsub("[%z\1-\9\11-\31\127]", "")
     -- (a phone's text box adds a trailing newline or space to a pasted key)
     if path == "/type" then text = text:gsub("^%s+", ""):gsub("%s+$", "") end
+    local target = findFocusedInputText()
+    -- one-line box: a key that wrapped on the phone arrives in one piece
+    if target and not target.allow_newline then text = text:gsub("\n", "") end
+    if path == "/type" then
+        if text == "" then
+            return page('<div class="msg bad">Nothing to send -- type something first.</div>', session.token)
+        end
+        page(target and '<div class="msg ok">Sent. It\'s in the box on your reader.</div>'
+            or '<div class="msg ok">Sent -- but no box is open on the reader, so it\'s on its clipboard: hold a box there and choose Paste.</div>',
+            session.token)
+    else
+        self:_clipboardSend(client, 200, "OK")
+    end
+    -- Into the open box; the clipboard only when there is none, or for a
+    -- share (typed keys and passwords don't linger on the clipboard).
     local Device = require("device")
-    if Device.input and Device.input.setClipboardText then
+    if (path ~= "/type" or not target) and Device.input and Device.input.setClipboardText then
         Device.input.setClipboardText(text)
     end
     debugLog("[clipboard] received " .. tostring(#text) .. " chars")
-    if path ~= "/type" then self:_clipboardSend(client, 200, "OK") end
-    -- One-step paste: if a text field is open right now, put the text
-    -- straight into it, so a phone share lands in the field with no taps on
-    -- the device. The clipboard is set either way, so long-press → Clipboard
-    -- → paste still works when nothing is focused (or for a second copy).
     local preview = text
     if #preview > 60 then preview = preview:sub(1, 60) .. "..." end
     -- typed on the phone page: often a key or a password, so don't show it
@@ -12036,10 +12001,10 @@ function Bookbridge:_onClipboardRequest(data, client)
             UIManager:close(CLIP.qr)
         end
         CLIP.qr = nil
-        local target = findFocusedInputText()
+        local box = findFocusedInputText()
         local pasted = false
-        if target then
-            pasted = pcall(function() target:addChars(text) end)
+        if box then
+            pasted = pcall(function() box:addChars(text) end)
         end
         local msg = pasted and T(_("Pasted: %1"), preview) or T(_("Clipboard: %1"), preview)
         local ok = pcall(function()
@@ -12065,10 +12030,22 @@ function Bookbridge:typeOnPhone()
         })
         return
     end
-    local url = "http://" .. ip .. ":" .. CLIPBOARD_RECEIVER_PORT
+    -- a fresh token for the page, good for ten minutes
+    local f = io.open("/dev/urandom", "rb")
+    local bytes = f and f:read(8)
+    if f then f:close() end
+    if not bytes or #bytes < 8 then bytes = tostring(math.random()) .. tostring(os.time()) end
+    local token = (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end)):sub(1, 16)
+    CLIP.session = { token = token, expires = os.time() + 600 }
+    local url = "http://" .. ip .. ":" .. CLIPBOARD_RECEIVER_PORT .. "/?t=" .. token
+    -- say which box it fills (in a dialog with several, the focused one)
+    local box = findFocusedInputText()
+    local where = box and type(box.hint) == "string" and box.hint ~= "" and box.hint
     local Screen = require("device").screen
     CLIP.qr = HardcoverReviewQR:new{
-        message = T(_("Scan with your phone's camera, or open\n%1\non a phone on the same Wi-Fi.\nWhat you send there goes into the box."), url),
+        message = (where and T(_("Fills: %1"), where) .. "\n\n" or "")
+            .. _("Scan this with your phone's camera (on the same Wi-Fi) and type or paste there.")
+            .. (where and "\n" .. _("To fill a different box, tap it first.") or ""),
         qr_text = url,
         qr_side = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.45),
         timeout = 600,
@@ -12082,15 +12059,11 @@ function Bookbridge:phoneButtonRow()
 end
 
 function Bookbridge:startClipboardReceiver()
+    -- (a closed instance -- e.g. a wake's delayed start after a book opened
+    -- -- must not take the receiver back from the live one)
+    if self._closed then return end
     CLIP.owner = self
     if CLIP.server then return end
-    local Device = require("device")
-    if Device:isKindle() then
-        os.execute("iptables -A INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
-            " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null")
-        os.execute("iptables -A OUTPUT -p tcp --sport " .. CLIPBOARD_RECEIVER_PORT ..
-            " -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null")
-    end
     local ok_srv, SimpleTCPServer = pcall(require, "ui/message/simpletcpserver")
     if not ok_srv then
         debugLog("[clipboard] no simpletcpserver: " .. tostring(SimpleTCPServer))
@@ -12101,26 +12074,56 @@ function Bookbridge:startClipboardReceiver()
         port = CLIPBOARD_RECEIVER_PORT,
         receiveCallback = function(d, c) return CLIP.owner:_onClipboardRequest(d, c) end,
     }
-    local ok, err = server:start()
-    if ok then
-        CLIP.server = server
-        CLIP.mq = UIManager:insertZMQ(server)
-        debugLog("[clipboard] receiver listening on " .. CLIPBOARD_RECEIVER_PORT)
-    else
-        CLIP.server = nil
-        debugLog("[clipboard] failed to start: " .. tostring(err))
+    -- Reading a request: a second at most and a few lines, then it's dropped.
+    -- SimpleTCPServer's own loop waits as long as lines keep trickling in,
+    -- on the UI thread, so a slow sender could freeze the reader.
+    server.waitEvent = function(srv)
+        local client = srv.server:accept()
+        if not client then return end
+        client:settimeout(0.1, "t")
+        local lines, size, deadline = {}, 0, socket.gettime() + 1
+        while true do
+            local line = client:receive("*l")
+            size = size + #(line or "")
+            if not line or #lines >= 40 or size > 16384 or socket.gettime() > deadline then
+                client:close()
+                return
+            end
+            lines[#lines + 1] = line
+            if line == "" then
+                client:settimeout(0.5, "t")
+                return srv.receiveCallback(table.concat(lines, "\r\n"), client)
+            end
+        end
     end
+    local ok, err = server:start()
+    if not ok then
+        debugLog("[clipboard] failed to start: " .. tostring(err))
+        return
+    end
+    CLIP.server = server
+    CLIP.mq = UIManager:insertZMQ(server)
+    -- (the firewall opens only once the port is ours, and once)
+    local Device = require("device")
+    if Device:isKindle() and not CLIP.fw then
+        os.execute("iptables -A INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
+            " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null")
+        os.execute("iptables -A OUTPUT -p tcp --sport " .. CLIPBOARD_RECEIVER_PORT ..
+            " -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null")
+        CLIP.fw = true
+    end
+    debugLog("[clipboard] receiver listening on " .. CLIPBOARD_RECEIVER_PORT)
 end
 
 function Bookbridge:stopClipboardReceiver()
     -- (an older instance going away leaves the newer one's receiver alone)
     if CLIP.owner and CLIP.owner ~= self then return end
-    local Device = require("device")
-    if Device:isKindle() then
+    if CLIP.fw then
         os.execute("iptables -D INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
             " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null")
         os.execute("iptables -D OUTPUT -p tcp --sport " .. CLIPBOARD_RECEIVER_PORT ..
             " -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null")
+        CLIP.fw = nil
     end
     if CLIP.mq then
         UIManager:removeZMQ(CLIP.mq)
@@ -12130,9 +12133,11 @@ function Bookbridge:stopClipboardReceiver()
         pcall(function() CLIP.server:stop() end)
         CLIP.server = nil
     end
+    CLIP.session = nil
 end
 
 function Bookbridge:onCloseWidget()
+    self._closed = true
     self:stopClipboardReceiver()
 end
 
