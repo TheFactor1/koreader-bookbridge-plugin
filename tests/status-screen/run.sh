@@ -14,7 +14,7 @@ M="$REPO/bookbridge.koplugin/main.lua"
   awk '/^-- ===== CO begin/{f=1} f{print} f&&/^-- ===== CO end/{exit}' "$M"
   awk '/^-- ===== SRC begin/{f=1} f{print} f&&/^-- ===== SRC end/{exit}' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in libraryDir openLibraryFolder collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide applyAnnasExtra companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in libraryDir openLibraryFolder showStartHere collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide applyAnnasExtra companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -33,6 +33,8 @@ local shown
 local msgs = {}
 UIManager = { show = function(_s, w) shown = w; msgs[#msgs + 1] = w end, close = function() end }
 InfoMessage = { new = function(_s, t) return t end }
+BD = nil
+package.loaded["ui/widget/buttondialog"] = { new = function(_s, t) BD = t; return t end }
 Menu = { new = function(_s, t) return t end }
 shelfmarkCredentialKey = function(u, n, p) return tostring(u) .. "|" .. tostring(n) .. "|" .. tostring(p) end
 local NET = {}
@@ -70,6 +72,7 @@ local function ck(c, m) if c then pass = pass + 1; print("PASS  " .. m) else fai
 local function bb(t)
     t = t or {}
     t.defaultDownloadDir = function() return "/mnt/us/books" end
+    if t.sourcesConfigured == nil then t.sourcesConfigured = function() return false end end
     t.shelfmarkLoginKnownBad = function(self) return self._shelfmark_login_rejected ~= nil and self._shelfmark_login_rejected == shelfmarkCredentialKey(self.server_url, self.username, self.password) end
     return setmetatable(t, { __index = Bookbridge })
 end
@@ -92,6 +95,28 @@ local b = bb({ server_url = "http://s", username = "matt", password = "p", cwa_u
 package.loaded["bookbridge.clipboard_receiver"].server = {}
 rows = b:collectStatusRows()
 ck(not rows[1].text:find("Start here", 1, true), "configured: no 'Start here' row")
+-- the no-server path first: Start here opens the source picker, the server is an optional row
+do
+    local fresh2 = bb({ ui = {} })
+    local r2 = fresh2:collectStatusRows()
+    ck(r2[1].text == "Start here: no server needed", "fresh install: 'Start here: no server needed' is the first row")
+    BD = nil; r2[1].action()
+    local labels = {}
+    for _, brow in ipairs(BD and BD.buttons or {}) do labels[#labels + 1] = brow[1].text end
+    ck(labels[1] and labels[1]:find("Z%-Library") and labels[2]:find("Anna's Archive") and labels[3]:find("Readest")
+       and labels[4]:find("another reader") and labels[5]:find("optional") and labels[6] == "Later",
+       "Start here: Z-Library, Anna's key, Readest, another reader, then the optional server, then Later")
+    ck(row(r2, "Optional: connect a book server") ~= nil, "...and 'Optional: connect a book server' is a row of its own")
+    ck(row(r2, "Shelfmark").text:find("(optional)", 1, true) and row(r2, "Calibre-Web").text:find("(optional)", 1, true), "Shelfmark and Calibre-Web rows say (optional)")
+    local with_src = bb({ ui = {}, sourcesConfigured = function() return true end })
+    local r3 = with_src:collectStatusRows()
+    ck(not r3[1].text:find("Start here", 1, true) and row(r3, "Optional: connect a book server") ~= nil, "a source set up, no server: no Start here, the optional server row stays")
+    local with_srv = bb({ ui = {}, server_url = "http://s", username = "u", password = "p" })
+    ck(row(with_srv:collectStatusRows(), "Optional: connect a book server") == nil, "a server connected: the optional row is gone")
+    local anna_i, hc_i
+    for i, r in ipairs(r2) do if r.text:find("Anna's", 1, true) then anna_i = i end if r.text:find("Shelfmark", 1, true) then hc_i = i end end
+    ck(anna_i and hc_i and anna_i < hc_i, "Anna's Archive (a source) is listed before the servers")
+end
 ck(row(rows, "Shelfmark").mandatory == "Saved", "Shelfmark: 'Saved' until checked (not the ambiguous 'Set up')")
 ck(row(rows, "Calibre-Web").mandatory == "3 books synced", "Calibre-Web: shows the synced book count")
 ck(row(rows, "Hardcover").mandatory == "Syncing", "Hardcover: 'Syncing'")
@@ -265,6 +290,7 @@ local fresh = bb({ ui = {} })
 fresh:maybeShowFirstRunSetup(); fresh:maybeShowFirstRunSetup()
 ck(#sched == 1, "first start, nothing configured: Status & setup opens once")
 bb({ ui = {}, server_url = "http://s" }):maybeShowFirstRunSetup()
+bb({ ui = {}, sourcesConfigured = function() return true end }):maybeShowFirstRunSetup()
 bb({ ui = { document = {} } }):maybeShowFirstRunSetup()
 ck(#sched == 1, "configured, or in a book: never")
 
@@ -274,7 +300,7 @@ package.loaded["ui/widget/textviewer"] = { new = function(_s, x) TV = x; return 
 local hg = row(bb({ server_url = "http://s" }):collectStatusRows(), "What you need to host")
 ck(hg ~= nil, "Status & setup has a 'What you need to host' line")
 hg.action()
-ck(TV and TV.text:find("REQUIRED", 1, true) and TV.text:find("Shelfmark", 1, true) and TV.text:find("bookbridge-server", 1, true)
+ck(TV and TV.text:find("NOTHING TO HOST", 1, true) and TV.text:find("Z-Library", 1, true) and TV.text:find("Anna's Archive", 1, true) and TV.text:find("bookbridge-server", 1, true) and not TV.text:find("REQUIRED", 1, true)
    and TV.text:find("annas-archive-api", 1, true) and TV.text:find("Readest", 1, true), "...which names every piece, what's required, and the one-command stack")
 -- The Shelfmark dialog asks only for what a new user needs
 bb({ server_url = "http://s", username = "u", password = "p" }):editServerSettings()

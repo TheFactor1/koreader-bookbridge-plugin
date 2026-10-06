@@ -8487,46 +8487,6 @@ function Bookbridge:applyClaimSettings(settings, done_msg)
 end
 
 
--- One screen: each configured service, whether it answers, and what it
--- enables. Read-only, run only when opened -- never on a timer (battery).
-function Bookbridge:showConnectionStatus()
-    local socks5_proxy = self.socks5_proxy
-    local services = {}
-    local function add(url, name, enables)
-        if url and url ~= "" then services[#services + 1] = { url = url, name = name, enables = enables } end
-    end
-    add(self.server_url, _("Shelfmark server"), _("search & requests"))
-    -- Not "Calibre-Web-Automated": this talks to whichever Calibre-Web fork
-    -- the URL points at (plain Calibre-Web, CWA, NextGen), and naming one of
-    -- them is wrong for everybody running the others.
-    add(self.cwa_url, _("Calibre-Web"), _("library sync"))
-    add(self.annas_url, _("Anna's Archive API"), _("Anna's Archive as primary source"))
-    add(self.ai_relay_url, _("AI relay"), _("match suggestions"))
-    if #services == 0 then
-        UIManager:show(InfoMessage:new{ text = _("Nothing is configured yet -- use 'Connect a book server' or Settings.") })
-        return
-    end
-    local Trapper = require("ui/trapper")
-    local completed, results = Trapper:dismissableRunInSubprocess(function()
-        local out = {}
-        for i, sv in ipairs(services) do out[i] = doTestService(sv.url, socks5_proxy) and 1 or 0 end
-        return out
-    end, _("Checking services..."))
-    if not completed then return end
-    local lines = {}
-    for i, sv in ipairs(services) do
-        local up = results[i] == 1
-        lines[#lines + 1] = string.format("%s  %s\n      %s -- %s",
-            up and "[up]" or "[--]", sv.name,
-            up and _("reachable") or _("no response"), sv.enables)
-    end
-    local TextViewer = require("ui/widget/textviewer")
-    UIManager:show(TextViewer:new{
-        title = _("Connection status"),
-        text = table.concat(lines, "\n\n"),
-        justified = false,
-    })
-end
 
 function Bookbridge:checkForUpdate()
     local Trapper = require("ui/trapper")
@@ -14035,39 +13995,25 @@ function Bookbridge:collectStatusRows()
     if checks and os.time() - (checks.at or 0) > STATUS_CHECK_MAX_AGE then checks = nil end
     checks = checks or {}
     local function add(t) rows[#rows + 1] = t end
-    local nothing_set = (not self.server_url or self.server_url == "") and (not self.cwa_url or self.cwa_url == "")
+    -- The pieces that need nothing hosted come first; a server of your own
+    -- is the optional add-on further down.
+    local no_server = (not self.server_url or self.server_url == "")
+    local nothing_set = no_server and (not self.cwa_url or self.cwa_url == "") and not self:sourcesConfigured()
     if nothing_set then
-        add({ text = _("Start here: connect to your book server"), mandatory = _("Tap"),
-            action = function()
-                local Trapper = require("ui/trapper")
-                Trapper:wrap(function() self:connectServer() end)
-            end })
+        add({ text = _("Start here: no server needed"), mandatory = _("Tap"),
+            action = function() self:showStartHere() end })
     end
 
-    -- Shelfmark
+    -- Sources
     self:companionStatusRows(add)
     add({ text = _("Sources -- where books come from"), mandatory = self:sourcesSummary(),
         action = function() self:showSourcesDialog() end })
-
-    local sm, sm_act = nil, function() self:editServerSettings() end
-    if not self.server_url or self.server_url == "" then sm = _("Not set up")
-    elseif not self.username or self.username == "" then sm = _("Needs login")
-    else
-        sm = statusCheckedLabel(checks.shelfmark, _("Signed in"))
-            or (self:shelfmarkLoginKnownBad() and _("Wrong login")) or _("Saved")
-    end
-    add({ text = _("Shelfmark -- search & requests"), mandatory = sm, action = sm_act })
-
-    -- Calibre-Web
-    local cw
-    if not self.cwa_url or self.cwa_url == "" then cw = _("Not set up")
-    elseif not self.cwa_username or self.cwa_username == "" then cw = _("Needs login")
-    else
-        local n = 0
-        for _unused in pairs(loadSyncRegistry() or {}) do n = n + 1 end
-        cw = statusCheckedLabel(checks.cwa, T(_("Signed in, %1 books"), n)) or T(_("%1 books synced"), n)
-    end
-    add({ text = _("Calibre-Web -- your library"), mandatory = cw, action = function() self:editCwaSettings() end })
+    add({ text = _("Anna's Archive -- search & downloads"),
+        mandatory = ((self.annas_url and self.annas_url ~= "") or (self.annas_download_key and self.annas_download_key ~= "")) and (checks.annas and ({
+                ok = _("Key works"), token = _("Key refused"), mirror = _("Mirror down"),
+                challenge = _("Bot check -- retry"), nokey = _("No key yet"), down = _("Can't reach"),
+            })[checks.annas.state] or _("Saved")) or _("Not set up"),
+        action = function() self:editAnnasSettings() end })
 
     -- Hardcover
     local hc, hc_act = nil, function() self:editHardcoverSettings() end
@@ -14131,13 +14077,33 @@ function Bookbridge:collectStatusRows()
     end
     add({ text = _("Readest -- your place on phone & tablet"), mandatory = rd, action = rd_act })
 
-    -- Anna's Archive (optional)
-    add({ text = _("Anna's Archive -- search & downloads"),
-        mandatory = ((self.annas_url and self.annas_url ~= "") or (self.annas_download_key and self.annas_download_key ~= "")) and (checks.annas and ({
-                ok = _("Key works"), token = _("Key refused"), mirror = _("Mirror down"),
-                challenge = _("Bot check -- retry"), nokey = _("No key yet"), down = _("Can't reach"),
-            })[checks.annas.state] or _("Saved")) or _("Not set up"),
-        action = function() self:editAnnasSettings() end })
+    -- A server of your own (optional): requests through Shelfmark, a
+    -- library on Calibre-Web
+    if no_server then
+        add({ text = _("Optional: connect a book server"), mandatory = _("Tap"),
+            action = function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:connectServer() end)
+            end })
+    end
+    local sm, sm_act = nil, function() self:editServerSettings() end
+    if no_server then sm = _("Not set up")
+    elseif not self.username or self.username == "" then sm = _("Needs login")
+    else
+        sm = statusCheckedLabel(checks.shelfmark, _("Signed in"))
+            or (self:shelfmarkLoginKnownBad() and _("Wrong login")) or _("Saved")
+    end
+    add({ text = _("Shelfmark server -- requests (optional)"), mandatory = sm, action = sm_act })
+
+    local cw
+    if not self.cwa_url or self.cwa_url == "" then cw = _("Not set up")
+    elseif not self.cwa_username or self.cwa_username == "" then cw = _("Needs login")
+    else
+        local n = 0
+        for _unused in pairs(loadSyncRegistry() or {}) do n = n + 1 end
+        cw = statusCheckedLabel(checks.cwa, T(_("Signed in, %1 books"), n)) or T(_("%1 books synced"), n)
+    end
+    add({ text = _("Calibre-Web server -- library sync (optional)"), mandatory = cw, action = function() self:editCwaSettings() end })
 
     -- Updates
     local build
@@ -14183,7 +14149,6 @@ function Bookbridge:showStatus(opts)
     local stale = not checks or os.time() - (checks.at or 0) > STATUS_CHECK_MAX_AGE
     local anything = (self.server_url and self.server_url ~= "") or (self.cwa_url and self.cwa_url ~= "")
         or (self.hardcover_token and self.hardcover_token ~= "") or (self.annas_download_key and self.annas_download_key ~= "")
-        or (self.hardcover_token and self.hardcover_token ~= "")
     if stale and anything and not opts.no_auto_check then
         local ok_nm, NetworkMgr = pcall(require, "ui/network/manager")
         if ok_nm and NetworkMgr:isOnline() then
@@ -14409,9 +14374,41 @@ end
 
 -- First start with nothing configured: open Status & setup once, so a new
 -- user lands on "Start here" instead of hunting through menus.
+-- The first screen of a new install: where books come from, with nothing
+-- hosted; a server of your own is the last, optional, button.
+function Bookbridge:showStartHere()
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local dlg
+    local function pick(fn)
+        return function() UIManager:close(dlg); fn() end
+    end
+    local function install(id)
+        return pick(function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:installCompanion(id) end)
+        end)
+    end
+    dlg = ButtonDialog:new{
+        title = _("Bookbridge finds books and keeps your place in sync, with nothing to host.\n\nFirst, where books come from. A server of your own is optional."),
+        buttons = {
+            { { text = _("Install the Z-Library plugin -- search free, download with an account"), callback = install("zlibrary") } },
+            { { text = _("Enter an Anna's Archive member key"), callback = pick(function() self:editAnnasSettings() end) } },
+            { { text = _("Install the Readest plugin -- your place on a phone or tablet"), callback = install("readest") } },
+            { { text = _("Copy another reader's settings"), callback = pick(function() self:importSettingsFromText() end) } },
+            { { text = _("Or connect a book server (optional)"), callback = pick(function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:connectServer() end)
+            end) } },
+            { { text = _("Later"), callback = function() UIManager:close(dlg) end } },
+        },
+    }
+    UIManager:show(dlg)
+end
+
 function Bookbridge:maybeShowFirstRunSetup()
     if self.ui and self.ui.document then return end          -- file browser only
     if (self.server_url and self.server_url ~= "") or (self.cwa_url and self.cwa_url ~= "") then return end
+    if self:sourcesConfigured() then return end               -- (a source already works: not a first run)
     if G_reader_settings:isTrue("bookbridge_first_run_shown") then return end
     G_reader_settings:saveSetting("bookbridge_first_run_shown", true)
     UIManager:scheduleIn(1, function() self:showStatus({ no_auto_check = true }) end)
@@ -14424,25 +14421,28 @@ function Bookbridge:showHostingGuide()
     UIManager:show(TextViewer:new{
         title = _("What you need to host"),
         justified = false,
-        text = _([[Bookbridge is only the reader side. It talks to servers you run yourself on a computer that runs Docker and stays on, and to accounts you already have.
+        text = _([[Nothing, to start. Bookbridge is only the reader side; books come from accounts you already have, and a server of your own is optional.
 
-REQUIRED
-Shelfmark (github.com/calibrain/shelfmark), port 8084 -- search and request books. Enter its address, username and password under Settings > Connections > Shelfmark.
+NOTHING TO HOST
+Z-Library -- its KOReader plugin, which Bookbridge installs (Bookbridge > Z-Library > Install). Searching needs no account; downloads use your own Z-Library account.
+Anna's Archive -- your own member key, entered under Settings > Connections > Anna's Archive. The reader signs in and downloads directly.
+Hardcover -- an API token from hardcover.app/account/api: reading progress, lists, followed authors.
+Readest -- its KOReader plugin, also installed by Bookbridge (Bookbridge > Readest sync > Install): your place in sync with the Readest app on a phone or tablet.
 
-OPTIONAL SERVERS
-Calibre-Web -- Calibre-Web-Automated or Calibre-Web-NextGen, port 8083 -- your library: sync and downloads. Give it the same ingest folder Shelfmark downloads into.
-annas-archive-api (github.com/bitesized/annas-archive-api) -- Anna's Archive search and downloads, with your Anna's Archive account key.
-An update source -- any web server serving the plugin's bookbridge.koplugin folder -- automatic updates.
+OPTIONAL SERVERS -- a computer that runs Docker and stays on
+Shelfmark (github.com/calibrain/shelfmark), port 8084 -- request books and have them fetched for you. Settings > Connections > Shelfmark.
+Calibre-Web -- Calibre-Web-Automated or Calibre-Web-NextGen, port 8083 -- a library on the server: sync and downloads. Give it the same ingest folder Shelfmark downloads into.
+annas-archive-api (github.com/bitesized/annas-archive-api) -- Anna's Archive through the server instead of the reader's own key.
+An update source -- any web server serving the plugin's bookbridge.koplugin folder -- automatic updates from your own builds.
 
-ACCOUNTS
-Hardcover -- an API token from hardcover.app/account/api: reading progress.
-Readest -- the Readest KOReader plugin, signed in with auto sync on: your place syncs with the Readest app on a phone or tablet.
-
-REACHING IT AWAY FROM HOME
+REACHING A SERVER AWAY FROM HOME
 Tailscale on the server, and the Tailscale VPN KOReader plugin on a Kindle or Kobo. Bookbridge fills in its proxy by itself.
 
-EASIEST: ONE COMMAND
+EASIEST SERVER: ONE COMMAND
 github.com/TheFactor1/bookbridge-server installs all of the servers above with one command and sets their logins up. Then "Connect a book server" here finds it, shows a code, and you approve it on your phone with the password the install printed -- nothing typed on the reader.
+
+ANOTHER READER
+Settings > Set up another device > Show setup code on this one, and Import settings from another reader on the other -- same Wi-Fi, no server needed.
 
 Full guide: github.com/TheFactor1/koreader-bookbridge-plugin]]),
     })
