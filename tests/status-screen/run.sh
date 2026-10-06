@@ -14,7 +14,7 @@ M="$REPO/bookbridge.koplugin/main.lua"
   awk '/^-- ===== CO begin/{f=1} f{print} f&&/^-- ===== CO end/{exit}' "$M"
   awk '/^-- ===== SRC begin/{f=1} f{print} f&&/^-- ===== SRC end/{exit}' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide applyAnnasExtra companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in libraryDir openLibraryFolder collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide applyAnnasExtra companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }

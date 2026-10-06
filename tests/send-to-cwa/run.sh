@@ -32,7 +32,7 @@ package.loaded["ui/widget/textviewer"] = { new = function(_s, t) t.kind = "repor
 package.loaded["ui/trapper"] = { wrap = function(_s, f) return f() end }
 Bookbridge = {}
 assert(load(io.open(os.getenv("SRC")):read("*a")))()
-local k = setmetatable({ cwa_url = "http://cwa", download_dir = "/books", defaultDownloadDir = function() return "/books" end }, { __index = Bookbridge })
+local k = setmetatable({ cwa_url = "http://cwa", download_dir = "/books", defaultDownloadDir = function() return "/books" end, libraryDir = function() return "/books" end }, { __index = Bookbridge })
 local pass, fail = 0, 0
 local function ck(ok, what) if ok then pass = pass + 1; print("PASS  " .. what) else fail = fail + 1; print("FAIL  " .. what) end end
 -- 1. a book never uploaded: sent straight away, as before

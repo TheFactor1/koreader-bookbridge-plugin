@@ -197,6 +197,33 @@ function Bookbridge:defaultDownloadDir()
     return old
 end
 
+-- The folder books land in -- the one chosen under Settings, else the
+-- default above. The one place this is decided.
+function Bookbridge:libraryDir()
+    return (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
+end
+
+-- Bookbridge > Library: that folder in KOReader's own file browser. No
+-- list of its own -- the file browser already shows covers, progress and
+-- the rest, and works with nothing hosted.
+function Bookbridge:openLibraryFolder()
+    local dir = self:libraryDir()
+    if lfs.attributes(dir, "mode") ~= "directory" and not CO.mkdirp(dir) then
+        local home = G_reader_settings and G_reader_settings:readSetting("home_dir")
+        dir = (type(home) == "string" and home ~= "") and home or dir
+    end
+    local FileManager = require("apps/filemanager/filemanager")
+    if self.ui and self.ui.document then
+        -- (the sequence KOReader's own "File browser" entry uses)
+        self.ui:onClose()
+        FileManager:showFiles(dir)
+    elseif FileManager.instance and FileManager.instance.file_chooser then
+        FileManager.instance.file_chooser:changeToPath(dir)
+    else
+        FileManager:showFiles(dir)
+    end
+end
+
 function Bookbridge:init()
     self:loadSettings()
     -- (the one-time Readest upload decision above is written down at once,
@@ -557,7 +584,7 @@ end
 -- actual folder sidesteps needing to already know its exact path.
 function Bookbridge:chooseDownloadDir()
     local PathChooser = require("ui/widget/pathchooser")
-    local start_path = self.download_dir or self:defaultDownloadDir()
+    local start_path = self:libraryDir()
     if lfs.attributes(start_path, "mode") ~= "directory" then
         start_path = "/mnt/us"
     end
@@ -7827,8 +7854,7 @@ end
 function Bookbridge:syncLibrary()
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
-    local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
-        or self:defaultDownloadDir()
+    local download_dir = self:libraryDir()
 
     local completed, report, replaced_paths, unmatched = runSyncWithProgress(
         _("Syncing library with Calibre-Web..."), _("Checking books against Calibre-Web"),
@@ -7952,8 +7978,7 @@ function Bookbridge:sendBookToCwa(file, confirmed_resend)
     end
     local cwa_url, cwa_username, cwa_password, socks5_proxy =
         self.cwa_url, self.cwa_username, self.cwa_password, self.socks5_proxy
-    local download_dir = (self.download_dir and self.download_dir ~= "") and self.download_dir
-        or self:defaultDownloadDir()
+    local download_dir = self:libraryDir()
 
     local completed, report, replaced_paths = runSyncWithProgress(
         _("Sending to Calibre-Web..."), file:match("([^/]+)$") or file,
@@ -9289,7 +9314,7 @@ end
 function Bookbridge:saveCwaEntry(entry, caller_menu)
     if caller_menu then UIManager:close(caller_menu) end
 
-    local dir = (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
+    local dir = self:libraryDir()
     if lfs.attributes(dir, "mode") ~= "directory" then
         -- One level at a time -- lfs.mkdir isn't recursive (no "mkdir -p"),
         -- so a configured path several levels below an existing root (e.g.
@@ -9363,6 +9388,11 @@ function Bookbridge:addToMainMenu(menu_items)
             {
                 text = _("Status & setup"),
                 callback = function() self:showStatus() end,
+            },
+            {
+                -- the folder books land in, in KOReader's own file browser
+                text = _("Library"),
+                callback = function() self:openLibraryFolder() end,
             },
             {
                 -- find the server, show a code, approve it there: no typing
@@ -9646,7 +9676,7 @@ function Bookbridge:addToMainMenu(menu_items)
                     },
                     {
                         text_func = function()
-                            return T(_("Download folder: %1"), self.download_dir or self:defaultDownloadDir())
+                            return T(_("Download folder: %1"), self:libraryDir())
                         end,
                         keep_menu_open = true,
                         callback = function() self:chooseDownloadDir() end,
@@ -11612,7 +11642,7 @@ function Bookbridge:downloadReleaseFile(release, src, caller_menu)
     end
     if caller_menu then UIManager:close(caller_menu) end
 
-    local dir = (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
+    local dir = self:libraryDir()
     if lfs.attributes(dir, "mode") ~= "directory" then
         CO.mkdirp(dir)
         if lfs.attributes(dir, "mode") ~= "directory" then
@@ -14130,7 +14160,7 @@ function Bookbridge:collectStatusRows()
         end })
 
     -- Download folder
-    local dir = self.download_dir or self:defaultDownloadDir()
+    local dir = self:libraryDir()
     add({ text = _("Download folder"),
         mandatory = (lfs.attributes(dir, "mode") == "directory") and statusShort(dir, true)
             or (not self.download_dir and _("Made on first download")) or _("Missing"),
