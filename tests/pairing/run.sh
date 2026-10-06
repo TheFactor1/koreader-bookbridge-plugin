@@ -32,6 +32,21 @@ ltn12 = require("ltn12")
 lfs = { attributes = function() return nil end }
 debugLog = function() end
 getPluginDir = function() return "/nonexistent/plugins/bookbridge.koplugin" end
+DataStorage = { getSettingsDir = function() return W end }
+-- (KOReader's settings module only loads inside KOReader: a stand-in that
+-- writes the same kind of file)
+package.loaded["luasettings"] = { open = function(_c, path)
+    local t = { path = path, d = {} }
+    local ok, old = pcall(dofile, path); if ok and type(old) == "table" then t.d = old end
+    function t:readSetting(k) return self.d[k] end
+    function t:saveSetting(k, v) self.d[k] = v end
+    function t:flush()
+        local parts = {}
+        for k, v in pairs(self.d) do parts[#parts + 1] = string.format("[%q] = %s", k, type(v) == "string" and string.format("%q", v) or tostring(v)) end
+        local f = io.open(self.path, "w"); f:write("return { " .. table.concat(parts, ", ") .. " }\n"); f:close()
+    end
+    return t
+end }
 package.loaded["bookbridge.clipboard_receiver"] = {}  -- (main.lua's CLIP picks this up)
 socketutil = { set_timeout = function() end, reset_timeout = function() end,
     table_sink = function() local t = {} return function(c) if c then t[#t + 1] = c end return 1 end, t end }
@@ -237,6 +252,32 @@ lfs.attributes = function(p) if p:find("koplugin$") then return "directory" end 
 msgs = {}; CB = {}
 ck(PAIR.offerCompanions(B4, { "zlibrary", "readest" }) == false and #CB == 0, "B already has both companions: no offer")
 ck(PAIR.offerCompanions(B4, nil) == false, "no wants: no offer")
+
+-- 10. the Reading Ledger's choices travel too, once
+do
+    local function mem() local t = { d = {}, flushed = 0 }
+        function t:readSetting(k) return self.d[k] end
+        function t:saveSetting(k, v) self.d[k] = v end
+        function t:flush() self.flushed = self.flushed + 1 end
+        return t end
+    lfs.attributes = function(p) if p:find("ledger.koplugin$") then return "directory" end end
+    local la = mem(); la.d = { runner = "rabbit", rival = "tortoise", rabbit_name = "Hops", race_style = "scoreboard", onboarded = true, animations = false, races = { x = 1 } }
+    local A2 = reader({ ui = { ledger = { settings = la } } })
+    local out = PAIR.collect(A2)
+    ck(out.ledger and out.ledger.runner == "rabbit" and out.ledger.rabbit_name == "Hops" and out.ledger.race_style == "scoreboard" and out.ledger.onboarded == true,
+        "Ledger choices go in the code: runner, rival, names, race look")
+    ck(out.ledger.animations == nil and out.ledger.races == nil, "...not per-device things (animations) or race data")
+    local lb = mem(); lb.d = { runner = "cat", animations = true }
+    local B2 = reader({ ui = { ledger = { settings = lb } } })
+    PAIR.apply(B2, out)
+    ck(lb.d.runner == "rabbit" and lb.d.rival == "tortoise" and lb.d.rabbit_name == "Hops" and lb.d.animations == true and lb.flushed == 1,
+        "...land in the other reader's running Ledger, keeping its own animations")
+    -- the other reader has the Ledger installed but not loaded: its file
+    local B3 = reader({ ui = {} })
+    PAIR.apply(B3, out)
+    local f = io.open(W .. "/ledger.lua"); local body = f and f:read("*a") or ""; if f then f:close() end
+    ck(body:find("rabbit", 1, true) and body:find("Hops", 1, true), "...or in its settings file when it isn't running")
+end
 
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

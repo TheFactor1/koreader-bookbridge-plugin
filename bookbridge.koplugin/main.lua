@@ -5109,13 +5109,37 @@ function PAIR.parse(text)
     return nil
 end
 
--- What this reader sends: its settings (FIELDS) and which companions it has.
+-- The Reading Ledger's choices that travel too (copied once; after that
+-- each reader can differ): your runner, your rival, their names, the look.
+PAIR.LEDGER_KEYS = { "runner", "rival", "cat_name", "dog_name", "rabbit_name", "tortoise_name", "race_style", "onboarded" }
+
+-- The Ledger's settings: through the running Ledger when it's loaded (it
+-- keeps them in memory and writes them back itself), else its file.
+function PAIR.ledgerSettings(bb)
+    local inst = bb.ui and bb.ui.ledger
+    if type(inst) == "table" and type(inst.settings) == "table" and inst.settings.readSetting then return inst.settings end
+    local path = DataStorage:getSettingsDir() .. "/ledger.lua"
+    if not bb:companionState("ledger").installed and lfs.attributes(path, "mode") ~= "file" then return nil end
+    local ok, LuaSettings = pcall(require, "luasettings")
+    if not ok then return nil end
+    local ok2, s = pcall(LuaSettings.open, LuaSettings, path)
+    return ok2 and s or nil
+end
+
+-- What this reader sends: its settings (FIELDS), the Ledger's choices, and
+-- which companions it has.
 function PAIR.collect(bb)
     local out = { v = PAIR.VERSION, wants = {} }
     for _unused, k in ipairs(PAIR.FIELDS) do out[k] = bb[k] end
     for _unused, id in ipairs(CO.ORDER) do
         local st = bb:companionState(id)
         if st.installed then out.wants[#out.wants + 1] = id end
+    end
+    local ls = PAIR.ledgerSettings(bb)
+    if ls then
+        local led = {}
+        for _unused, k in ipairs(PAIR.LEDGER_KEYS) do led[k] = ls:readSetting(k) end
+        if next(led) then out.ledger = led end
     end
     return out
 end
@@ -5136,6 +5160,21 @@ function PAIR.apply(bb, tbl)
         bb.socks5_proxy = nil
     end
     bb.annas_session, bb.annas_mirrors, bb.session_cookie, bb._status_checks = nil, nil, nil, nil
+    -- the Ledger's choices, where the Ledger is (or will be, once installed)
+    if type(tbl.ledger) == "table" then
+        local ls = PAIR.ledgerSettings(bb)
+        if not ls then
+            local ok, LuaSettings = pcall(require, "luasettings")
+            if ok then ls = LuaSettings:open(DataStorage:getSettingsDir() .. "/ledger.lua") end
+        end
+        if ls then
+            for _unused, k in ipairs(PAIR.LEDGER_KEYS) do
+                if tbl.ledger[k] ~= nil then ls:saveSetting(k, tbl.ledger[k]) end
+            end
+            pcall(ls.flush, ls)
+            n = n + 1
+        end
+    end
     return n
 end
 
