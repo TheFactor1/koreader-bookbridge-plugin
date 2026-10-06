@@ -34,8 +34,10 @@ in the order you want them asked.
 | **Anna's Archive** | Your own Anna's Archive member key (fast downloads) | Settings > Connections > Anna's Archive: paste the key (or **Type on your phone**). The reader talks to Anna's Archive directly -- it signs in with your key, tries the site's domains until one answers, and remembers it |
 | **Shelfmark** *(optional, self-hosted)* | A computer that stays on, running [bookbridge-server](https://github.com/TheFactor1/bookbridge-server) (one command) | **Connect a book server** -- see *Set it up with a server* below |
 
-Your library and your place live in **Readest** (its cloud and the books on
-the device): **Bookbridge > Library (Readest)** -- see *Readest* below.
+**Bookbridge > Library** opens the folder books land in, in KOReader's own
+file browser -- that is your library, on the device, with nothing hosted.
+Your place syncs with the Readest app through **Bookbridge > Readest sync**
+-- see *Readest* below.
 
 ## Set it up without a server
 
@@ -43,13 +45,20 @@ the device): **Bookbridge > Library (Readest)** -- see *Readest* below.
    `bookbridge.koplugin.zip` from the latest release, copy the folder into
    KOReader's `plugins`, restart KOReader).
 2. **Bookbridge > Z-Library > Install** (it downloads the Z-Library plugin
-   from its GitHub release, checks it, and asks to restart), then **Bookbridge
-   > Library (Readest) > Install** for your library and sync. Both are
-   kept up to date together with Bookbridge.
+   from its GitHub release, checks it, and asks to restart). Use the Readest
+   app on a phone or tablet? **Bookbridge > Readest sync > Install** keeps
+   your place in step with it. Both are kept up to date together with
+   Bookbridge.
 3. Have an Anna's Archive membership too? **Settings > Connections > Anna's
    Archive**, paste the key (Type on your phone), Apply: it signs in to check.
 4. **Bookbridge > Find a book**: title, author, pick a file, **Download**.
-   The book lands in your home folder and Bookbridge offers to open it.
+   The book lands in your library folder (**Bookbridge > Library** opens it)
+   and Bookbridge offers to open the book.
+5. A second reader? On this one, **Settings > Set up another device > Show
+   setup code**; on the other, **Import settings from another reader**, scan
+   the code with your phone and send it over with **Type on your phone**.
+   Same Wi-Fi, no server: your keys, logins and sources arrive, and it offers
+   to install the same plugins.
 
 ## Set it up with a server
 
@@ -138,7 +147,9 @@ book**.
 
 <img src="docs/images/done-bookbridge-menu.png" alt="The Bookbridge menu: Search & request a book" width="420">
 
-Another reader later? Do Steps 2 and 3 on it -- the server stays as it is.
+Another reader later? **Settings > Set up another device** on this one copies
+its settings to the other over your Wi-Fi (or do Steps 2 and 3 again -- the
+server stays as it is).
 
 ### Extras (all optional)
 
@@ -173,6 +184,8 @@ it lands in the box on the reader.
 | **Can't reach** on the status screen | The computer is off or asleep, or you're away from home without Tailscale. |
 | **Wrong login** | Connect again (Step 3) -- it hands over the logins afresh. |
 | **Not installed** / **Not set up** | Optional -- only needed for that extra feature. |
+| **Couldn't reach the other reader** (Set up another device) | Both readers on the same Wi-Fi? Guest networks keep devices apart. Readers on different networks: the code can go through the server's pairing relay instead (offered when one is set). |
+| **That doesn't look like a Bookbridge pairing code** | Update the reader that imports first -- an older Bookbridge can't read the new codes. |
 
 Lost the password or the address? Run the install command again: it keeps
 everything and prints both.
@@ -195,19 +208,21 @@ Accounts, not servers:
 - **[Hardcover](https://hardcover.app)** -- reading progress, lists, followed
   authors. Paste an API token from hardcover.app/account/api into Hardcover
   settings.
-- **[Readest](https://readest.com)** -- your library in its cloud, and your
-  place in sync with the Readest app on a phone or tablet. **Bookbridge >
-  Library (Readest) > Install** puts its KOReader plugin in place; sign in
-  there and turn its auto sync on. See *Readest* below.
+- **[Readest](https://readest.com)** -- your place in sync with the Readest
+  app on a phone or tablet. **Bookbridge > Readest sync > Install** puts its
+  KOReader plugin in place; sign in there and turn its auto sync on. Putting
+  the books you read into Readest's cloud is off unless you switch it on
+  there (its free plan holds 500 MB). See *Readest* below.
 - **Z-Library** -- a book source, through its plugin: **Bookbridge >
   Z-Library > Install**, then sign in there for downloads.
 
 **Easiest:** [bookbridge-server](https://github.com/TheFactor1/bookbridge-server)
 installs all of the servers above with one command, sets their logins up for
 you, and lets a reader connect with a code (*Connect a book server*). It also
-includes the pairing relay (behind *Connect a book server*, *Set up another
-device* and *Send debug log to server*) and the optional AI relay (*Match
-suggestions*). See **Set it up, step by step** above.
+includes the pairing relay (behind *Connect a book server* and *Send debug log
+to server*; *Set up another device* needs it only when the two readers are on
+different networks) and the optional AI relay (*Match suggestions*). See **Set
+it up, step by step** above.
 
 Once it's set up, **Bookbridge > Status & setup** shows each piece, whether it
 works (it really logs in -- and tests the Anna's Archive key without spending
@@ -242,10 +257,14 @@ Adds a **Bookbridge** entry to KOReader's main menu.
 ### Status & setup
 - The first item in the menu, and what a new device opens on its own the
   first time: one line per piece above with its state (Signed in, Wrong
-  login, Can't reach, Key works, Syncing...) and the fix on tap. Saving any
-  connection's settings tests that login straight away.
+  login, Can't reach, Key works, Syncing...) and the fix on tap -- the
+  no-server pieces first, the servers marked optional. A fresh install gets
+  **Start here: no server needed**, a picker for where books come from.
+  Saving any connection's settings tests that login straight away.
 
 ### Settings
+- **Library** (in the main menu) — opens the download folder in KOReader's
+  own file browser.
 - **Connections** — Shelfmark server, CWA, Anna's Archive, AI match
   suggestions, and **Advanced** (the SOCKS5 proxy and pairing relay, which
   most people never need to touch).
@@ -253,9 +272,13 @@ Adds a **Bookbridge** entry to KOReader's main menu.
   `http://<reader>:8090` on a phone gives a page to type or paste into, and it
   lands in the box open on the reader (**Type on your phone** shows that
   address as a QR code). Share shortcuts can send `GET /clip?text=...` too.
-- **Set up another device** — shows a QR code the other device scans to
-  copy this one's settings (through the small pairing relay in
-  `homeserver-configs/shelfmark-pairing-relay`).
+- **Set up another device** — **Show setup code** on this reader, **Import
+  settings from another reader** on the other: it fetches this reader's
+  settings over your Wi-Fi, straight from this reader (no server). Carries
+  logins, keys, tokens, sources and the relays; never the download folder.
+  Encrypted with a key that only exists in the code, served once, for five
+  minutes. Readers on different networks go through the server's pairing
+  relay instead; codes from older versions still import.
 - **Check for updates** — installs new builds from your own update server
   (`Update source`); the build id is in `manifest.json`.
 - **Install updates automatically** (on by default once an update source is
@@ -298,19 +321,21 @@ Offline? The position is queued and pushed when the network comes back or
 the device next wakes. Nothing runs on a timer. **Forget Hardcover book
 choices** clears every match so books are decided again.
 
-## Readest (phone & tablet sync)
+## Readest sync (phone & tablet)
 
 Bookbridge installs the Readest KOReader plugin for you (**Bookbridge >
-Library (Readest)** holds its whole menu) and that plugin does the syncing
-itself; Bookbridge fills three gaps it leaves:
+Readest sync** holds its whole menu) and that plugin keeps your place in sync
+with the Readest app; Bookbridge fills the gaps it leaves:
 
-- **A book you're reading goes into your Readest library.** After a few pages
-  in one sitting the reader's own file is uploaded (quietly), so the phone or
-  tablet opens the same bytes and progress lines up. Books already there are
-  left alone.
 - **Your place is saved when the device sleeps.** Readest itself only saves
   a few seconds after a page turn and on close.
 - **Waking the device picks up where the phone left off**, once Wi-Fi is back.
+- **Optional: a book you're reading goes into your Readest library.** Off by
+  default -- **Readest sync > Put books I read here into Readest's cloud**
+  turns it on. After a few pages in one sitting the reader's own file is
+  uploaded (quietly), so the phone or tablet opens the same bytes. Readest's
+  free plan holds 500 MB, which is why this is a switch; a reader that
+  already had it running keeps it on.
 
 Readest matches books by the file's exact bytes, so on the phone or tablet
 open books from the Readest library, not from the Calibre-Web catalog. It only

@@ -4,6 +4,43 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-06 — v0.8.0, build (pending)
+
+The no-server experience. Nothing here needs a server; a server of your own
+stays the optional add-on it was.
+
+- **New**: **Bookbridge > Library** opens the folder books land in, in
+  KOReader's own file browser -- your library, on the device.
+- **New**: **Set up another device without a server.** Settings > Set up
+  another device > *Show setup code* on one reader, *Import settings from
+  another reader* on the other: it fetches the first reader's settings over
+  the Wi-Fi, straight from that reader. What travels: logins, keys and
+  tokens (Shelfmark, Calibre-Web, Anna's Archive, Hardcover), your sources
+  and the relays -- never the download folder. Encrypted with a key that
+  exists only in the code, handed out once, for five minutes; afterwards the
+  other reader is offered the same plugins. Readers on different networks
+  go through the server's pairing relay as before; codes from older
+  versions still import.
+- **Change**: **Library (Readest)** is now **Readest sync** -- the companion
+  keeps your place in step with the Readest app. Putting the book file into
+  Readest's cloud too is now a switch, off by default (*Put books I read
+  here into Readest's cloud*; the free plan holds 500 MB). A reader where
+  it was running at the time of this update (Readest signed in with auto
+  sync on) keeps it on; one that was signed out gets off and can turn it
+  back on there.
+- **Change**: first run and the status screen lead with the no-server path:
+  *Start here: no server needed* opens a picker (the Z-Library plugin, an
+  Anna's Archive key, the Readest plugin, another reader's settings, or --
+  optional -- a book server); sources are listed before the servers, and
+  the Shelfmark and Calibre-Web rows say *(optional)*. *What you need to
+  host* now opens with "Nothing, to start".
+- **Reading Ledger**: a fresh install is handed to Bookbridge's own first
+  screen; a trending book says *Set up Bookbridge to get it* until a source
+  or server exists; "waiting for N" only shows with a server.
+- **Fix**: a refused connection to the pairing relay is told apart from an
+  HTTP status (it was reported as "rejected the request").
+- **Removed**: the unused *Connection status* screen (Status & setup does it).
+
 ## 2026-10-06 — v0.7.1, build 9421943
 
 - **Fix**: a book whose filename says nothing Calibre-Web recognises
