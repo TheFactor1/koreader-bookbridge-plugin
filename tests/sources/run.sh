@@ -143,6 +143,12 @@ b.sources_stop_first = false
 b.sources_enabled = { zlibrary = false }
 b:browseReleases({ title = "Emma" })
 ck(#CONT.tried == 1 and CONT.tried[1] == "Shelfmark", "a switched-off source is skipped")
+do
+    local b2 = bb({}); b2.sources_enabled = { zlibrary = false }
+    SHOWN = {}
+    b2:browseReleases({ title = "Emma" })
+    ck(SHOWN[#SHOWN] and SHOWN[#SHOWN].kind == "confirm" and SHOWN[#SHOWN].text:find("Z%-Library is turned off"), "the only source switched off: says so, not 'install it'")
+end
 ck(b:sourcesSummary() == "Shelfmark", "summary lists only enabled, configured sources")
 
 -- 4b. in the merged list the preferred source's copy sorts first (before download counts)

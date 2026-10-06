@@ -4028,7 +4028,7 @@ function CO.pluginsDir()
         local cwd = lfs.currentdir and lfs.currentdir() or nil
         if cwd then dir = cwd .. "/" .. dir end
     end
-    return dir
+    return (dir:gsub("//+", "/"))
 end
 
 function CO.folder(id)
@@ -4168,6 +4168,7 @@ function CO.install(id, info)
         debugLog("[companion] digest mismatch for " .. id .. ": got " .. got .. ", want " .. info.digest)
         return nil, T(_("%1's download didn't match GitHub's checksum -- not installed."), def.label)
     end
+    debugLog("[companion] " .. id .. " " .. info.name .. ": size and sha256 match GitHub's (" .. got:sub(1, 12) .. "...)")
 
     local ok_arc, Archiver = pcall(require, "ffi/archiver")
     if not ok_arc or not Archiver or not Archiver.Reader then
@@ -8889,8 +8890,10 @@ function Bookbridge:addToMainMenu(menu_items)
                         callback = function()
                             self.companions_in_ko_menu = not self.companions_in_ko_menu
                             self:saveAllSettings()
-                            -- (KOReader rebuilds its menu next time it opens)
-                            if self.ui and self.ui.menu then self.ui.menu.tab_item_table = nil end
+                            -- KOReader builds its menu once per session and can't
+                            -- rebuild it (MenuSorter consumes the item table), so
+                            -- this takes a restart.
+                            UIManager:askForRestart()
                         end,
                     },
                     {
@@ -9997,8 +10000,14 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu)
         end
     end
     if #tried == 0 then
+        -- (a source that is ready but switched off is the likelier reason)
+        local off = {}
+        for _unused, id in ipairs(SRC.order(self)) do
+            if not SRC.enabled(self, id) and SRC.DEF[id].configured(self) then off[#off + 1] = SRC.DEF[id].label end
+        end
         self:showResilientConfirmBox{
-            text = _("No book source is set up yet.\n\nInstall the Z-Library plugin, add an Anna's Archive key, or connect a Shelfmark server -- Settings > Sources shows what's on."),
+            text = #off > 0 and T(_("%1 is turned off in Settings > Sources, and no other source is set up."), table.concat(off, ", "))
+                or _("No book source is set up yet.\n\nInstall the Z-Library plugin, add an Anna's Archive key, or connect a Shelfmark server -- Settings > Sources shows what's on."),
             ok_text = _("Sources"),
             ok_callback = function() self:showSourcesDialog() end,
         }
