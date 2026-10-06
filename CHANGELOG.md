@@ -4,6 +4,19 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-06 — v0.8.1, build (pending)
+
+- **New**: the **Reading Ledger** is a companion. Bookbridge installs and
+  updates it from its GitHub release like the Z-Library and Readest plugins
+  (Status & setup > *Reading Ledger -- home screen*), with the previous
+  version kept for a rollback; the Ledger's own Settings > Check for updates
+  goes through the same path. Its KOReader menu entry is never tucked.
+- **New**: for a home screen (the Ledger), `zlibraryState` / `zlibrarySignIn`
+  / `annasState`: each book source as one state and one tap -- install the
+  Z-Library plugin, restart, sign in through the plugin's own dialog; enter
+  the Anna's Archive key.
+- **Fix**: a top-level constant read by the new code was declared below it.
+
 ## 2026-10-06 — v0.8.0, build b3effab
 
 The no-server experience. Nothing here needs a server; a server of your own

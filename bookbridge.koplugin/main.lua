@@ -692,7 +692,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.8.0"
+local PLUGIN_VERSION = "0.8.1"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -4493,8 +4493,17 @@ CO.DEF = {
         strip = "readest.koplugin/", keep = {},
         what = "your place in sync with the Readest app on a phone or tablet",
     },
+    -- the Reading Ledger: a home screen that wraps Bookbridge (it keeps its
+    -- own KOReader menu entry, so it is never tucked)
+    ledger = {
+        label = "Reading Ledger", folder = "ledger.koplugin", menu_key = "reading_ledger", tuck = false,
+        repo = "TheFactor1/koreader-reading-ledger", credit = "the Reading Ledger (AGPL-3.0; CC0 sprites, credited inside)",
+        asset = "^reading%-ledger%-[%d%.]+%.koplugin%.zip$", ver_pat = "^reading%-ledger%-([%d%.]+)%.koplugin%.zip$",
+        strip = "ledger.koplugin/", keep = {},
+        what = "a home screen for KOReader: your books as a race against a pixel rival, with Bookbridge inside",
+    },
 }
-CO.ORDER = { "zlibrary", "readest" }
+CO.ORDER = { "zlibrary", "readest", "ledger" }
 
 -- The folder KOReader loads plugins from: Bookbridge's own parent, as an
 -- absolute path (a desktop KOReader reports its own plugins folder
@@ -8966,9 +8975,9 @@ end
 -- this is in time.
 function Bookbridge:tuckCompanions()
     if not self.ui then return end
-    for id in pairs(CO.DEF) do
+    for id, def in pairs(CO.DEF) do
         local inst = self.ui[id]
-        if type(inst) == "table" and type(inst.addToMainMenu) == "function" and not inst._bb_menu then
+        if def.tuck ~= false and type(inst) == "table" and type(inst.addToMainMenu) == "function" and not inst._bb_menu then
             inst._bb_menu = inst.addToMainMenu
             local bb = self
             inst.addToMainMenu = function(c, menu_items)
@@ -9135,7 +9144,7 @@ end
 
 -- One line per companion for the status screen.
 function Bookbridge:companionStatusRows(add)
-    for _unused, id in ipairs({ "zlibrary" }) do   -- (Readest's row is with the sync ones)
+    for _unused, id in ipairs({ "zlibrary", "ledger" }) do   -- (Readest's row is with the sync ones)
         local def = CO.DEF[id]
         local state = self:companionState(id)
         local label, action
@@ -9153,7 +9162,8 @@ function Bookbridge:companionStatusRows(add)
                 Trapper:wrap(function() self:installCompanion(id) end)
             end
         end
-        add({ text = T(_("%1 -- book source"), def.label), mandatory = label, action = action })
+        add({ text = id == "ledger" and _("Reading Ledger -- home screen") or T(_("%1 -- book source"), def.label),
+              mandatory = label, action = action })
     end
 end
 

@@ -172,6 +172,16 @@ GITHUB = { tag_name = "v0.12.12", assets = {
 info = CO.latest("readest")
 ck(info and info.name == "Readest-0.12.12-10.koplugin.zip", "highest re-upload number wins: " .. tostring(info and info.name))
 
+-- 12. the Reading Ledger is a companion too: its release asset is recognised, and it is never tucked
+GITHUB = { tag_name = "v0.1.0", assets = {
+    { name = "reading-ledger-0.1.0.zip", browser_download_url = "bundle", size = 5, digest = "sha256:" .. string.rep("b", 64) },
+    { name = "reading-ledger-0.1.0.koplugin.zip", browser_download_url = "plugin", size = 7, digest = "sha256:" .. string.rep("c", 64) },
+} }
+info = CO.latest("ledger")
+ck(info and info.name == "reading-ledger-0.1.0.koplugin.zip" and info.version == "0.1.0", "ledger: the plugin-only asset is picked, not the bundle (" .. tostring(info and info.name) .. ")")
+ck(CO.DEF.ledger.tuck == false and CO.DEF.ledger.folder == "ledger.koplugin" and CO.ORDER[3] == "ledger", "ledger: its own KOReader menu entry stays (tuck = false)")
+
+
 print(string.format("=== %d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
 LUA
