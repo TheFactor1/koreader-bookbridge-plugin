@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.7.0, build (pending)
+## 2026-10-06 — v0.7.0, build 79af5a7
 
 - **New**: **Anna's Archive straight from the reader.** With your member
   key alone (Settings > Connections > Anna's Archive), Bookbridge signs in,
@@ -17,6 +17,32 @@ Plain-language notes on what changed and why. Build ids refer to the
   status screen counts a key alone as set up and checks it on open.
 - **Fix**: a domain switch found during the status check was not kept
   unless a Hardcover token was set.
+- **Fix** (deep review of the companions installer and the direct Anna's
+  code): a companion folder that is a symlink (a development checkout) is
+  never replaced or deleted; the live/previous folder swap now happens
+  after the download subprocess finishes, so "tap to cancel" can't leave
+  half a swap, and **Go back to the previous version** appears in a
+  companion's menu while the previous folder is kept; a Windows-made zip
+  (backslashes) unpacks; Readest's `-10` re-upload beats `-9`; a manual
+  install and the automatic one no longer run on the same companion at
+  once; formats with a digit (azw3, fb2, cbz) are read from Anna's result
+  cards; the session cookie is never sent to the file host a download link
+  redirects to; a rejected key is reported by code, not by matching its
+  English text; an unreachable `mirrors.json` is retried after a quarter
+  of an hour, not on every search; a direct search that found no domain
+  answering says so once instead of looping; the ISBN lookup after a
+  download runs off the UI thread; importing a server's settings drops
+  the reader's own Anna's session (the helper takes over).
+- **Fix**: a failed download ("sign in to Z-Library first") no longer
+  throws the results list away; it stays open underneath.
+- **Fix**: from GitHub, automatic updates install only a strictly newer
+  version. A copy of the same version whose files differ (a checkout, a
+  release being prepared) was being "updated" to the published files.
+  "Check for updates" still offers it; a self-hosted update server is
+  followed build for build as before.
+- **Change**: Settings > Sources says "not installed" / "restart needed"
+  for Z-Library rather than "not set up"; the Review-unmatched entry
+  doesn't show a count of 0.
 
 ## 2026-10-06 — v0.6.0, build 6a9a785
 
