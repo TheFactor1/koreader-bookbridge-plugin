@@ -648,7 +648,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.6.0"
+local PLUGIN_VERSION = "0.7.0"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -13969,8 +13969,10 @@ function Bookbridge:checkConnections(which, progress_text)
             self._shelfmark_login_rejected = nil
         end
     end
+    -- (what the direct Anna's Archive client learned during the probe:
+    -- its session, the domain that answered)
+    if res.annas and res.annas.extra then self:applyAnnasExtra(res.annas.extra) end
     if res.hardcover then
-        if res.annas and res.annas.extra then self:applyAnnasExtra(res.annas.extra) end
         if res.hardcover.state == "token" then hc_rejected_token = self.hardcover_token
         elseif res.hardcover.state == "ok" and hc_rejected_token == self.hardcover_token then hc_rejected_token = nil end
     end

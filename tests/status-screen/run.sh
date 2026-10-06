@@ -14,7 +14,7 @@ M="$REPO/bookbridge.koplugin/main.lua"
   awk '/^-- ===== CO begin/{f=1} f{print} f&&/^-- ===== CO end/{exit}' "$M"
   awk '/^-- ===== SRC begin/{f=1} f{print} f&&/^-- ===== SRC end/{exit}' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide applyAnnasExtra companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -43,7 +43,7 @@ doTestService = function() return NET.annas_ok end
 local ANNAS_CALLS = 0
 doAnnasSearch = function(url, key, tld, q, proxy, opts)
     ANNAS_CALLS = ANNAS_CALLS + 1; NET.annas_opts = opts
-    if NET.annas == "ok" then return { {} }, 200 end
+    if NET.annas == "ok" then return { {} }, 200, nil, nil, NET.annas_extra end
     if NET.annas == "mirror" then return nil, 502, "mirror", "MIRROR_DOWN" end
     if NET.annas == "token" then return nil, 401, "Anna's Archive rejected the download key -- check it in Settings." end
     if NET.annas == "challenge" then return nil, 401, "challenge" end
@@ -203,6 +203,13 @@ ck(row(b:collectStatusRows(), "Anna's Archive").mandatory == "Key works", "statu
 NET = { annas = "token" }; b:saveAndVerify("annas")
 ck(last():find("rejected this download key", 1, true) and row(b:collectStatusRows(), "Anna's Archive").mandatory == "Key refused", "bad key: 'rejected this download key' / 'Key refused'")
 NET = { annas = "mirror" }; b:saveAndVerify("annas")
+do
+    local b3 = bb({ annas_download_key = "k", annas_tld = "xx", saveAllSettings = function() end })
+    NET = { annas = "ok", annas_extra = { tld = "gl", switched = true, session = { cookie = "aa_account_id2=s", at = os.time(), tld = "gl" } } }
+    b3:checkConnections({ annas = true })
+    ck(b3.annas_tld == "gl" and b3.annas_session and b3.annas_session.cookie == "aa_account_id2=s", "a probe that hunted to another domain is remembered (no Hardcover token needed)")
+    NET.annas_extra = nil
+end
 ck(last():find("isn't answering on any domain", 1, true) and last():find(".gd", 1, true) and row(b:collectStatusRows(), "Anna's Archive").mandatory == "Mirror down", "mirror down: says it tried every domain, and which was current")
 NET = { annas = "challenge" }; b:saveAndVerify("annas")
 ck(last():find("bot check", 1, true), "bot challenge: key couldn't be tested right now")

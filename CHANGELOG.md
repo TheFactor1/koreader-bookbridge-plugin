@@ -4,6 +4,20 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-06 — v0.7.0, build (pending)
+
+- **New**: **Anna's Archive straight from the reader.** With your member
+  key alone (Settings > Connections > Anna's Archive), Bookbridge signs in,
+  searches and downloads -- no helper server. The site's bot check comes
+  and goes per domain, so a domain that blocks is skipped for the next one
+  (gd, gl, pk, plus a list kept in this repository) and the one that works
+  is remembered; a stale sign-in is renewed by itself. The
+  `annas-archive-api` helper stays as the advanced option.
+- **Change**: the Anna's Archive settings ask for the key first; the
+  status screen counts a key alone as set up and checks it on open.
+- **Fix**: a domain switch found during the status check was not kept
+  unless a Hardcover token was set.
+
 ## 2026-10-06 — v0.6.0, build 6a9a785
 
 - **New**: **no server needed.** Bookbridge now finds books through

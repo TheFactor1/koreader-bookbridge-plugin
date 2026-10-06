@@ -31,7 +31,7 @@ in the order you want them asked.
 | Source | What you need | Where it's set up |
 |---|---|---|
 | **Z-Library** | The [zlibrary.koplugin](https://github.com/ZlibraryKO/zlibrary.koplugin) plugin (Bookbridge installs and updates it: **Bookbridge > Z-Library > Install**) and, for downloads, your own Z-Library account | Sign in under **Bookbridge > Z-Library > Settings > Set credentials**. Searching works without an account |
-| **Anna's Archive** | Your own Anna's Archive member key (fast downloads) | Settings > Connections > Anna's Archive (paste the key, or **Type on your phone**). Today this still goes through the `annas-archive-api` helper of a bookbridge-server; the reader talking to Anna's Archive directly is the next release |
+| **Anna's Archive** | Your own Anna's Archive member key (fast downloads) | Settings > Connections > Anna's Archive: paste the key (or **Type on your phone**). The reader talks to Anna's Archive directly -- it signs in with your key, tries the site's domains until one answers, and remembers it |
 | **Shelfmark** *(optional, self-hosted)* | A computer that stays on, running [bookbridge-server](https://github.com/TheFactor1/bookbridge-server) (one command) | **Connect a book server** -- see *Set it up with a server* below |
 
 Your library and your place live in **Readest** (its cloud and the books on
@@ -46,7 +46,9 @@ the device): **Bookbridge > Library (Readest)** -- see *Readest* below.
    from its GitHub release, checks it, and asks to restart), then **Bookbridge
    > Library (Readest) > Install** for your library and sync. Both are
    kept up to date together with Bookbridge.
-3. **Bookbridge > Find a book**: title, author, pick a file, **Download**.
+3. Have an Anna's Archive membership too? **Settings > Connections > Anna's
+   Archive**, paste the key (Type on your phone), Apply: it signs in to check.
+4. **Bookbridge > Find a book**: title, author, pick a file, **Download**.
    The book lands in your home folder and Bookbridge offers to open it.
 
 ## Set it up with a server
@@ -366,9 +368,11 @@ This plugin stands on other people's work:
   by new-usemame — the Calibre-Web fork the author's library runs on; its
   OPDS and KOReader-sync endpoints are what Bookbridge is tested against.
 - [annas-archive-api](https://github.com/bitesized/annas-archive-api) by
-  bitesized — the search and download service behind the Anna's Archive
-  features today (run on a bookbridge-server). It carries no license, so
-  nothing from it is copied here; Bookbridge only talks to it.
+  bitesized — a search and download service for Anna's Archive, which a
+  bookbridge-server can still run as the advanced option. It was the
+  reference for what to ask the site; it carries no license, so none of
+  its code is here: the reader's own Anna's Archive client was written
+  from the site's behaviour.
 - [Readest](https://github.com/readest/readest) by Huang Xin (chrox) and
   contributors, AGPL-3.0 — the reading app and its cloud library. Its
   KOReader plugin does the sign-in and the phone/tablet sync. **Used, not
