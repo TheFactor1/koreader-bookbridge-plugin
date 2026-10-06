@@ -5611,6 +5611,30 @@ end
 -- an-unreachable-CWA rule, the post-upload registration wait) lives here and
 -- has the regression tests behind it. A parallel implementation would be a
 -- second place for all of that to drift.
+-- A book's own title out of its metadata (no render, no page count -- the
+-- same metadata-only open deriveFileDialogMetadata uses). The sync matcher
+-- takes one look at it before uploading a file whose NAME said nothing
+-- Calibre-Web recognised ("9780141439686.epub", "book(1).epub"): the
+-- library may well hold the book under its real title. -> title, authors;
+-- nil when the format has no provider or the file carries no title.
+local function readEmbeddedTitle(path)
+    local ok, title, authors = pcall(function()
+        local DocumentRegistry = require("document/documentregistry")
+        if not DocumentRegistry:hasProvider(path) then return nil end
+        local document = DocumentRegistry:openDocument(path)
+        if not document then return nil end
+        if document.loadDocument then pcall(function() document:loadDocument(false) end) end
+        local props_ok, props = pcall(function() return document:getProps() end)
+        DocumentRegistry:closeDocument(path)
+        local t = props_ok and props and props.title
+        local a = props_ok and props and props.authors
+        if type(t) ~= "string" or not t:match("%S") then return nil end
+        return t, (type(a) == "string" and a:match("%S")) and a or nil
+    end)
+    if not ok then return nil end
+    return title, authors
+end
+
 local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, download_dir, only_path, progress_path)
     local report = {}
     local function addLine(s) table.insert(report, s) end
@@ -6840,6 +6864,76 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
                             if all_explained and (index_confirmed or not title_is_subset_of_series) then
                                 table.insert(matches, e)
                             end
+                        end
+                    end
+                end
+            end
+            -- Embedded-title pass: ONE more search, and only for a file that
+            -- is otherwise about to be uploaded (nothing matched, no row
+            -- counted as evidence, first pass). The filename is the only
+            -- thing the ladder above knows; a sideloaded "bbtest-lighthouse
+            -- .epub" whose own metadata says "The Quiet Lighthouse" sailed
+            -- through to a duplicate upload of a book CWA already held
+            -- (found by the server-side pipeline run, 2026-10-06). The book's
+            -- embedded title is asked for exactly as the ladder would ask
+            -- for a filename -- same word gate, same volume gate, against
+            -- the embedded title's own words -- so it can only ever turn an
+            -- upload into a match or into "check manually", never the
+            -- reverse. The embedded AUTHOR is required and joins the words:
+            -- a bare title can't tell "Dark Matter" by Michelle Paver from
+            -- the one by Blake Crouch that CWA holds (probed: three such
+            -- negatives registered without it). Skipped when the metadata
+            -- adds no words the filename didn't have (the ladder already
+            -- asked those).
+            if #matches == 0 and raw_entry_count == 0 and allow_upload then
+                local et, ea = readEmbeddedTitle(path)
+                local et_words
+                if et and ea then
+                    -- (normalised apart, so a trailing "(Series)" on the
+                    -- title is dropped as it is for a filename's title half)
+                    et_words = normalizeTitleWords(et)
+                    for w in pairs(normalizeTitleWords(ea)) do et_words[w] = true end
+                end
+                local adds_words = false
+                if et_words then
+                    for w in pairs(et_words) do
+                        if not fname_words[w] then adds_words = true break end
+                    end
+                end
+                if adds_words then
+                    local resp_body, code = searchCwa(et)
+                    if resp_body and code == 200 then
+                        any_response = true
+                        local et_vols = volumeNumbersOf(et)
+                        local function etVolumeCompatible(e)
+                            if next(et_vols) == nil then return true end
+                            for n in pairs(volumeNumbersOf(e.title)) do
+                                if et_vols[n] then return true end
+                            end
+                            local idx = getSeriesIndex(e.uuid)
+                            return idx ~= nil and et_vols[idx] == true
+                        end
+                        local found = {}
+                        for _, e in ipairs(parseOpdsEntries(resp_body)) do
+                            if e.uuid and not seen_uuids[e.uuid] then
+                                seen_uuids[e.uuid] = true
+                                local entry_words = normalizeTitleWords(e.title)
+                                local any_w, all_present = false, true
+                                for w in pairs(entry_words) do
+                                    any_w = true
+                                    if not et_words[w] then all_present = false break end
+                                end
+                                if any_w and all_present then raw_entry_count = raw_entry_count + 1 end
+                                candidates[#candidates + 1] = e
+                                if titleWordsSubsetOf(entry_words, normalizeTitleWords(e.author), et_words)
+                                        and etVolumeCompatible(e) then
+                                    found[#found + 1] = e
+                                end
+                            end
+                        end
+                        for _, e in ipairs(found) do matches[#matches + 1] = e end
+                        if #found == 1 then
+                            addLine(T(_("  [%1] is \"%2\" by its own metadata -- found in Calibre-Web under that title."), fname, et))
                         end
                     end
                 end

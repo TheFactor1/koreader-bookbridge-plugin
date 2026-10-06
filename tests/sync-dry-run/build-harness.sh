@@ -55,6 +55,14 @@ end
 local function doCwaFileDownload() return false end
 local function doCwaLogin() return "stub-cookie" end
 local function doCwaMultipartUpload() error("upload must never be reached in a dry run") end
+-- Embedded titles: the dry-run's files are virtual, so the metadata-only
+-- document open is a lookup in an optional "path<TAB>title" file.
+local EMBED = {}
+do
+  local ef = os.getenv("EMBEDDED") and io.open(os.getenv("EMBEDDED"))
+  if ef then for l in ef:lines() do local p, t, a = l:match("^(.-)\t([^\t]*)\t?(.*)$"); if p then EMBED[p] = { t, a ~= "" and a or nil } end end ef:close() end
+end
+local function readEmbeddedTitle(p) local e = EMBED[p]; if not e then return nil end return e[1], e[2] end
 LUA
 grep -E '^local (CATALOG_PAGE|CATALOG_MAX_PAGES) ' "$M"
 extract stripJsonNull

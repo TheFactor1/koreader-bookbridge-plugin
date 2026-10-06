@@ -39,7 +39,7 @@ CWA_TEST_URL=${CWA_TEST_URL:-http://localhost:8083}
 dryrun() { # tag files dir registry
   for i in $(seq 1 40); do
     rm -f "$W/cache/MISSING"
-    docker run --rm -v "$W":/w -e FILES=/w/$2 -e DOWNLOAD_DIR="$3" -e REG_IN=/w/$4 -e REG_OUT=/w/$1.registry.json -e CACHE=/w/cache \
+    docker run --rm -v "$W":/w -e FILES=/w/$2 -e DOWNLOAD_DIR="$3" -e REG_IN=/w/$4 -e REG_OUT=/w/$1.registry.json -e CACHE=/w/cache -e EMBEDDED=/w/${2%.files}.embedded \
       openresty/openresty:alpine /usr/local/openresty/luajit/bin/luajit /w/dryrun.lua > "$W/$1.report.txt" 2> "$W/$1.err.txt" \
       || { echo "LUA ERROR in $1:"; cat "$W/$1.err.txt"; return 1; }
     [ -s "$W/cache/MISSING" ] || return 0

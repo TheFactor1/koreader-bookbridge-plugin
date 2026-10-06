@@ -32,6 +32,13 @@ for u, t, a, ser, idx in rows:
         add("series_nn_title_author", f"{ser} {n:02d} - {fs(base)} - {a1}", u)
         add("author_bracket_series_title", f"{a1} - [{ser} {n:02d}] - {fs(base)}", u)
         add("author_series_roman_title", f"{a1} - {ser} {roman.get(n, n)}_ {fs(base)}", u)
+# Files whose NAME says nothing (an ISBN-like number) but whose embedded metadata carries
+# the real title: the matcher's embedded-title pass must find them.
+embedded = {}
+for i, (u, t, a, ser, idx) in enumerate(rows):
+    first_author = re.split(r' & |\|', a or '')[0].strip()
+    name = f"/mnt/us/embedded_title/{9780000000000 + i}.epub"
+    add("embedded_title", name[len("/mnt/us/embedded_title/"):-5], u); embedded[name] = (t, first_author)
 for shape, lst in shapes.items():
     seen = {}
     for p, u in lst: seen.setdefault(p, u)
@@ -47,6 +54,16 @@ neg = ["Pierce Brown - Light Bringer_ Book VI of the Red Rising Saga", "Light Br
        "Dark Matter - Michelle Paver", "The Stranger - Harlan Coben", "Run - Ann Patchett",
        "Foundation and Empire - Isaac Asimov", "The Institute of Ideas - Anonymous", "Dune_ The Graphic Novel - Frank Herbert",
        "Hail Mary - Andy Weir", "The Way of Kings Part Two - Brandon Sanderson"]
+open(f"{W}/scenario_embedded_title.embedded", "w").write("".join(f"{p}\t{t}\t{a}\n" for p, (t, a) in embedded.items()))
+# ...and the same shape for books NOT in the library: an embedded title CWA doesn't hold must
+# still upload, never register (the negative list below, by metadata instead of by name).
+def neg_title(n):   # -> "title\tauthor" out of the negative list's filename shapes
+    parts = n.split(" - ")
+    t, a = (parts[-1], parts[0]) if n.startswith(("Pierce", "Frank", "The Gate")) else (parts[0], parts[-1])
+    return f"{t}\t{a}"
+open(f"{W}/scenario_embedded_negative.files", "w").write("\n".join(f"/mnt/us/embedded_negative/{9790000000000 + i}.epub" for i in range(len(neg))) + "\n")
+open(f"{W}/scenario_embedded_negative.expected", "w").write("")
+open(f"{W}/scenario_embedded_negative.embedded", "w").write("".join(f"/mnt/us/embedded_negative/{9790000000000 + i}.epub\t{neg_title(n)}\n" for i, n in enumerate(neg)))
 open(f"{W}/scenario_negative.files", "w").write("\n".join(f"/mnt/us/negative/{n}.epub" for n in neg) + "\n")
 open(f"{W}/scenario_negative.expected", "w").write("")
 # Stricter negatives: NEW volumes of series CWA already holds, and titles that end in a
