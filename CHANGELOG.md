@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.7.1, build 6d9ef51
+## 2026-10-06 — v0.7.1, build 9421943
 
 - **Fix**: a book whose filename says nothing Calibre-Web recognises
   ("9780141439686.epub", "book(1).epub") was uploaded even when the library
