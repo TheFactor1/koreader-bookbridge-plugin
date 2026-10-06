@@ -4028,7 +4028,8 @@ function CO.pluginsDir()
         local cwd = lfs.currentdir and lfs.currentdir() or nil
         if cwd then dir = cwd .. "/" .. dir end
     end
-    return (dir:gsub("//+", "/"))
+    dir = dir:gsub("//+", "/"):gsub("/+$", "")
+    return dir ~= "" and dir or "/"
 end
 
 function CO.folder(id)
