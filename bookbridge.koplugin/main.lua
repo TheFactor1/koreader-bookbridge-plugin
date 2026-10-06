@@ -13652,8 +13652,11 @@ end
 -- plane sat there until you happened to close another book.
 function Bookbridge:onNetworkConnected()
     self:pullReadestPositionWhenOnline()
-    -- (a moment for the connection to settle; throttled inside)
-    UIManager:scheduleIn(6, function() self:syncNow("network") end)
+    -- (a moment for the connection to settle; throttled inside; only when
+    -- Readest can sync at all)
+    if self.readestSyncReady and self:readestSyncReady() then
+        UIManager:scheduleIn(6, function() self:syncNow("network") end)
+    end
     if self.auto_update then
         UIManager:scheduleIn(5, function() self:autoCheckForUpdate("network") end)
     end
@@ -14355,6 +14358,12 @@ function SYNC.readingElsewhere(row, now)
 end
 -- ===== SYNC end =====
 
+-- Can this device sync through Readest at all (installed, signed in, auto
+-- sync on)? For the event handlers, which come before SYNC in this file.
+function Bookbridge:readestSyncReady()
+    return SYNC.readest(self) ~= nil
+end
+
 -- Bring this device in step with the others (see SYNC above). reason:
 -- "ledger", "wake", "network", "sleep" (statistics up only) or "manual"
 -- (interactive: says what happened, or why it can't).
@@ -14528,8 +14537,10 @@ function Bookbridge:onResume()
     -- Bring the clipboard receiver back up after a wake.
     UIManager:scheduleIn(1, function() self:startClipboardReceiver() end)
     -- in step with your other devices once Wi-Fi is back (a no-op without it;
-    -- NetworkConnected below catches a later connection)
-    UIManager:scheduleIn(12, function() self:syncNow("wake") end)
+    -- NetworkConnected catches a later connection)
+    if self.readestSyncReady and self:readestSyncReady() then
+        UIManager:scheduleIn(12, function() self:syncNow("wake") end)
+    end
     -- Updates: a quiet look at the self-hosted source once the network has
     -- had a moment to come back (throttled inside).
     if self.auto_update then
