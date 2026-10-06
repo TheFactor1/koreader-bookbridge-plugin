@@ -10007,30 +10007,10 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu)
     self:browseReleasesContinue(book, manual_query, releases, errors, tried)
 end
 
-function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors, tried)
-    releases = releases or {}
-    if #releases == 0 then
-        local where = table.concat(tried or {}, ", ")
-        local detail = (errors and #errors > 0) and ("\n\n" .. table.concat(errors, "\n")) or ""
-        if SRC.DEF.shelfmark.configured(self) and SRC.enabled(self, "shelfmark") then
-            -- the server can keep looking: a plain request
-            UIManager:show(InfoMessage:new{
-                text = T(_("Nothing found on %1. You can still submit a plain request and let Shelfmark keep looking."), where) .. detail,
-                timeout = 4,
-            })
-            self:confirmBookLevelRequest(book)
-            return
-        end
-        UIManager:show(InfoMessage:new{
-            text = T(_("Nothing found on %1 for \"%2\"."), where, truncate(defaultReleaseQuery(book), 80) or "?") .. detail,
-        })
-        return
-    end
-
-    -- Relevance first, then EPUB, then the server's own ordering (a plain
-    -- table.sort isn't guaranteed stable, so the original index is used
-    -- as an explicit tiebreaker rather than leaving that to chance).
-    --
+-- Relevance first, then EPUB, then the reader's source order (Settings >
+-- Sources), then download counts, then the order they arrived in (a plain
+-- table.sort isn't stable, so the original index is the final tiebreaker).
+function Bookbridge:sortReleases(releases, book)
     -- Prowlarr/indexer search is a broad keyword match, not a precise
     -- one -- confirmed live: searching "The Stand" returned 29 pages,
     -- most of them unrelated ("Last Stand", "Stand-In", even a
@@ -10094,15 +10074,21 @@ function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors,
     for _, r in ipairs(releases) do
         r.title = decodeHtmlEntities(r.title)
     end
+    -- the reader's source order breaks ties (Settings > Sources): with the
+    -- same relevance and format, the preferred source's copy comes first
+    local source_rank = {}
+    for i, id in ipairs(self:sourcesInOrder()) do source_rank[id] = i end
     for i, r in ipairs(releases) do
         r._orig_index = i
         r._relevance = releaseRelevanceScore(r.title)
+        r._source_rank = source_rank[r.source] or source_rank.shelfmark or 99
     end
     table.sort(releases, function(a, b)
         if a._relevance ~= b._relevance then return a._relevance > b._relevance end
         local a_epub = (a.format and a.format:lower() == "epub") and 0 or 1
         local b_epub = (b.format and b.format:lower() == "epub") and 0 or 1
         if a_epub ~= b_epub then return a_epub < b_epub end
+        if a._source_rank ~= b._source_rank then return a._source_rank < b._source_rank end
         -- Grabs as the last tiebreaker before falling back to the server's
         -- own ordering -- among otherwise-equal candidates (same relevance,
         -- same format), the one more people have actually grabbed is the
@@ -10116,7 +10102,32 @@ function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors,
     for _, r in ipairs(releases) do
         r._orig_index = nil
         r._relevance = nil
+        r._source_rank = nil
     end
+
+end
+
+function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors, tried)
+    releases = releases or {}
+    if #releases == 0 then
+        local where = table.concat(tried or {}, ", ")
+        local detail = (errors and #errors > 0) and ("\n\n" .. table.concat(errors, "\n")) or ""
+        if SRC.DEF.shelfmark.configured(self) and SRC.enabled(self, "shelfmark") then
+            -- the server can keep looking: a plain request
+            UIManager:show(InfoMessage:new{
+                text = T(_("Nothing found on %1. You can still submit a plain request and let Shelfmark keep looking."), where) .. detail,
+                timeout = 4,
+            })
+            self:confirmBookLevelRequest(book)
+            return
+        end
+        UIManager:show(InfoMessage:new{
+            text = T(_("Nothing found on %1 for \"%2\"."), where, truncate(defaultReleaseQuery(book), 80) or "?") .. detail,
+        })
+        return
+    end
+
+    self:sortReleases(releases, book)
 
     -- Prowlarr/indexer search is title-only by Shelfmark's own design (see
     -- the comment above browseReleases()) -- it never gets an author or

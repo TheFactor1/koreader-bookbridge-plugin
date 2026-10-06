@@ -13,7 +13,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 { awk '/^-- ===== CO begin/{f=1} f{print} f&&/^-- ===== CO end/{exit}' "$M"
   awk 'index($0, "local function annasResultToRelease(") == 1 {f=1} f{print} f&&/^end$/{exit}' "$M"
   awk '/^-- ===== SRC begin/{f=1} f{print} f&&/^-- ===== SRC end/{exit}' "$M"
-  for f in browseReleases browseReleasesContinue getBook sourcesInOrder sourcesConfigured sourcesSummary companionState confirmReleaseRequest; do
+  for f in browseReleases browseReleasesContinue sortReleases getBook sourcesInOrder sourcesConfigured sourcesSummary companionState confirmReleaseRequest; do
       awk "/^function Bookbridge:$f\\(/{f=1} f{print} f&&/^end\$/{exit}" "$M"
   done
 } > "$W/fns.lua"
@@ -144,6 +144,24 @@ b.sources_enabled = { zlibrary = false }
 b:browseReleases({ title = "Emma" })
 ck(#CONT.tried == 1 and CONT.tried[1] == "Shelfmark", "a switched-off source is skipped")
 ck(b:sourcesSummary() == "Shelfmark", "summary lists only enabled, configured sources")
+
+-- 4b. in the merged list the preferred source's copy sorts first (before download counts)
+b = bb({ server_url = "http://s" })
+local function merged()
+    return {
+        { title = "Jane Austen - Emma", format = "epub", source = "prowlarr", extra = { grabs = 500 } },
+        { title = "Jane Austen - Emma", format = "epub", source = "zlibrary", extra = {} },
+    }
+end
+b.sources_order = { "zlibrary", "shelfmark" }
+local list = merged(); b:sortReleases(list, { title = "Emma", authors = { "Jane Austen" } })
+ck(list[1].source == "zlibrary", "same relevance and format: the preferred source (Z-Library) sorts before a 500-grab copy from Shelfmark")
+b.sources_order = { "shelfmark", "zlibrary" }
+list = merged(); b:sortReleases(list, { title = "Emma", authors = { "Jane Austen" } })
+ck(list[1].source == "prowlarr", "...and the other way round when Shelfmark is preferred")
+list = { { title = "Making of Emma", format = "epub", source = "zlibrary", extra = {} }, { title = "Jane Austen - Emma", format = "pdf", source = "prowlarr", extra = {} } }
+b:sortReleases(list, { title = "Emma", authors = { "Jane Austen" } })
+ck(list[1].source == "prowlarr", "relevance still wins over source order (a 'making of' sinks)")
 
 -- 5. nothing found: a plain request only when Shelfmark is there
 ZL.books = {}
