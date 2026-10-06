@@ -4,6 +4,32 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-06 — v0.9.0, build (pending)
+
+Your devices in step, through Readest.
+
+- **New**: **statistics, library and progress stay in step between your
+  devices.** Readest's plugin already syncs reading statistics both ways,
+  but only around an open book (it pushes when a book closes and pulls when
+  one opens), so a device that lives on the home screen or sleeps with
+  Wi-Fi off never caught up. Bookbridge now syncs on wake, when Wi-Fi comes
+  back, when the Reading Ledger opens, and just before sleep (statistics
+  only) -- whenever Readest is signed in with auto sync on, and never
+  turning Wi-Fi on itself. **Readest sync > Sync now** does it on the spot.
+- **New**: **the Readest cloud library is the library your devices share.**
+  Every book in your library folder goes up on Wi-Fi, a few per sync
+  (never while a book is open); a book you're partway through on another
+  device comes down. "Storage full" (500 MB on Readest's free plan) stops
+  the uploads for a day and says so once. **Readest sync** has the choices
+  (every book / books I open / off; get books I'm reading elsewhere) and
+  **Cloud library** (Readest's own library, with every book in it). This
+  replaces v0.8's yes/no upload switch, which was decided automatically
+  and isn't carried over.
+- **New**: **Set up another device** also copies the Reading Ledger's
+  choices: your runner, your rival, their names, the race look.
+- **Change**: the status screen's Readest row says when it last synced, or
+  that storage is full; tapping it syncs.
+
 ## 2026-10-06 — v0.8.2, build dd2fc37
 
 - **Fix**: **Find a book** no longer skips Z-Library. With a server

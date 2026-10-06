@@ -321,6 +321,25 @@ Offline? The position is queued and pushed when the network comes back or
 the device next wakes. Nothing runs on a timer. **Forget Hardcover book
 choices** clears every match so books are decided again.
 
+## Your devices in step
+
+With the Readest plugin signed in (auto sync on) on each device, Bookbridge
+keeps them in step through Readest's cloud -- on wake, when Wi-Fi comes
+back, when the Reading Ledger opens, and before sleep; **Readest sync >
+Sync now** any time:
+
+- **Reading statistics**, both ways: every device's statistics hold the
+  page turns from all of them (the Reading Ledger's race is rebuilt from
+  them, so it's the same race everywhere).
+- **The library**: every book in your library folder goes to the Readest
+  cloud, a few per sync; a book you're partway through on another device
+  comes down. Everything else is in **Cloud library**. Readest's free plan
+  holds 500 MB; when it's full, books stay where they are and Bookbridge
+  tries again a day later.
+- **Your place in each book**, through Readest as below.
+
+Nothing here turns Wi-Fi on; a device catches up the next time it's online.
+
 ## Readest sync (phone & tablet)
 
 Bookbridge installs the Readest KOReader plugin for you (**Bookbridge >
