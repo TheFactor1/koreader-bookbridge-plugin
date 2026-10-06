@@ -194,12 +194,11 @@ do
         Bookbridge.settings = nil
         return b2
     end
-    ck(settings_with({}, { access_token = "t", auto_sync = true }).readest_upload == true, "upgrade with Readest signed in + auto sync: upload stays on")
-    ck(settings_with({}, { access_token = "t", auto_sync = false }).readest_upload == false, "upgrade with auto sync off: upload off")
-    ck(settings_with({}, nil).readest_upload == false, "fresh install (no Readest): upload off")
-    ck(settings_with({ readest_upload = false }, { access_token = "t", auto_sync = true }).readest_upload == false, "an explicit off is kept even with Readest running")
-    local d = settings_with({}, { access_token = "t", auto_sync = true })
-    ck(d._readest_upload_decided == true and settings_with({ readest_upload = true }, nil)._readest_upload_decided == nil, "the decision is flagged for one save, only when it was just made")
+    ck(settings_with({}, nil).readest_library_upload == "all" and settings_with({}, nil).readest_upload == true, "fresh install: every book goes to Readest's cloud (the shared library)")
+    ck(settings_with({ readest_upload = false }, nil).readest_library_upload == "all", "v0.8's automatic yes/no isn't carried over")
+    ck(settings_with({ readest_library_upload = "off" }, nil).readest_upload == false, "an explicit off stays off")
+    ck(settings_with({ readest_library_upload = "opened" }, nil).readest_upload == true, "'books I open' still uploads books you open")
+    ck(settings_with({}, nil).readest_download == "reading" and settings_with({ readest_download = "off" }, nil).readest_download == "off", "downloads: books being read elsewhere, unless switched off")
 end
 local b2 = reader(mkstore({ abc123 = { hash = "abc123", title = "Some Book", uploaded_at = 1 } }))
 for i = 1, 6 do b2:onPageUpdate(i) end

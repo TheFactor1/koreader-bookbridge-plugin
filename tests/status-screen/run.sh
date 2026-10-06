@@ -122,13 +122,18 @@ ck(row(rows, "Calibre-Web").mandatory == "3 books synced", "Calibre-Web: shows t
 ck(row(rows, "Hardcover").mandatory == "Syncing", "Hardcover: 'Syncing'")
 ck(row(rows, "Readest").mandatory == "Syncing", "Readest: 'Syncing' when signed in with auto sync")
 do
+    local synced = 0
     local b_up = bb({ server_url = "http://sm:8084", username = "u", password = "p", cwa_url = "http://cwa:8083", cwa_username = "u", cwa_password = "p",
-        ui = { readest = ok_rs }, download_dir = "/mnt/us/books", readest_upload = true })
+        ui = { readest = ok_rs }, download_dir = "/mnt/us/books", readest_library_upload = "all",
+        syncNow = function() synced = synced + 1 end })
     shown = nil; row(b_up:collectStatusRows(), "Readest").action()
     local with = shown and shown.text or ""
-    shown = nil; row(rows, "Readest").action()
-    local without = shown and shown.text or ""
-    ck(with:find("go to your Readest library", 1, true) and without:find("Put books I read here", 1, true), "Readest 'Syncing' tap: explains the upload when on, how to turn it on when off")
+    ck(with:find("in step through Readest", 1, true) and with:find("Every book in your library folder", 1, true) and synced == 1,
+        "Readest row tap: says what stays in step, and syncs now")
+    b_up.readest_last_sync = os.time() - 300
+    ck(row(b_up:collectStatusRows(), "Readest").mandatory == "Synced 5 min ago", "Readest row: when it last synced")
+    b_up.readest_quota_full_at = os.time() - 60
+    ck(row(b_up:collectStatusRows(), "Readest").mandatory == "Storage full", "Readest row: storage full is said")
     ck(row(rows, "Readest").text:find("your place on phone", 1, true), "Readest row is about your place, not a library")
 end
 ck(row(rows, "Updates").mandatory == "Automatic", "Updates: 'Automatic'")
