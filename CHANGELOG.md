@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.8.1, build (pending)
+## 2026-10-06 — v0.8.1, build fbe62fa
 
 - **New**: the **Reading Ledger** is a companion. Bookbridge installs and
   updates it from its GitHub release like the Z-Library and Readest plugins
