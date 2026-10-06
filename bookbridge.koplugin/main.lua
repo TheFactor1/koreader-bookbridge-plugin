@@ -133,6 +133,8 @@ function Bookbridge:loadSettings()
     self.readest_upload = self.readest_library_upload ~= "off"   -- (books you open)
     self.readest_last_sync = sm.readest_last_sync
     self.readest_quota_full_at = sm.readest_quota_full_at
+    self.readest_welcome_pending = sm.readest_welcome_pending
+    self.readest_welcomed = sm.readest_welcomed
     -- shelfmark-ai-relay: suggests a match for files doSyncLibrary could not
     -- resolve on its own. Optional -- everything works exactly as before when
     -- unset, the leftovers just stay reported as "check manually".
@@ -239,6 +241,9 @@ function Bookbridge:init()
     self:startClipboardReceiver()
     -- (the other plugin instances exist a tick from now)
     UIManager:nextTick(function() self:tuckCompanions() end)
+    if self.readest_welcome_pending and not (self.ui and self.ui.document) then
+        UIManager:scheduleIn(2, function() self:readestOnboard() end)
+    end
     self:maybeShowFirstRunSetup()
 end
 
@@ -273,6 +278,8 @@ function Bookbridge:saveAllSettings(msg)
         readest_download = self.readest_download,
         readest_last_sync = self.readest_last_sync,
         readest_quota_full_at = self.readest_quota_full_at,
+        readest_welcome_pending = self.readest_welcome_pending,
+        readest_welcomed = self.readest_welcomed,
         hardcover_token = self.hardcover_token,
         hardcover_language = self.hardcover_language,
         hardcover_progress_sync = self.hardcover_progress_sync,
@@ -4489,7 +4496,7 @@ CO.DEF = {
         repo = "readest/readest", credit = "the Readest KOReader plugin by Readest (AGPL-3.0)",
         asset = "^Readest%-[%d%.]+%-%d+%.koplugin%.zip$", ver_pat = "^Readest%-([%d%.]+)%-",
         strip = "readest.koplugin/", keep = {},
-        what = "your place in sync with the Readest app on a phone or tablet",
+        what = "your library and your reading in step on every device (a free Readest account)",
     },
     -- the Reading Ledger: a home screen that wraps Bookbridge (it keeps its
     -- own KOReader menu entry, so it is never tucked)
@@ -8953,6 +8960,11 @@ function Bookbridge:installCompanionNow(id, opts, state)
         G_reader_settings:saveSetting("plugins_disabled", disabled)
     end
     local what = state.installed and "updated" or "installed"
+    if id == "readest" and what == "installed" then
+        -- (after the restart: straight on to signing in, Bookbridge:readestOnboard)
+        self.readest_welcome_pending = true
+        self:saveAllSettings()
+    end
     debugLog("[companion] " .. what .. " " .. id .. " v" .. tostring(info.version))
     if not opts.auto then
         self:askCompanionRestart({ { def = def, version = info.version, what = what } })
@@ -14358,6 +14370,113 @@ function SYNC.readingElsewhere(row, now)
 end
 -- ===== SYNC end =====
 
+-- Readest at a glance, for the status screen and the Reading Ledger:
+-- { installed, loaded, signed_in, auto_sync, label } -- label one of
+-- "Not installed", "Restart needed", "Disabled", "Not signed in",
+-- "Auto sync off", "Storage full", "Synced 5 min ago", "Ready".
+function Bookbridge:readestState()
+    local st = self:companionState("readest")
+    local rs = self.ui and self.ui.readest
+    local s = type(rs) == "table" and type(rs.settings) == "table" and rs.settings or nil
+    local out = { installed = st.installed or s ~= nil, loaded = s ~= nil, disabled = st.disabled,
+        signed_in = s ~= nil and s.access_token ~= nil and s.user_id ~= nil, auto_sync = s ~= nil and s.auto_sync == true }
+    local ago = self.readest_last_sync and os.time() - self.readest_last_sync
+    if not out.installed then out.label = _("Not installed")
+    elseif st.disabled then out.label = _("Disabled")
+    elseif not out.loaded then out.label = _("Restart needed")
+    elseif not out.signed_in then out.label = _("Not signed in")
+    elseif not out.auto_sync then out.label = _("Auto sync off")
+    elseif self.readest_quota_full_at and os.time() - self.readest_quota_full_at < SYNC.QUOTA_BACKOFF then out.label = _("Storage full")
+    elseif ago and ago < 3600 then out.label = T(_("Synced %1 min ago"), math.max(1, math.floor(ago / 60)))
+    elseif ago and ago < 86400 then out.label = T(_("Synced %1 h ago"), math.floor(ago / 3600))
+    else out.label = _("Ready") end
+    return out
+end
+
+-- One tap for whatever Readest needs next: install it, enable it, restart,
+-- sign in, switch auto sync on -- or, when all is set, sync now.
+function Bookbridge:readestNext()
+    local st = self:readestState()
+    if not st.installed then
+        local Trapper = require("ui/trapper")
+        return Trapper:wrap(function() self:installCompanion("readest") end)
+    end
+    if st.disabled then return self:enableCompanion("readest") end
+    if not st.loaded then return self:askCompanionRestart({ { def = CO.DEF.readest, version = CO.installedVersion("readest") or "?", what = "installed" } }) end
+    if not st.signed_in then return self:readestSignIn() end
+    if not st.auto_sync then return self:readestWelcome() end
+    return self:syncNow("manual", true)
+end
+
+-- Readest's own sign-in box, with the offer to type it on a phone (an
+-- e-reader keyboard and a password are a poor match). Watches for the
+-- sign-in to land, then switches auto sync on and says what happens now.
+function Bookbridge:readestSignIn()
+    local rs = self.ui and self.ui.readest
+    local ok_auth, SyncAuth = pcall(require, "readest_syncauth")
+    if type(rs) ~= "table" or type(rs.settings) ~= "table" or not ok_auth or type(SyncAuth) ~= "table" or not SyncAuth.login then
+        -- (a Readest plugin without that entry point: its own menu)
+        if self.showCompanionMenu then return self:showCompanionMenu("readest") end
+        return
+    end
+    local function open(phone)
+        SyncAuth:login(rs.settings, rs.path, _("Sign in to Readest (free account at readest.com)"), nil)
+        if phone then UIManager:scheduleIn(0.3, function() self:typeOnPhone() end) end
+        -- watch for it (Readest has no callback): every 3 s for 5 minutes
+        local tries = 0
+        local function watch()
+            tries = tries + 1
+            if rs.settings.access_token and rs.settings.user_id then return self:readestWelcome() end
+            if tries < 100 then UIManager:scheduleIn(3, watch) end
+        end
+        UIManager:scheduleIn(3, watch)
+    end
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local dlg
+    dlg = ButtonDialog:new{
+        title = _("Sign in to Readest: your library and your reading, on every device.\n\nNo account yet? Make one free at readest.com (on your phone is easiest)."),
+        buttons = {
+            { { text = _("Type it on my phone"), callback = function() UIManager:close(dlg); open(true) end } },
+            { { text = _("Type it here"), callback = function() UIManager:close(dlg); open(false) end } },
+            { { text = _("Later"), callback = function() UIManager:close(dlg) end } },
+        },
+    }
+    UIManager:show(dlg)
+end
+
+-- Signed in: auto sync on (everything here hangs on it), the first sync,
+-- and once, what that means -- including the free plan's 500 MB.
+function Bookbridge:readestWelcome()
+    local rs = self.ui and self.ui.readest
+    if type(rs) ~= "table" or type(rs.settings) ~= "table" then return end
+    if not rs.settings.auto_sync then
+        if rs.onReadestSyncToggleAutoSync then pcall(rs.onReadestSyncToggleAutoSync, rs, true)
+        else rs.settings.auto_sync = true; G_reader_settings:saveSetting("readest_sync", rs.settings) end
+    end
+    self.readest_welcome_pending = nil
+    self:saveAllSettings()
+    if not self.readest_welcomed then
+        self.readest_welcomed = true
+        self:saveAllSettings()
+        UIManager:show(InfoMessage:new{
+            text = _("You're in. Readest now keeps this device in step with your others:\n\n- your library: books you get go to Readest's cloud, and a book you're reading elsewhere comes here\n- your place in every book\n- your reading statistics (the Reading Ledger's race is the same on every device)\n\nReadest's free plan holds 500 MB of books (a few hundred). Readest sync has the choices, and Cloud library shows everything."),
+        })
+    end
+    UIManager:scheduleIn(1, function() self:syncNow("manual", false) end)
+end
+
+-- After Bookbridge installed Readest and KOReader restarted: straight on
+-- to signing in (once; Later leaves it to the status screen and the Ledger).
+function Bookbridge:readestOnboard()
+    if not self.readest_welcome_pending then return end
+    local st = self:readestState()
+    if not st.loaded then return end
+    if st.signed_in then return self:readestWelcome() end
+    self.readest_welcome_pending = nil
+    self:saveAllSettings()
+    self:readestSignIn()
+end
+
 -- Can this device sync through Readest at all (installed, signed in, auto
 -- sync on)? For the event handlers, which come before SYNC in this file.
 function Bookbridge:readestSyncReady()
@@ -14705,6 +14824,14 @@ function Bookbridge:collectStatusRows()
             action = function() self:showStartHere() end })
     end
 
+    -- Readest: your library and your reading on every device (first: the
+    -- rest leans on it)
+    do
+        local st = self:readestState()
+        add({ text = _("Readest -- your library & sync, every device"), mandatory = st.label,
+            action = function() self:readestNext() end })
+    end
+
     -- Sources
     self:companionStatusRows(add)
     add({ text = _("Sources -- where books come from"), mandatory = self:sourcesSummary(),
@@ -14736,53 +14863,6 @@ function Bookbridge:collectStatusRows()
     end
     add({ text = _("Hardcover -- reading progress"), mandatory = hc, action = hc_act })
 
-    -- Readest (a separate plugin; Bookbridge fills its gaps)
-    local rs = self.ui and self.ui.readest
-    local rd, rd_act
-    if type(rs) ~= "table" or type(rs.settings) ~= "table" then
-        -- not running: Bookbridge installs it (a companion, see CO)
-        local state = self:companionState("readest")
-        if state.installed and state.disabled then
-            rd = _("Disabled"); rd_act = function() self:enableCompanion("readest") end
-        elseif state.installed then
-            rd = _("Restart needed"); rd_act = function() UIManager:restartKOReader() end
-        else
-            rd = _("Not installed")
-            rd_act = function()
-                local Trapper = require("ui/trapper")
-                Trapper:wrap(function() self:installCompanion("readest") end)
-            end
-        end
-    elseif not rs.settings.access_token then
-        rd = _("Not signed in")
-        rd_act = function()
-            UIManager:show(InfoMessage:new{ text = _("Sign in under Bookbridge > Readest sync with the same account as the Readest app on your phone or tablet.") })
-        end
-    elseif not rs.settings.auto_sync then
-        rd = _("Auto sync off")
-        rd_act = function()
-            pcall(function() rs:onReadestSyncToggleAutoSync(true) end)
-            self:showStatus({ no_auto_check = true })
-        end
-    else
-        local ago = self.readest_last_sync and os.time() - self.readest_last_sync
-        rd = (self.readest_quota_full_at and os.time() - self.readest_quota_full_at < 24 * 3600) and _("Storage full")
-            or (ago and ago < 3600 and T(_("Synced %1 min ago"), math.max(1, math.floor(ago / 60))))
-            or (ago and ago < 86400 and T(_("Synced %1 h ago"), math.floor(ago / 3600)))
-            or _("Syncing")
-        rd_act = function()
-            -- in step now, and say what that covers
-            local text = _("Your devices stay in step through Readest: reading statistics both ways, your place in each book, and the library -- on wake, when Wi-Fi comes back, when the Reading Ledger opens, and before sleep.")
-            if self.readest_library_upload == "all" then
-                text = text .. "\n\n" .. _("Every book in your library folder goes to Readest's cloud; books you're reading on another device come here.")
-            elseif self.readest_library_upload == "opened" then
-                text = text .. "\n\n" .. _("Books go to Readest's cloud after a few pages of reading.")
-            end
-            UIManager:show(InfoMessage:new{ text = text, timeout = 6 })
-            self:syncNow("manual", true)
-        end
-    end
-    add({ text = _("Readest -- your place on phone & tablet"), mandatory = rd, action = rd_act })
 
     -- A server of your own (optional): requests through Shelfmark, a
     -- library on Calibre-Web
@@ -15096,11 +15176,11 @@ function Bookbridge:showStartHere()
         end)
     end
     dlg = ButtonDialog:new{
-        title = _("Bookbridge finds books and keeps your place in sync, with nothing to host.\n\nFirst, where books come from. A server of your own is optional."),
+        title = _("Bookbridge finds books, and Readest keeps your library and your reading in step on every device -- nothing to host.\n\nStart with Readest, then where books come from. A server of your own is optional."),
         buttons = {
-            { { text = _("Install the Z-Library plugin -- search free, download with an account"), callback = install("zlibrary") } },
-            { { text = _("Enter an Anna's Archive member key"), callback = pick(function() self:editAnnasSettings() end) } },
-            { { text = _("Install the Readest plugin -- your place on a phone or tablet"), callback = install("readest") } },
+            { { text = _("1. Readest -- your library and sync on every device (free account)"), callback = pick(function() self:readestNext() end) } },
+            { { text = _("2. Z-Library -- find books (search free, download with an account)"), callback = install("zlibrary") } },
+            { { text = _("Or an Anna's Archive member key"), callback = pick(function() self:editAnnasSettings() end) } },
             { { text = _("Copy another reader's settings"), callback = pick(function() self:importSettingsFromText() end) } },
             { { text = _("Or connect a book server (optional)"), callback = pick(function()
                 local Trapper = require("ui/trapper")
@@ -15131,10 +15211,10 @@ function Bookbridge:showHostingGuide()
         text = _([[Nothing, to start. Bookbridge is only the reader side; books come from accounts you already have, and a server of your own is optional.
 
 NOTHING TO HOST
+Readest -- your library and your reading on every device: a free account at readest.com and its KOReader plugin, which Bookbridge installs (Bookbridge > Readest sync). Books, your place in each, and your reading statistics stay in step on your Kindle, phone and computer. The free plan holds 500 MB of books.
 Z-Library -- its KOReader plugin, which Bookbridge installs (Bookbridge > Z-Library > Install). Searching needs no account; downloads use your own Z-Library account.
 Anna's Archive -- your own member key, entered under Settings > Connections > Anna's Archive. The reader signs in and downloads directly.
 Hardcover -- an API token from hardcover.app/account/api: reading progress, lists, followed authors.
-Readest -- its KOReader plugin, also installed by Bookbridge (Bookbridge > Readest sync > Install): your place in sync with the Readest app on a phone or tablet.
 
 OPTIONAL SERVERS -- a computer that runs Docker and stays on
 Shelfmark (github.com/calibrain/shelfmark), port 8084 -- request books and have them fetched for you. Settings > Connections > Shelfmark.

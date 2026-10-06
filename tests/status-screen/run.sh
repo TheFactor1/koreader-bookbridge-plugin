@@ -13,8 +13,9 @@ M="$REPO/bookbridge.koplugin/main.lua"
   # the companions (CO) and sources (SRC) blocks: the status screen lists both
   awk '/^-- ===== CO begin/{f=1} f{print} f&&/^-- ===== CO end/{exit}' "$M"
   awk '/^-- ===== SRC begin/{f=1} f{print} f&&/^-- ===== SRC end/{exit}' "$M"
+  awk '/^-- ===== SYNC begin/{f=1} f{print} f&&/^-- ===== SYNC end/{exit}' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in libraryDir openLibraryFolder showStartHere collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide applyAnnasExtra companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in readestState readestNext readestSignIn readestWelcome readestOnboard libraryDir openLibraryFolder showStartHere collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide applyAnnasExtra companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -31,7 +32,9 @@ loadHardcoverMap = function() return MAP end
 debugLog = function() end
 local shown
 local msgs = {}
-UIManager = { show = function(_s, w) shown = w; msgs[#msgs + 1] = w end, close = function() end }
+local SCHED = {}
+UIManager = { show = function(_s, w) shown = w; msgs[#msgs + 1] = w end, close = function() end,
+    scheduleIn = function(_s, d, f) SCHED[#SCHED + 1] = f end }
 InfoMessage = { new = function(_s, t) return t end }
 BD = nil
 package.loaded["ui/widget/buttondialog"] = { new = function(_s, t) BD = t; return t end }
@@ -73,6 +76,7 @@ local function bb(t)
     t = t or {}
     t.defaultDownloadDir = function() return "/mnt/us/books" end
     if t.sourcesConfigured == nil then t.sourcesConfigured = function() return false end end
+    if t.saveAllSettings == nil then t.saveAllSettings = function() end end
     t.shelfmarkLoginKnownBad = function(self) return self._shelfmark_login_rejected ~= nil and self._shelfmark_login_rejected == shelfmarkCredentialKey(self.server_url, self.username, self.password) end
     return setmetatable(t, { __index = Bookbridge })
 end
@@ -87,7 +91,7 @@ ck(row(rows, "Shelfmark").mandatory == "Not set up" and row(rows, "Calibre-Web")
 
 -- A configured Kindle, nothing checked yet
 REG = { a = {}, b = {}, c = {} }
-local ok_rs = { settings = { access_token = "t", auto_sync = true } }
+local ok_rs = { settings = { access_token = "t", user_id = "u", auto_sync = true } }
 local b = bb({ server_url = "http://s", username = "matt", password = "p", cwa_url = "http://c", cwa_username = "admin",
     hardcover_token = "tok", hardcover_progress_sync = true, update_url = "http://u", auto_update = true,
     ui = { readest = ok_rs }, download_dir = "/mnt/us/books" })
@@ -103,9 +107,9 @@ do
     BD = nil; r2[1].action()
     local labels = {}
     for _, brow in ipairs(BD and BD.buttons or {}) do labels[#labels + 1] = brow[1].text end
-    ck(labels[1] and labels[1]:find("Z%-Library") and labels[2]:find("Anna's Archive") and labels[3]:find("Readest")
+    ck(labels[1] and labels[1]:find("Readest") and labels[2]:find("Z%-Library") and labels[3]:find("Anna's Archive")
        and labels[4]:find("another reader") and labels[5]:find("optional") and labels[6] == "Later",
-       "Start here: Z-Library, Anna's key, Readest, another reader, then the optional server, then Later")
+       "Start here: Readest first, then Z-Library, Anna's key, another reader, the optional server, Later")
     ck(row(r2, "Optional: connect a book server") ~= nil, "...and 'Optional: connect a book server' is a row of its own")
     ck(row(r2, "Shelfmark").text:find("(optional)", 1, true) and row(r2, "Calibre-Web").text:find("(optional)", 1, true), "Shelfmark and Calibre-Web rows say (optional)")
     local with_src = bb({ ui = {}, sourcesConfigured = function() return true end })
@@ -120,21 +124,27 @@ end
 ck(row(rows, "Shelfmark").mandatory == "Saved", "Shelfmark: 'Saved' until checked (not the ambiguous 'Set up')")
 ck(row(rows, "Calibre-Web").mandatory == "3 books synced", "Calibre-Web: shows the synced book count")
 ck(row(rows, "Hardcover").mandatory == "Syncing", "Hardcover: 'Syncing'")
-ck(row(rows, "Readest").mandatory == "Syncing", "Readest: 'Syncing' when signed in with auto sync")
+ck(row(rows, "Readest").mandatory == "Ready", "Readest: 'Ready' when signed in with auto sync, not yet synced")
+do
+    local first_readest, first_source
+    for i, r in ipairs(rows) do
+        if not first_readest and r.text:find("Readest", 1, true) then first_readest = i end
+        if not first_source and (r.text:find("Sources", 1, true) or r.text:find("Z%-Library")) then first_source = i end
+    end
+    ck(first_readest and first_source and first_readest < first_source, "Readest comes before the sources on the status screen")
+end
 do
     local synced = 0
     local b_up = bb({ server_url = "http://sm:8084", username = "u", password = "p", cwa_url = "http://cwa:8083", cwa_username = "u", cwa_password = "p",
         ui = { readest = ok_rs }, download_dir = "/mnt/us/books", readest_library_upload = "all",
         syncNow = function() synced = synced + 1 end })
-    shown = nil; row(b_up:collectStatusRows(), "Readest").action()
-    local with = shown and shown.text or ""
-    ck(with:find("in step through Readest", 1, true) and with:find("Every book in your library folder", 1, true) and synced == 1,
-        "Readest row tap: says what stays in step, and syncs now")
+    row(b_up:collectStatusRows(), "Readest").action()
+    ck(synced == 1, "Readest row tap, all set up: syncs now")
     b_up.readest_last_sync = os.time() - 300
     ck(row(b_up:collectStatusRows(), "Readest").mandatory == "Synced 5 min ago", "Readest row: when it last synced")
     b_up.readest_quota_full_at = os.time() - 60
     ck(row(b_up:collectStatusRows(), "Readest").mandatory == "Storage full", "Readest row: storage full is said")
-    ck(row(rows, "Readest").text:find("your place on phone", 1, true), "Readest row is about your place, not a library")
+    ck(row(rows, "Readest").text:find("library & sync", 1, true), "Readest row: your library and sync, every device")
 end
 ck(row(rows, "Updates").mandatory == "Automatic", "Updates: 'Automatic'")
 ck(row(rows, "Phone clipboard").mandatory == "Listening on 8090", "clipboard: listening")
@@ -158,8 +168,11 @@ rows = b:collectStatusRows()
 ck(row(rows, "Readest").mandatory == "Auto sync off", "Readest: auto sync off is flagged")
 local toggled = false
 ok_rs.onReadestSyncToggleAutoSync = function(_s, v) toggled = v end
+b.syncNow = function() end
+shown = nil
 row(rows, "Readest").action()
 ck(toggled == true, "...and tapping it turns Readest's auto sync on")
+ck(shown and shown.text and shown.text:find("500 MB", 1, true), "...with the welcome: what stays in step, and the free plan's 500 MB")
 ok_rs.settings.access_token = nil
 ck(row(b:collectStatusRows(), "Readest").mandatory == "Not signed in", "Readest: not signed in")
 ok_rs.settings.access_token = "t"; ok_rs.settings.auto_sync = true

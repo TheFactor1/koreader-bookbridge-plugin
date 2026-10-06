@@ -27,6 +27,14 @@ Your devices in step, through Readest.
   and isn't carried over.
 - **New**: **Set up another device** also copies the Reading Ledger's
   choices: your runner, your rival, their names, the race look.
+- **Change**: **Readest comes first.** It's the first line of *Start here*,
+  the first row of Status & setup ("your library & sync, every device"),
+  and the first step in the README. One tap does whatever it needs next:
+  install, restart, sign in -- with Readest's own sign-in box and the offer
+  to type it on your phone -- then auto sync switches on by itself and a
+  one-time note says what now stays in step, including the free plan's
+  500 MB. After Bookbridge installs Readest, the sign-in follows the
+  restart on its own.
 - **Change**: the status screen's Readest row says when it last synced, or
   that storage is full; tapping it syncs.
 

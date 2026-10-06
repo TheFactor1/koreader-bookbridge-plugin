@@ -41,24 +41,30 @@ Your place syncs with the Readest app through **Bookbridge > Readest sync**
 
 ## Set it up without a server
 
-1. Put Bookbridge on the reader (Step 2 of the server guide below: download
-   `bookbridge.koplugin.zip` from the latest release, copy the folder into
-   KOReader's `plugins`, restart KOReader).
-2. **Bookbridge > Z-Library > Install** (it downloads the Z-Library plugin
-   from its GitHub release, checks it, and asks to restart). Use the Readest
-   app on a phone or tablet? **Bookbridge > Readest sync > Install** keeps
-   your place in step with it. Both are kept up to date together with
-   Bookbridge.
-3. Have an Anna's Archive membership too? **Settings > Connections > Anna's
-   Archive**, paste the key (Type on your phone), Apply: it signs in to check.
+**Readest is the heart of it**: a free [Readest](https://readest.com) account
+holds your library and keeps your reading in step on every device -- your
+Kindle, your phone, your computer (Readest's own apps open the same library).
+
+1. Put Bookbridge on the reader: download `bookbridge.koplugin.zip` from the
+   latest release, copy the folder into KOReader's `plugins`, restart. (Or the
+   [Reading Ledger](https://github.com/TheFactor1/koreader-reading-ledger)
+   bundle, which has both and gives you the home screen.)
+2. **Readest** -- the first line of *Start here*, or **Bookbridge > Readest
+   sync**: Bookbridge installs the Readest plugin, asks to restart, then
+   opens Readest's sign-in (type it on your phone if you like; make a free
+   account at readest.com first). Signed in, sync switches on by itself:
+   your books, your place in each, and your reading statistics now follow
+   you. The free plan holds 500 MB of books.
+3. **Where books come from** -- **Bookbridge > Z-Library > Install** (search
+   is free; downloads use your Z-Library account), and/or an Anna's Archive
+   member key under **Settings > Connections > Anna's Archive**.
 4. **Bookbridge > Find a book**: title, author, pick a file, **Download**.
-   The book lands in your library folder (**Bookbridge > Library** opens it)
-   and Bookbridge offers to open the book.
-5. A second reader? On this one, **Settings > Set up another device > Show
-   setup code**; on the other, **Import settings from another reader**, scan
-   the code with your phone and send it over with **Type on your phone**.
-   Same Wi-Fi, no server: your keys, logins and sources arrive, and it offers
-   to install the same plugins.
+   It lands in your library folder, goes up to Readest, and appears on your
+   other devices.
+5. **Another device?** Install there too and sign in to Readest with the
+   same account: the library and your reading arrive. *Settings > Set up
+   another device* copies your keys, sources and Reading Ledger choices
+   across in one go (same Wi-Fi, no server).
 
 ## Set it up with a server
 
