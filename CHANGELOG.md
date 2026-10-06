@@ -4,8 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.7.0, build 4718dcf
+## 2026-10-06 — v0.7.1, build 6d9ef51
 
+- **Fix**: a book whose filename says nothing Calibre-Web recognises
+  ("9780141439686.epub", "book(1).epub") was uploaded even when the library
+  already held it under its real title (found by the server-side pipeline
+  run). Before uploading, the sync now takes one look at the file's own
+  embedded title and author and asks Calibre-Web once more -- same word and
+  volume gates, so it can only turn an upload into a match or a "check
+  manually", never the reverse. Proven on the live library: 79 ISBN-named
+  copies matched, 15 look-alikes not in the library still upload.
 - **New**: **Anna's Archive straight from the reader.** With your member
   key alone (Settings > Connections > Anna's Archive), Bookbridge signs in,
   searches and downloads -- no helper server. The site's bot check comes
