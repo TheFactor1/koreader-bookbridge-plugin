@@ -4894,6 +4894,12 @@ end
 
 -- ===== device-to-device settings transfer (QR code / paste) =====
 --
+-- (The one-time pad described here is the ORIGINAL scheme, kept so codes
+-- from an older Bookbridge still import. New codes use PAIR below: a
+-- 32-byte key in the QR, a sha256 keystream and an HMAC, with the
+-- ciphertext fetched from the other reader over the Wi-Fi or, between
+-- networks, from the pairing relay.)
+--
 -- No crypto library exists anywhere in KOReader's Lua environment
 -- (confirmed by a full search of its frontend/ffi/common trees for
 -- anything sha/aes/crypt/cipher/hmac-shaped) -- hand-rolling a real
@@ -4954,7 +4960,9 @@ local function doPairingUpload(relay_url, ciphertext_b64, socks5_proxy)
     end
     local ok, code = pcall(function() return socket.skip(1, http.request(request)) end)
     socketutil:reset_timeout()
-    if not ok then
+    -- (a refused connection comes back as nil, "refused" -- a string where
+    -- the status code would be, not an error)
+    if not ok or type(code) ~= "number" then
         debugLog("[pair] <- connection error: " .. tostring(code))
         return nil, nil, _("Couldn't reach the pairing relay -- check its URL.")
     end
@@ -4974,6 +4982,186 @@ end
 -- a phone or Kindle can be read on the homeserver without adb, screenshots of
 -- the log viewer, or remoting into the device. Plain text; the relay files it
 -- under a timestamped name and never serves it back.
+-- ===== PAIR begin =====
+-- Settings from one reader to another with nothing hosted. The reader
+-- showing the code encrypts its settings with a fresh 32-byte key and
+-- serves the ciphertext ONCE, for five minutes, from the HTTP receiver it
+-- already runs for "Type on your phone" (CLIP, port 8090). The code the
+-- other reader gets -- scanned from the QR with a phone and sent over with
+-- Type on your phone, or typed -- is ~90 characters: its address, a short
+-- selector and the key. The key never leaves the code; the receiver only
+-- ever hands out ciphertext plus its MAC, so photographing the ciphertext
+-- or guessing the selector gives nothing without the key. Between two
+-- networks the same blob goes through the server's pairing relay instead.
+--
+-- Cipher: XOR with a keystream of sha256(key .. counter) blocks (ffi/sha2,
+-- part of KOReader), authenticated by HMAC-SHA256(key, ciphertext)
+-- truncated to 16 bytes. The key is used once, for one blob.
+local PAIR = {}
+PAIR.TTL = 300          -- seconds an offer stays fetchable (the QR's own timeout)
+PAIR.MAX_TRIES = 10     -- wrong selectors before the offer is dropped
+PAIR.VERSION = 2
+-- Everything another reader of yours needs; never the download folder (a
+-- device's own), the Anna's session/mirror cache (renewed on its own), the
+-- companion install records or the update source.
+PAIR.FIELDS = {
+    "server_url", "username", "password", "socks5_proxy",
+    "cwa_url", "cwa_username", "cwa_password",
+    "annas_url", "annas_download_key", "annas_tld",
+    "hardcover_token", "hardcover_language", "hardcover_progress_sync", "hardcover_review_qr_enabled",
+    "sources_order", "sources_enabled", "sources_stop_first",
+    "companions_in_ko_menu", "ai_relay_url", "ai_relay_token", "pairing_relay_url",
+}
+
+function PAIR.b64url(s)
+    return (mime.b64(s):gsub("+", "-"):gsub("/", "_"):gsub("=+$", ""))
+end
+
+function PAIR.unb64url(s)
+    if type(s) ~= "string" or s == "" or s:find("[^%w%-_]") then return nil end
+    s = s:gsub("-", "+"):gsub("_", "/")
+    s = s .. string.rep("=", (4 - #s % 4) % 4)
+    local ok, out = pcall(mime.unb64, s)
+    return ok and out or nil
+end
+
+function PAIR.sha2()
+    local ok, sha2 = pcall(require, "ffi/sha2")
+    if ok and type(sha2) == "table" and sha2.sha256 and sha2.hmac and sha2.hex_to_bin then return sha2 end
+    return nil
+end
+
+-- n bytes of keystream for this key: sha256(key .. block number) blocks
+function PAIR.keystream(key, n)
+    local sha2 = PAIR.sha2()
+    if not sha2 then return nil end
+    local parts, have, i = {}, 0, 0
+    while have < n do
+        local ctr = string.char(bit.band(bit.rshift(i, 24), 255), bit.band(bit.rshift(i, 16), 255),
+            bit.band(bit.rshift(i, 8), 255), bit.band(i, 255))
+        local block = sha2.hex_to_bin(sha2.sha256(key .. ctr))
+        parts[#parts + 1] = block
+        have = have + #block
+        i = i + 1
+    end
+    return table.concat(parts):sub(1, n)
+end
+
+function PAIR.mac(key, data)
+    local sha2 = PAIR.sha2()
+    if not sha2 then return nil end
+    return sha2.hex_to_bin(sha2.hmac(sha2.sha256, key, data)):sub(1, 16)
+end
+
+-- -> blob (ciphertext .. 16-byte mac) | nil, err
+function PAIR.seal(plaintext, key)
+    local stream = PAIR.keystream(key, #plaintext)
+    if not stream then return nil, _("This KOReader has no sha2 library, so settings can't be encrypted here.") end
+    local ciphertext = xorBytes(plaintext, stream)
+    return ciphertext .. PAIR.mac(key, ciphertext)
+end
+
+-- -> plaintext | nil, err
+function PAIR.open(blob, key)
+    if type(blob) ~= "string" or #blob < 17 or type(key) ~= "string" or #key ~= 32 then
+        return nil, _("Pairing data looked corrupted (bad encoding or length).")
+    end
+    local ciphertext, mac = blob:sub(1, -17), blob:sub(-16)
+    local want = PAIR.mac(key, ciphertext)
+    if not want then return nil, _("This KOReader has no sha2 library, so settings can't be decrypted here.") end
+    if want ~= mac then return nil, _("The code and the settings don't match -- a mistyped code, or settings shown for another code.") end
+    return xorBytes(ciphertext, PAIR.keystream(key, #ciphertext))
+end
+
+-- The three shapes a pairing text can have.
+-- -> { kind = "lan", host, port, code, key } | { kind = "relay", code, key }
+--    | { kind = "legacy", code, key_b64 } | nil
+function PAIR.parse(text)
+    local t = (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local host, port, code, key = t:match("^bookbridge%-pair:(%d+%.%d+%.%d+%.%d+):(%d+):(%x+):([%w%-_]+)$")
+    if host then
+        local k = PAIR.unb64url(key)
+        if k and #k == 32 then return { kind = "lan", host = host, port = tonumber(port), code = code:lower(), key = k } end
+        return nil
+    end
+    code, key = t:match("^bookbridge%-pair:relay:(%x+):([%w%-_]+)$")
+    if code then
+        local k = PAIR.unb64url(key)
+        if k and #k == 32 then return { kind = "relay", code = code:lower(), key = k } end
+        return nil
+    end
+    local lcode, key_b64 = t:match("^shelfmark%-pair:([0-9a-f]+):(%S+)$")
+    if lcode then return { kind = "legacy", code = lcode, key_b64 = key_b64 } end
+    return nil
+end
+
+-- What this reader sends: its settings (FIELDS) and which companions it has.
+function PAIR.collect(bb)
+    local out = { v = PAIR.VERSION, wants = {} }
+    for _unused, k in ipairs(PAIR.FIELDS) do out[k] = bb[k] end
+    for _unused, id in ipairs(CO.ORDER) do
+        local st = bb:companionState(id)
+        if st.installed then out.wants[#out.wants + 1] = id end
+    end
+    return out
+end
+
+-- The other reader's settings onto this one: a copy, so a field it has
+-- cleared is cleared here too. Sessions start afresh; a Kindle's Tailscale
+-- proxy must not land on a desktop or a phone (autoTailscaleProxy's rule).
+function PAIR.apply(bb, tbl)
+    local n = 0
+    for _unused, k in ipairs(PAIR.FIELDS) do
+        local v = tbl[k]
+        if v == "" then v = nil end
+        if v ~= nil then n = n + 1 end
+        bb[k] = v
+    end
+    local ok_dev, Device = pcall(require, "device")
+    if ok_dev and Device and ((Device.isDesktop and Device:isDesktop()) or (Device.isAndroid and Device:isAndroid())) then
+        bb.socks5_proxy = nil
+    end
+    bb.annas_session, bb.annas_mirrors, bb.session_cookie, bb._status_checks = nil, nil, nil, nil
+    return n
+end
+
+-- After an import: the companions the other reader has and this one lacks.
+function PAIR.offerCompanions(bb, wants)
+    local missing = {}
+    for _unused, id in ipairs(type(wants) == "table" and wants or {}) do
+        local def = CO.DEF[id]
+        if def then
+            local st = bb:companionState(id)
+            if not st.installed and not st.linked then missing[#missing + 1] = id end
+        end
+    end
+    if #missing == 0 then return false end
+    local labels = {}
+    for _unused, id in ipairs(missing) do labels[#labels + 1] = CO.DEF[id].label end
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = T(_("The other reader uses %1. Install %2 here too? (Downloaded from their GitHub releases and checked; KOReader restarts afterwards.)"),
+            table.concat(labels, _(" and ")), #missing == 1 and _("it") or _("them")),
+        ok_text = _("Install"),
+        cancel_text = _("Not now"),
+        ok_callback = function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function()
+                local changes = {}
+                for _u2, id in ipairs(missing) do
+                    local what = bb:installCompanion(id, { auto = true })
+                    if what == "installed" or what == "updated" then
+                        changes[#changes + 1] = { def = CO.DEF[id], version = bb:companionState(id).version or "?", what = what }
+                    end
+                end
+                if #changes > 0 then bb:askCompanionRestart(changes) end
+            end)
+        end,
+    })
+    return true
+end
+-- ===== PAIR end =====
+
 local function doDebugLogUpload(relay_url, text, socks5_proxy)
     local headers = {
         ["Content-Type"] = "text/plain; charset=utf-8",
@@ -5024,7 +5212,9 @@ local function doPairingDownload(relay_url, pair_code, socks5_proxy)
     end
     local ok, code = pcall(function() return socket.skip(1, http.request(request)) end)
     socketutil:reset_timeout()
-    if not ok then
+    -- (a refused connection comes back as nil, "refused" -- a string where
+    -- the status code would be, not an error)
+    if not ok or type(code) ~= "number" then
         debugLog("[pair] <- connection error: " .. tostring(code))
         return nil, nil, _("Couldn't reach the pairing relay -- check its URL.")
     end
@@ -9037,92 +9227,111 @@ function Bookbridge:promptPairingRelayUrl(on_success)
 end
 
 function Bookbridge:showSetupQrCode()
-    if not self.pairing_relay_url or self.pairing_relay_url == "" then
-        self:promptPairingRelayUrl(function() self:showSetupQrCode() end)
+    -- Over the Wi-Fi straight from this reader when it has an address;
+    -- through the server's pairing relay when one is set (readers on
+    -- different networks); a choice when both are possible.
+    self:startClipboardReceiver()
+    local ip = localAddress()
+    local lan_ok = ip ~= nil and CLIP.server ~= nil
+    local relay_ok = self.pairing_relay_url ~= nil and self.pairing_relay_url ~= ""
+    if not lan_ok and not relay_ok then
+        UIManager:show(InfoMessage:new{ text = _("Connect this reader to Wi-Fi first -- the other reader fetches the settings from it directly.") })
         return
     end
-
-    local ConfirmBox = require("ui/widget/confirmbox")
-    UIManager:show(ConfirmBox:new{
-        text = _("This shows a QR code carrying your Shelfmark and Calibre-Web settings (encrypted, but visible to anyone who can see or photograph the screen while it's open). It expires in 5 minutes either way. Continue?"),
-        ok_text = _("Show it"),
-        ok_callback = function()
-            local Trapper = require("ui/trapper")
-            Trapper:wrap(function() self:generateAndShowPairingQr() end)
-        end,
-    })
+    local function confirm(via)
+        local ConfirmBox = require("ui/widget/confirmbox")
+        UIManager:show(ConfirmBox:new{
+            text = _("This shows a code with everything another reader needs: your logins and keys (Shelfmark, Calibre-Web, Anna's Archive, Hardcover), your sources and the AI relay. It is encrypted, but anyone who photographs the screen while it's open could use it. It works once and expires in 5 minutes.\n\nOn the other reader: Bookbridge > Settings > Set up another device > Import settings from another reader, then scan this code with your phone and send it there with Type on your phone."),
+            ok_text = _("Show it"),
+            ok_callback = function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:generateAndShowPairingQr(via) end)
+            end,
+        })
+    end
+    if lan_ok and relay_ok then
+        local ButtonDialog = require("ui/widget/buttondialog")
+        local dlg
+        dlg = ButtonDialog:new{
+            title = _("How does the other reader reach this one?"),
+            buttons = {
+                { { text = _("Same Wi-Fi: straight from this reader"), callback = function() UIManager:close(dlg); confirm("lan") end } },
+                { { text = _("Another network: through the server's pairing relay"), callback = function() UIManager:close(dlg); confirm("relay") end } },
+                { { text = _("Cancel"), callback = function() UIManager:close(dlg) end } },
+            },
+        }
+        UIManager:show(dlg)
+        return
+    end
+    confirm(lan_ok and "lan" or "relay")
 end
 
--- Runs as a Trapper:wrap coroutine (see caller) -- the encryption itself
--- is local/instant and stays on the main thread; only the actual upload
--- to the pairing relay forks a subprocess, same division as every other
--- network entry point in this file.
-function Bookbridge:generateAndShowPairingQr()
-    local plaintext = JSON.encode({
-        server_url = self.server_url,
-        username = self.username,
-        password = self.password,
-        socks5_proxy = self.socks5_proxy,
-        cwa_url = self.cwa_url,
-        cwa_username = self.cwa_username,
-        cwa_password = self.cwa_password,
-    })
-
-    local key, rand_err = randomBytes(#plaintext)
+-- via = "lan" (served by this reader's receiver) or "relay" (the server's
+-- pairing relay). The key is only ever in the text shown on screen.
+function Bookbridge:generateAndShowPairingQr(via)
+    local tbl = PAIR.collect(self)
+    local key, rand_err = randomBytes(32)
     if not key then
         UIManager:show(InfoMessage:new{ text = rand_err })
         return
     end
-    local ciphertext, xor_err = xorBytes(plaintext, key)
-    if not ciphertext then
-        UIManager:show(InfoMessage:new{ text = tostring(xor_err) })
+    local blob, seal_err = PAIR.seal(JSON.encode(tbl), key)
+    if not blob then
+        UIManager:show(InfoMessage:new{ text = seal_err })
         return
     end
-    local ciphertext_b64 = mime.b64(ciphertext)
-    local key_b64 = mime.b64(key)
-
-    local relay_url, socks5_proxy = self.pairing_relay_url, self.socks5_proxy
-    local Trapper = require("ui/trapper")
-    local completed, pair_code, code, err = Trapper:dismissableRunInSubprocess(function()
-        return doPairingUpload(relay_url, ciphertext_b64, socks5_proxy)
-    end, _("Uploading encrypted settings..."))
-
-    if not completed then return end
-    if not pair_code then
-        UIManager:show(InfoMessage:new{ text = err or T(_("Pairing relay error (HTTP %1)."), tostring(code)) })
-        return
+    local blob_b64 = mime.b64(blob)
+    local pairing_text
+    if via == "relay" then
+        local relay_url, socks5_proxy = self.pairing_relay_url, self.socks5_proxy
+        local Trapper = require("ui/trapper")
+        local completed, pair_code, code, err = Trapper:dismissableRunInSubprocess(function()
+            return doPairingUpload(relay_url, blob_b64, socks5_proxy)
+        end, _("Uploading encrypted settings..."))
+        if not completed then return end
+        if not pair_code then
+            UIManager:show(InfoMessage:new{ text = err or T(_("Pairing relay error (HTTP %1)."), tostring(code)) })
+            return
+        end
+        pairing_text = "bookbridge-pair:relay:" .. pair_code .. ":" .. PAIR.b64url(key)
+    else
+        local ip = localAddress()
+        if not ip or not CLIP.server then
+            UIManager:show(InfoMessage:new{ text = _("Connect this reader to Wi-Fi first -- the other reader fetches the settings from it directly.") })
+            return
+        end
+        local raw = randomBytes(4) or (tostring(os.time()) .. tostring(math.random())):sub(1, 4)
+        local code = raw:gsub(".", function(c) return string.format("%02x", c:byte()) end)
+        -- (a new offer replaces the old; nothing is written to disk)
+        CLIP.pair = { code = code, blob_b64 = blob_b64, expires = os.time() + PAIR.TTL, tries = 0 }
+        pairing_text = "bookbridge-pair:" .. ip .. ":" .. CLIPBOARD_RECEIVER_PORT .. ":" .. code .. ":" .. PAIR.b64url(key)
     end
+    debugLog("[pair] offer shown (" .. tostring(via) .. ")")
 
-    -- The key never touches the pairing relay -- it only ever exists in
-    -- this string, which only ever exists on-screen as a QR code (or in
-    -- transit, decoded, on the importing device). See the note above
-    -- doPairingUpload for why that split is what makes this a real
-    -- one-time pad rather than security theater.
-    local pairing_text = "shelfmark-pair:" .. pair_code .. ":" .. key_b64
-
+    -- the text itself under the QR code, for a reader that is typed on
     local Screen = require("device").screen
+    UIManager:show(InfoMessage:new{
+        text = T(_("Or type it on the other reader:\n\n%1"), pairing_text),
+        timeout = PAIR.TTL,
+    })
     UIManager:show(QRMessage:new{
         text = pairing_text,
         width = Screen:getWidth(),
         height = Screen:getHeight(),
-        timeout = 300, -- matches the pairing relay's own 5-minute expiry
+        timeout = PAIR.TTL,
     })
 end
 
 function Bookbridge:importSettingsFromText()
-    if not self.pairing_relay_url or self.pairing_relay_url == "" then
-        self:promptPairingRelayUrl(function() self:importSettingsFromText() end)
-        return
-    end
-
     local InputDialog = require("ui/widget/inputdialog")
     local dialog
     dialog = InputDialog:new{
-        title = _("Import settings"),
-        description = _("Paste the text your camera/QR app decoded from the other device's QR code."),
+        title = _("Import settings from another reader"),
+        description = _("Scan the other reader's code with your phone, then send it here with Type on your phone (or paste it)."),
         input = "",
         allow_newline = true,
         buttons = {
+            self:phoneButtonRow(),
             {
                 {
                     text = _("Cancel"),
@@ -9149,34 +9358,54 @@ function Bookbridge:importSettingsFromText()
 end
 
 function Bookbridge:applyPairingText(pairing_text)
-    local trimmed = pairing_text:gsub("^%s+", ""):gsub("%s+$", "")
-    local pair_code, key_b64 = trimmed:match("^shelfmark%-pair:([0-9a-f]+):(%S+)$")
-    if not pair_code then
-        UIManager:show(InfoMessage:new{ text = _("That doesn't look like a Shelfmark pairing code.") })
+    local p = PAIR.parse(pairing_text)
+    if not p then
+        UIManager:show(InfoMessage:new{ text = _("That doesn't look like a Bookbridge pairing code.") })
         return
     end
-
-    local relay_url, socks5_proxy = self.pairing_relay_url, self.socks5_proxy
+    -- the relay kinds need the relay's address; the Wi-Fi kind never asks
+    if p.kind ~= "lan" and (not self.pairing_relay_url or self.pairing_relay_url == "") then
+        self:promptPairingRelayUrl(function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:applyPairingText(pairing_text) end)
+        end)
+        return
+    end
+    local base, socks5_proxy
+    if p.kind == "lan" then
+        base, socks5_proxy = "http://" .. p.host .. ":" .. tostring(p.port), nil
+    else
+        base, socks5_proxy = self.pairing_relay_url, self.socks5_proxy
+    end
+    local pair_code = p.code
     local Trapper = require("ui/trapper")
     local completed, ciphertext_b64, code, err = Trapper:dismissableRunInSubprocess(function()
-        return doPairingDownload(relay_url, pair_code, socks5_proxy)
+        return doPairingDownload(base, pair_code, socks5_proxy)
     end, _("Fetching encrypted settings..."))
 
     if not completed then return end
     if not ciphertext_b64 then
+        if p.kind == "lan" and not code then
+            err = T(_("Couldn't reach the other reader at %1. Are both readers on the same Wi-Fi? Guest networks often keep devices apart."), p.host)
+        end
         UIManager:show(InfoMessage:new{ text = err or T(_("Pairing relay error (HTTP %1)."), tostring(code)) })
         return
     end
 
-    local key_ok, key = pcall(mime.unb64, key_b64)
-    local ciphertext = ciphertext_b64 and mime.unb64(ciphertext_b64)
-    if not key_ok or not key or not ciphertext or #ciphertext ~= #key then
-        UIManager:show(InfoMessage:new{ text = _("Pairing data looked corrupted (bad encoding or length mismatch).") })
-        return
+    local blob = ciphertext_b64 and mime.unb64(ciphertext_b64)
+    local plaintext, open_err
+    if p.kind == "legacy" then
+        local key_ok, key = pcall(mime.unb64, p.key_b64)
+        if not key_ok or not key or not blob or #blob ~= #key then
+            UIManager:show(InfoMessage:new{ text = _("Pairing data looked corrupted (bad encoding or length mismatch).") })
+            return
+        end
+        plaintext, open_err = xorBytes(blob, key)
+    else
+        plaintext, open_err = PAIR.open(blob, p.key)
     end
-    local plaintext, xor_err = xorBytes(ciphertext, key)
     if not plaintext then
-        UIManager:show(InfoMessage:new{ text = tostring(xor_err) })
+        UIManager:show(InfoMessage:new{ text = tostring(open_err) })
         return
     end
     local decode_ok, settings_tbl = pcall(JSON.decode, plaintext)
@@ -9185,21 +9414,42 @@ function Bookbridge:applyPairingText(pairing_text)
         return
     end
     settings_tbl = stripJsonNull(settings_tbl)
+    if p.kind ~= "legacy" and settings_tbl.v ~= PAIR.VERSION then
+        UIManager:show(InfoMessage:new{ text = _("The other reader's Bookbridge is newer than this one -- update this one first.") })
+        return
+    end
 
     local ConfirmBox = require("ui/widget/confirmbox")
+    local function has(k) return (settings_tbl[k] ~= nil and settings_tbl[k] ~= "") and _("yes") or "--" end
+    local text
+    if p.kind == "legacy" then
+        text = T(_("Import these settings?\n\nServer: %1\nCalibre-Web: %2\n\nThis overwrites your current Server settings and Calibre-Web settings on this device. Your download folder is left alone."),
+            tostring(settings_tbl.server_url), tostring(settings_tbl.cwa_url))
+    else
+        local srcs = type(settings_tbl.sources_order) == "table" and table.concat(settings_tbl.sources_order, ", ") or "--"
+        text = T(_("Import these settings?\n\nShelfmark: %1\nCalibre-Web: %2\nAnna's Archive key: %3\nHardcover token: %4\nSources: %5\n\nThis replaces this reader's connection settings with the other reader's. Your download folder and installed plugins stay as they are."),
+            settings_tbl.server_url and tostring(settings_tbl.server_url) or "--", settings_tbl.cwa_url and tostring(settings_tbl.cwa_url) or "--",
+            has("annas_download_key"), has("hardcover_token"), srcs)
+    end
     UIManager:show(ConfirmBox:new{
-        text = T(_("Import these settings?\n\nServer: %1\nCalibre-Web: %2\n\nThis overwrites your current Server settings and Calibre-Web settings on this device. Your download folder is left alone -- that stays per-device."),
-            tostring(settings_tbl.server_url), tostring(settings_tbl.cwa_url)),
+        text = text,
         ok_text = _("Import"),
         ok_callback = function()
-            self.server_url = settings_tbl.server_url or nil
-            self.username = settings_tbl.username or nil
-            self.password = settings_tbl.password or nil
-            self.socks5_proxy = settings_tbl.socks5_proxy or nil
-            self.cwa_url = settings_tbl.cwa_url or nil
-            self.cwa_username = settings_tbl.cwa_username or nil
-            self.cwa_password = settings_tbl.cwa_password or nil
+            if p.kind == "legacy" then
+                self.server_url = settings_tbl.server_url or nil
+                self.username = settings_tbl.username or nil
+                self.password = settings_tbl.password or nil
+                self.socks5_proxy = settings_tbl.socks5_proxy or nil
+                self.cwa_url = settings_tbl.cwa_url or nil
+                self.cwa_username = settings_tbl.cwa_username or nil
+                self.cwa_password = settings_tbl.cwa_password or nil
+                self:saveAllSettings(_("Settings imported."))
+                return
+            end
+            local n = PAIR.apply(self, settings_tbl)
             self:saveAllSettings(_("Settings imported."))
+            debugLog("[pair] imported " .. n .. " field(s) over " .. p.kind)
+            if not PAIR.offerCompanions(self, settings_tbl.wants) then self:showStatus() end
         end,
     })
 end
@@ -9623,12 +9873,12 @@ function Bookbridge:addToMainMenu(menu_items)
                         separator = true,
                         sub_item_table = {
                             {
-                                text = _("Show setup QR code"),
+                                text = _("Show setup code"),
                                 keep_menu_open = true,
                                 callback = function() self:showSetupQrCode() end,
                             },
                             {
-                                text = _("Import settings from text"),
+                                text = _("Import settings from another reader"),
                                 keep_menu_open = true,
                                                         callback = function() self:importSettingsFromText() end,
                             },
@@ -13442,6 +13692,26 @@ local function findFocusedInputText()
     return nil
 end
 
+-- GET /pair/<code>: the encrypted settings offered by showSetupQrCode,
+-- served once. A wrong selector counts; ten of them end the offer.
+function Bookbridge:_onPairRequest(path, method, client)
+    local offer = CLIP.pair
+    if offer and os.time() > offer.expires then CLIP.pair, offer = nil, nil end
+    local code = method == "GET" and path:match("^/pair/(%x+)$") or nil
+    if not offer or not code then return self:_clipboardSend(client, 404, "gone") end
+    if code:lower() ~= offer.code then
+        offer.tries = (offer.tries or 0) + 1
+        if offer.tries >= PAIR.MAX_TRIES then
+            CLIP.pair = nil
+            debugLog("[pair] offer dropped after " .. offer.tries .. " wrong codes")
+        end
+        return self:_clipboardSend(client, 404, "gone")
+    end
+    CLIP.pair = nil
+    debugLog("[pair] settings handed to the other reader")
+    return self:_clipboardSend(client, 200, JSON.encode({ ciphertext = offer.blob_b64 }), "application/json")
+end
+
 function Bookbridge:_onClipboardRequest(data, client)
     local util = require("util")
     local uri = data and data:match("^%u+%s+([^%s]+)%s+HTTP/%d%.%d")
@@ -13450,6 +13720,7 @@ function Bookbridge:_onClipboardRequest(data, client)
     end
     local path, query = uri:match("^([^?]*)%??(.*)$")
     local method = data:match("^(%u+)")
+    if path:match("^/pair/") then return self:_onPairRequest(path, method, client) end
     local function param(q, name)
         for pair in ((q or "") .. "&"):gmatch("([^&]*)&") do
             local k, v = pair:match("^([^=]*)=(.*)$")
@@ -13682,6 +13953,7 @@ function Bookbridge:stopClipboardReceiver()
         CLIP.server = nil
     end
     CLIP.session = nil
+    CLIP.pair = nil
 end
 
 function Bookbridge:onCloseWidget()

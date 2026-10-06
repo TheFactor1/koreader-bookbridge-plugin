@@ -109,6 +109,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  sources (no local KOReader)"; skipped="${skipped:+$skipped, }sources"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Set up another device without a server (PAIR: sealed settings served once by the reader, legacy relay codes)"
+out=$(bash tests/pairing/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  pairing (no local KOReader)"; skipped="${skipped:+$skipped, }pairing"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Status & setup screen (every part's state and its fix)"
 out=$(bash tests/status-screen/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
