@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.8.0, build (pending)
+## 2026-10-06 — v0.8.0, build b3effab
 
 The no-server experience. Nothing here needs a server; a server of your own
 stays the optional add-on it was.
