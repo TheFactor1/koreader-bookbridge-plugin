@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.6.0, build 2071dd7
+## 2026-10-06 — v0.6.0, build a794392
 
 - **New**: **no server needed.** Bookbridge now finds books through
   *sources* you choose (Settings > Sources: on/off and order): **Z-Library**,
