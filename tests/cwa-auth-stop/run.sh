@@ -58,6 +58,7 @@ local function makeSocks5Socket() error("no proxy in this test") end
 local function doCwaFileDownload() return false end
 local function doCwaLogin() UPLOAD_LOGINS = UPLOAD_LOGINS + 1; return nil, "login refused" end
 local function doCwaMultipartUpload() error("upload must never be reached") end
+local function readEmbeddedTitle() return nil end   -- (no real files here; the embedded-title pass is covered by sync-dry-run)
 LUA
 grep -E '^local (CATALOG_PAGE|CATALOG_MAX_PAGES) ' "$M"
 # The real request function -- and, on the fixed code, the guard declared right above it.
