@@ -4,6 +4,27 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-06 — v0.6.0, build ff81745
+
+- **New**: **no server needed.** Bookbridge now finds books through
+  *sources* you choose (Settings > Sources: on/off and order): **Z-Library**,
+  **Anna's Archive**, and a Shelfmark server if you have one. **Find a book**
+  asks them directly when no server is connected; a book is downloaded to
+  your home folder and offered to open.
+- **New**: **companions.** Bookbridge installs and keeps up to date the two
+  plugins it builds on -- the Z-Library plugin (ZlibraryKO) and the Readest
+  plugin -- from their own GitHub releases, verified against GitHub's
+  checksums, with the previous version kept for a rollback. Their menus live
+  under **Bookbridge > Z-Library** and **Bookbridge > Library (Readest)**;
+  "Show companions in KOReader's menu too" brings them back. Both are
+  credited in the README.
+- **Change**: menu entries that need a server (Most popular, My requests,
+  Sync library, Send debug log) are greyed out without one; the status
+  screen shows the companions and the sources.
+- **Reading Ledger**: Settings > Bookbridge opens Bookbridge when a source is
+  set up (no more detour to "connect a server"); a trending book offers
+  **Get it with Bookbridge** without a server.
+
 ## 2026-10-05 — v0.5.0, build 18b355e
 
 - **New**: **Connect a book server.** Bookbridge finds your server on the
