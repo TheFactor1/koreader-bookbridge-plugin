@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-06 — v0.8.2, build (pending)
+
+- **Fix**: **Find a book** no longer skips Z-Library. With a server
+  connected, the search was Shelfmark's catalogue only and the sources came
+  in only after picking an edition; the results now open with *Files for
+  "…" from your sources…*, and an empty catalogue answer asks the sources
+  straight away. A source that is on but not ready -- the Z-Library plugin
+  waiting for a restart, no Anna's key yet -- is named in a short notice
+  above the list rather than left out in silence.
+
 ## 2026-10-06 — v0.8.1, build fbe62fa
 
 - **New**: the **Reading Ledger** is a companion. Bookbridge installs and

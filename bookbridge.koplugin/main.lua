@@ -692,7 +692,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.8.1"
+local PLUGIN_VERSION = "0.8.2"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
