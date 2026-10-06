@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-05 — v0.5.0, build 13eb62d
+## 2026-10-05 — v0.5.0, build 2efcc59
 
 - **New**: **Connect a book server.** Bookbridge finds your server on the
   Wi-Fi and shows a code (with a QR code); approve it on your phone with the
