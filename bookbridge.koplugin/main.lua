@@ -12158,11 +12158,13 @@ function Bookbridge:startClipboardReceiver()
     CLIP.mq = UIManager:insertZMQ(server)
     -- (the firewall opens only once the port is ours, and once)
     local Device = require("device")
+    -- (-C first: the rules outlive KOReader until the Kindle reboots, so a
+    -- restart would otherwise add another pair every time)
     if Device:isKindle() and not CLIP.fw then
-        os.execute("iptables -A INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
-            " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null")
-        os.execute("iptables -A OUTPUT -p tcp --sport " .. CLIPBOARD_RECEIVER_PORT ..
-            " -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null")
+        local rin = "INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT .. " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT"
+        local rout = "OUTPUT -p tcp --sport " .. CLIPBOARD_RECEIVER_PORT .. " -m conntrack --ctstate ESTABLISHED -j ACCEPT"
+        os.execute("iptables -C " .. rin .. " 2>/dev/null || iptables -A " .. rin .. " 2>/dev/null")
+        os.execute("iptables -C " .. rout .. " 2>/dev/null || iptables -A " .. rout .. " 2>/dev/null")
         CLIP.fw = true
     end
     debugLog("[clipboard] receiver listening on " .. CLIPBOARD_RECEIVER_PORT)
