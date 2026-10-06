@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.8.2, build (pending)
+## 2026-10-06 — v0.8.2, build dd2fc37
 
 - **Fix**: **Find a book** no longer skips Z-Library. With a server
   connected, the search was Shelfmark's catalogue only and the sources came
