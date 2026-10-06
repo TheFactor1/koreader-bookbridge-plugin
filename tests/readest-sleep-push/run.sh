@@ -19,6 +19,7 @@ awk '/^function Bookbridge:pushReadestPositionBeforeSleep/{f=1} f{print} f&&/^en
 grep -E '^local READEST_PULL_DELAYS = ' "$M" >> "$W/fns.lua"
 grep -E '^local READEST_AUTO_UPLOAD_PAGES = ' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:onPageUpdate/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
+awk '/^function Bookbridge:loadSettings/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:autoUploadToReadest/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 awk '/^function Bookbridge:pullReadestPositionWhenOnline/{f=1} f{print} f&&/^end$/{exit}' "$M" >> "$W/fns.lua"
 grep -q "pushBookConfig" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -153,7 +154,7 @@ end
 local function reader(store, settings)
     local r = { settings = settings or { auto_sync = true, access_token = "t", user_id = "u" }, path = "/p" }
     r.getLibraryStore = function() return store end
-    local b = setmetatable({ ui = { readest = r,
+    local b = setmetatable({ readest_upload = true, ui = { readest = r,
         document = { file = "/mnt/us/books/Some Book.epub" },
         doc_settings = { readSetting = function(_s, k) if k == "partial_md5_checksum" then return "abc123" end
             if k == "doc_props" then return { title = "Some Book" } end end } } }, { __index = Bookbridge })
@@ -174,6 +175,32 @@ for i = 6, 30 do b:onPageUpdate(i) end
 ck(#uploads == 1, "once per sitting, not on every page after")
 ck(shows == 0, "no popups at all")
 uploads = {}
+-- the upload is opt-in: off (the default for a new install) means pages aren't even counted
+do
+    local b_off = reader(mkstore()); b_off.readest_upload = false
+    for i = 1, 30 do b_off:onPageUpdate(i) end
+    ck(#uploads == 0 and b_off._rd_pages == nil, "readest_upload off: 30 pages, nothing uploaded, nothing counted")
+    b_off:autoUploadToReadest()
+    ck(#uploads == 0, "...and a direct call uploads nothing either")
+end
+-- the one-time decision on upgrade: on only where it was running (signed in, auto sync on)
+do
+    local function settings_with(saved, rs)
+        G_reader_settings = { readSetting = function(_s, k) if k == "readest_sync" then return rs end end,
+            isTrue = function() return false end, saveSetting = function() end }
+        Bookbridge.settings = { data = { shelfmark = saved } }   -- (the class-level cache loadSettings reuses)
+        local b2 = setmetatable({}, { __index = Bookbridge })
+        b2:loadSettings()
+        Bookbridge.settings = nil
+        return b2
+    end
+    ck(settings_with({}, { access_token = "t", auto_sync = true }).readest_upload == true, "upgrade with Readest signed in + auto sync: upload stays on")
+    ck(settings_with({}, { access_token = "t", auto_sync = false }).readest_upload == false, "upgrade with auto sync off: upload off")
+    ck(settings_with({}, nil).readest_upload == false, "fresh install (no Readest): upload off")
+    ck(settings_with({ readest_upload = false }, { access_token = "t", auto_sync = true }).readest_upload == false, "an explicit off is kept even with Readest running")
+    local d = settings_with({}, { access_token = "t", auto_sync = true })
+    ck(d._readest_upload_decided == true and settings_with({ readest_upload = true }, nil)._readest_upload_decided == nil, "the decision is flagged for one save, only when it was just made")
+end
 local b2 = reader(mkstore({ abc123 = { hash = "abc123", title = "Some Book", uploaded_at = 1 } }))
 for i = 1, 6 do b2:onPageUpdate(i) end
 ck(#uploads == 0 and logs[#logs]:find("already in Readest", 1, true), "already uploaded: skipped")

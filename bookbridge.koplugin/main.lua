@@ -122,6 +122,16 @@ function Bookbridge:loadSettings()
     self.sources_order = self.sm_settings.data.shelfmark.sources_order
     self.sources_enabled = self.sm_settings.data.shelfmark.sources_enabled or {}
     self.sources_stop_first = self.sm_settings.data.shelfmark.sources_stop_first == true
+    -- Readest keeps the reading position in sync; putting the book FILE into
+    -- Readest's cloud too is opt-in (the free quota is 500 MB). Decided once
+    -- on the upgrade that introduced the switch: it stays on only where it
+    -- was actually running at that moment (Readest signed in, auto sync on).
+    self.readest_upload = self.sm_settings.data.shelfmark.readest_upload
+    if self.readest_upload == nil then
+        local rs = G_reader_settings and G_reader_settings:readSetting("readest_sync")
+        self.readest_upload = type(rs) == "table" and rs.access_token ~= nil and rs.auto_sync == true
+        self._readest_upload_decided = true
+    end
     -- shelfmark-ai-relay: suggests a match for files doSyncLibrary could not
     -- resolve on its own. Optional -- everything works exactly as before when
     -- unset, the leftovers just stay reported as "check manually".
@@ -189,6 +199,12 @@ end
 
 function Bookbridge:init()
     self:loadSettings()
+    -- (the one-time Readest upload decision above is written down at once,
+    -- so it is made exactly once and not again after a sign-out)
+    if self._readest_upload_decided then
+        self._readest_upload_decided = nil
+        self:saveAllSettings()
+    end
     self:migratePluginFolder()
     self.ui.menu:registerToMainMenu(self)
     -- Automatic update check a little after start; the interval inside makes
@@ -231,6 +247,7 @@ function Bookbridge:saveAllSettings(msg)
         sources_order = self.sources_order,
         sources_enabled = self.sources_enabled,
         sources_stop_first = self.sources_stop_first,
+        readest_upload = self.readest_upload,
         hardcover_token = self.hardcover_token,
         hardcover_language = self.hardcover_language,
         hardcover_progress_sync = self.hardcover_progress_sync,
@@ -4447,7 +4464,7 @@ CO.DEF = {
         repo = "readest/readest", credit = "the Readest KOReader plugin by Readest (AGPL-3.0)",
         asset = "^Readest%-[%d%.]+%-%d+%.koplugin%.zip$", ver_pat = "^Readest%-([%d%.]+)%-",
         strip = "readest.koplugin/", keep = {},
-        what = "your library in Readest's cloud, and your place in sync with the Readest app",
+        what = "your place in sync with the Readest app on a phone or tablet",
     },
 }
 CO.ORDER = { "zlibrary", "readest" }
@@ -8808,6 +8825,22 @@ function Bookbridge:companionItems(id)
                     def.label, def.what, state.version or "?", def.repo) })
             end }
         items[#items + 1] = install_item(_("Check for a newer version"))
+        if id == "readest" then
+            -- the file upload is Bookbridge's own addition on top of Readest's
+            -- position sync, and the one thing here that spends cloud quota
+            items[#items + 1] = {
+                text = _("Put books I read here into Readest's cloud"),
+                help_text = _("Off: only your place syncs. On: after a few pages in one sitting, the reader's own copy of the book is uploaded the way Readest's \"Upload to Cloud\" does, so the Readest app opens the same file. Readest's free plan holds 500 MB."),
+                checked_func = function() return self.readest_upload == true end,
+                keep_menu_open = true,
+                callback = function()
+                    self.readest_upload = not self.readest_upload
+                    self:saveAllSettings(self.readest_upload
+                        and _("On. Books you read here are uploaded to Readest after a few pages.")
+                        or _("Off. Only your reading position syncs."))
+                end,
+            }
+        end
     elseif state.installed and state.disabled then
         items[#items + 1] = { text = T(_("%1 is installed but disabled"), def.label), enabled = false }
         items[#items + 1] = { text = _("Enable it"), callback = function() self:enableCompanion(id) end }
@@ -9346,7 +9379,7 @@ function Bookbridge:addToMainMenu(menu_items)
                 sub_item_table_func = function() return self:companionItems("zlibrary") end,
             },
             {
-                text = _("Library (Readest)"),
+                text = _("Readest sync"),
                 sub_item_table_func = function() return self:companionItems("readest") end,
                 separator = true,
             },
@@ -13712,6 +13745,7 @@ end
 -- these internals turns this off rather than breaking anything.
 local READEST_AUTO_UPLOAD_PAGES = 5
 function Bookbridge:onPageUpdate()
+    if not self.readest_upload then return end   -- (opt-in: Bookbridge > Readest sync)
     local ui = self.ui
     if not (ui and ui.document) or self._rd_upload_done then return end
     self._rd_pages = (self._rd_pages or 0) + 1
@@ -13721,6 +13755,7 @@ function Bookbridge:onPageUpdate()
 end
 
 function Bookbridge:autoUploadToReadest()
+    if not self.readest_upload then return end
     local ui = self.ui
     local rs = ui and ui.document and ui.readest
     if type(rs) ~= "table" or type(rs.getLibraryStore) ~= "function" then return end
@@ -14044,7 +14079,7 @@ function Bookbridge:collectStatusRows()
     elseif not rs.settings.access_token then
         rd = _("Not signed in")
         rd_act = function()
-            UIManager:show(InfoMessage:new{ text = _("Sign in under Bookbridge > Library (Readest) with the same account as the Readest app on your phone or tablet.") })
+            UIManager:show(InfoMessage:new{ text = _("Sign in under Bookbridge > Readest sync with the same account as the Readest app on your phone or tablet.") })
         end
     elseif not rs.settings.auto_sync then
         rd = _("Auto sync off")
@@ -14055,10 +14090,16 @@ function Bookbridge:collectStatusRows()
     else
         rd = _("Syncing")
         rd_act = function()
-            UIManager:show(InfoMessage:new{ text = _("Books you read here go to your Readest library by themselves, and your place is saved when the Kindle sleeps.\n\nOn your phone or tablet, open books from the Readest library -- not from the Calibre-Web catalog -- so both have the same file.") })
+            local text
+            if self.readest_upload then
+                text = _("Books you read here go to your Readest library by themselves, and your place is saved when the Kindle sleeps.\n\nOn your phone or tablet, open books from the Readest library -- not from the Calibre-Web catalog -- so both have the same file.")
+            else
+                text = _("Your place is saved when the device sleeps and picked up again when it wakes, once Wi-Fi is back.\n\nTo also put the books you read here into Readest's cloud, turn on Bookbridge > Readest sync > Put books I read here into Readest's cloud.")
+            end
+            UIManager:show(InfoMessage:new{ text = text })
         end
     end
-    add({ text = _("Readest -- your library & sync"), mandatory = rd, action = rd_act })
+    add({ text = _("Readest -- your place on phone & tablet"), mandatory = rd, action = rd_act })
 
     -- Anna's Archive (optional)
     add({ text = _("Anna's Archive -- search & downloads"),

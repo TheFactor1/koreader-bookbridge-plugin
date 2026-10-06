@@ -96,6 +96,16 @@ ck(row(rows, "Shelfmark").mandatory == "Saved", "Shelfmark: 'Saved' until checke
 ck(row(rows, "Calibre-Web").mandatory == "3 books synced", "Calibre-Web: shows the synced book count")
 ck(row(rows, "Hardcover").mandatory == "Syncing", "Hardcover: 'Syncing'")
 ck(row(rows, "Readest").mandatory == "Syncing", "Readest: 'Syncing' when signed in with auto sync")
+do
+    local b_up = bb({ server_url = "http://sm:8084", username = "u", password = "p", cwa_url = "http://cwa:8083", cwa_username = "u", cwa_password = "p",
+        ui = { readest = ok_rs }, download_dir = "/mnt/us/books", readest_upload = true })
+    shown = nil; row(b_up:collectStatusRows(), "Readest").action()
+    local with = shown and shown.text or ""
+    shown = nil; row(rows, "Readest").action()
+    local without = shown and shown.text or ""
+    ck(with:find("go to your Readest library", 1, true) and without:find("Put books I read here", 1, true), "Readest 'Syncing' tap: explains the upload when on, how to turn it on when off")
+    ck(row(rows, "Readest").text:find("your place on phone", 1, true), "Readest row is about your place, not a library")
+end
 ck(row(rows, "Updates").mandatory == "Automatic", "Updates: 'Automatic'")
 ck(row(rows, "Phone clipboard").mandatory == "Listening on 8090", "clipboard: listening")
 ck(row(rows, "Download folder").mandatory == "/mnt/us/books", "download folder shown")
