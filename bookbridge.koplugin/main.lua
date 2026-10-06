@@ -8023,10 +8023,6 @@ function Bookbridge:applyUpdate(target, opts)
     return true
 end
 
--- ===== automatic updates =====
--- Shared across plugin instances (FileManager and Reader each get one) so
--- two instances can't double-check, and persisted so a reboot doesn't reset
--- the six-hour clock.
 -- ===== companions: Bookbridge methods =====
 -- What a companion is up to on this device.
 function Bookbridge:companionState(id)
@@ -8241,6 +8237,11 @@ function Bookbridge:showCompanionMenu(id)
     UIManager:show(container)
 end
 -- ===== companions end =====
+
+-- ===== automatic updates =====
+-- Shared across plugin instances (FileManager and Reader each get one) so
+-- two instances can't double-check, and persisted so a reboot doesn't reset
+-- the six-hour clock.
 
 local auto_update_state = { last = nil, running = false, not_before = nil }
 local AUTO_UPDATE_INTERVAL = 6 * 3600

@@ -21,6 +21,7 @@ CHECK = nil  -- what doCheckForUpdate returns
 function doCheckForUpdate() return CHECK, 0, CHECK == nil and "no route" or nil end
 package.loaded["ui/trapper"] = { wrap = function(_, f) f() end, dismissableRunInSubprocess = function(_, f) return true, f() end }
 dofile(os.getenv("FN"))
+Bookbridge.autoUpdateCompanions = function() end   -- (companions ride along; tested in tests/companions)
 local saved = 0; local installed = 0
 local function plugin(t) return setmetatable(t, { __index = Bookbridge }) end
 local dev = plugin({ auto_update = true, update_url = "http://srv", saveAllSettings = function(s) saved = saved + 1 end, applyUpdate = function(s, info) installed = installed + 1 end })
