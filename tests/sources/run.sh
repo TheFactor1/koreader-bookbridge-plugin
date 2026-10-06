@@ -150,6 +150,21 @@ do
     ck(SHOWN[#SHOWN] and SHOWN[#SHOWN].kind == "confirm" and SHOWN[#SHOWN].text:find("Z%-Library is turned off"), "the only source switched off: says so, not 'install it'")
 end
 ck(b:sourcesSummary() == "Shelfmark", "summary lists only enabled, configured sources")
+-- Anna's Archive direct (a key, no helper): every domain was already tried
+-- inside one search, so MIRROR_DOWN ends it; through the helper the
+-- mirror refresh gets up to three more tries.
+do
+    local calls, refreshes = 0, 0
+    local b3 = bb({ annas_download_key = "k" })
+    b3.annasSearch = function() calls = calls + 1; return nil, nil, "down", "MIRROR_DOWN" end
+    b3.annasMirrorRefresh = function() refreshes = refreshes + 1; return { switched = false, allDead = false } end
+    local got, err = SRC.DEF.annasarchive.search(b3, "emma")
+    ck(got == nil and calls == 1 and refreshes == 0 and err:find("domains"), "direct: one search on MIRROR_DOWN, no refresh loop")
+    calls, refreshes = 0, 0
+    b3.annas_url = "http://helper.example"
+    got, err = SRC.DEF.annasarchive.search(b3, "emma")
+    ck(got == nil and calls == 4 and refreshes == 3, "via the helper: three mirror refreshes, then gives up")
+end
 
 -- 4b. in the merged list the preferred source's copy sorts first (before download counts)
 b = bb({ server_url = "http://s" })

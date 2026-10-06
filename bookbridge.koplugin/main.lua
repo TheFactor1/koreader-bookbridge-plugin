@@ -1512,8 +1512,12 @@ end
 function AA.fetch(url, cookie, o)
     o = o or {}
     local current = url
+    local home = url:match("^https?://([^/]+)")
     for _hop = 0, AA.MAX_REDIRECTS do
-        local body, code, headers, err, err_code = AA.request("GET", current, { cookie = cookie, accept = o.accept, block = o.block, total = o.total })
+        -- (the session cookie goes to the domain it was issued for only;
+        -- a redirect to a file host doesn't get it)
+        local same_host = current:match("^https?://([^/]+)") == home
+        local body, code, headers, err, err_code = AA.request("GET", current, { cookie = same_host and cookie or nil, accept = o.accept, block = o.block, total = o.total })
         if not body then return nil, code, headers, err, err_code end
         if AA.isChallenge(code, headers) then
             return nil, 401, headers, _("This Anna's Archive domain is behind a bot check right now."), "CHALLENGE"
@@ -1614,7 +1618,7 @@ function AA.parseMeta(text)
                 out.size = seg
             elseif not out.year and seg:match("^1[5-9]%d%d$") or (not out.year and seg:match("^20%d%d$")) then
                 out.year = seg
-            elseif not out.format and #low <= 6 and low:match("^[%a%-]+$") and not seg:find("[", 1, true) then
+            elseif not out.format and #low <= 6 and low:match("^%a[%w%-]*$") and not seg:find("[", 1, true) then
                 out.format = low
             elseif not out.content_type and seg:find("\240[\128-\191][\128-\191][\128-\191]") and not seg:find("/", 1, true) then
                 out.content_type = (seg:gsub("\240[\128-\191][\128-\191][\128-\191]", "")):gsub("^%s+", ""):gsub("%s+$", "")
@@ -1740,12 +1744,25 @@ end
 -- Search across the domains: the current one, then the others when it is
 -- down or behind a bot check. extra = {session, tld, switched, mirrors}.
 -- -> results, 200, nil, nil, extra | nil, code, err, err_code, extra
+-- The cached domain list, refetched from the repo once a day. A failed
+-- fetch is remembered too (as a list stamped 15 minutes short of expiry),
+-- so an offline mirrors.json doesn't cost every search an extra request.
+AA.MIRRORS_RETRY = 15 * 60
+function AA.mirrorList(mirrors, force)
+    if not force and type(mirrors) == "table" and type(mirrors.at) == "number" and os.time() - mirrors.at <= AA.MIRRORS_TTL then
+        return mirrors
+    end
+    local remote = AA.remoteTlds()
+    local known = type(mirrors) == "table" and mirrors.tlds or nil
+    return {
+        tlds = remote or known or AA.TLDS,
+        at = remote and os.time() or (os.time() - AA.MIRRORS_TTL + AA.MIRRORS_RETRY),
+    }
+end
+
 function AA.search(tld, key, query, sess, mirrors, opts)
     opts = opts or {}
-    if type(mirrors) ~= "table" or type(mirrors.at) ~= "number" or os.time() - mirrors.at > AA.MIRRORS_TTL then
-        local remote = AA.remoteTlds()
-        mirrors = { tlds = remote or (type(mirrors) == "table" and mirrors.tlds) or AA.TLDS, at = remote and os.time() or (type(mirrors) == "table" and mirrors.at) or 0 }
-    end
+    mirrors = AA.mirrorList(mirrors)
     local start = AA.tld(tld)
     local last_code, last_err, last_err_code, saw_challenge
     for _unused, t in ipairs(AA.candidates(start, mirrors)) do
@@ -1758,7 +1775,7 @@ function AA.search(tld, key, query, sess, mirrors, opts)
         if err_code == "CHALLENGE" then saw_challenge = { code = code, err = err } end
         if err_code == "KEY" or err_code == "LAYOUT" then
             -- (a bad key or a changed page won't get better on another domain)
-            return nil, code, err, err_code == "KEY" and nil or err_code, { session = sess, tld = t, switched = false, mirrors = mirrors }
+            return nil, code, err, err_code, { session = sess, tld = t, switched = false, mirrors = mirrors }
         end
         debugLog("[annas] annas-archive." .. t .. ": " .. tostring(err_code) .. " -- trying the next domain")
     end
@@ -1774,8 +1791,7 @@ end
 -- the helper's /api/mirror-refresh had: {previousTld, activeTld, switched, allDead}.
 function AA.refreshMirror(tld, key, mirrors)
     local start = AA.tld(tld)
-    local remote = AA.remoteTlds()
-    mirrors = { tlds = remote or (type(mirrors) == "table" and mirrors.tlds) or AA.TLDS, at = remote and os.time() or 0 }
+    mirrors = AA.mirrorList(mirrors, true)   -- (a hunt for a live domain always asks for the fresh list)
     for _unused, t in ipairs(AA.candidates(start, mirrors)) do
         local body, code, headers = AA.request("GET", AA.base(t) .. "/", { block = 10, total = 20 })
         local alive = body ~= nil and (AA.isChallenge(code, headers) or (code >= 300 and code < 400) or (code == 200 and AA.looksLikeAnnas(body)))
@@ -4482,12 +4498,14 @@ function CO.latest(id)
         return nil, _("GitHub's answer couldn't be read.")
     end
     rel = stripJsonNull(rel)
-    local best
+    local best, best_n
     for _unused, a in ipairs(rel.assets) do
         local name = type(a.name) == "string" and a.name or ""
         if name:match(def.asset) then
-            -- (Readest re-uploads as -2, -3: the highest wins)
-            if not best or name > best.name then best = a end
+            -- (Readest re-uploads as -2, -3 ... -10: the highest number wins,
+            -- compared as a number so -10 beats -9)
+            local n = tonumber(name:match("%-(%d+)%.koplugin%.zip$")) or 0
+            if not best or n > best_n then best, best_n = a, n end
         end
     end
     if not best then
@@ -4511,7 +4529,17 @@ function CO.mkdirp(path)
     return lfs.attributes(path, "mode") == "directory"
 end
 
+-- A symlink is removed as a link, never followed: a development checkout
+-- linked into the plugins folder must survive a botched install.
+function CO.isLink(path)
+    return lfs.symlinkattributes and lfs.symlinkattributes(path, "mode") == "link"
+end
+
 function CO.rmrf(path)
+    if CO.isLink(path) then
+        os.remove(path)
+        return
+    end
     local mode = lfs.attributes(path, "mode")
     if mode == "directory" then
         for name in lfs.dir(path) do
@@ -4599,16 +4627,18 @@ function CO.install(id, info)
     CO.mkdirp(new)
     local files = 0
     for entry in reader:iterate() do
-        local path = entry.path or ""
+        -- (a zip made on Windows can carry backslashes; one with a ".."
+        -- component anywhere is skipped, not resolved)
+        local path = (entry.path or ""):gsub("\\", "/")
         if path:sub(1, #def.strip) == def.strip then
             local rel = path:sub(#def.strip + 1)
-            if rel ~= "" and not rel:match("%.%./") and rel:sub(1, 1) ~= "/" and not rel:match("^%.%.$") then
+            if rel ~= "" and not ("/" .. rel .. "/"):find("/%.%./") and rel:sub(1, 1) ~= "/" then
                 if entry.mode == "directory" or rel:sub(-1) == "/" then
                     CO.mkdirp(new .. "/" .. rel:gsub("/$", ""))
                 elseif entry.mode == "file" then
                     local dest = new .. "/" .. rel
                     CO.mkdirp(dest:match("^(.*)/[^/]+$") or new)
-                    if not reader:extractToPath(path, dest) then
+                    if not reader:extractToPath(entry.path, dest) then
                         reader:close()
                         pcall(os.remove, zip)
                         CO.rmrf(new)
@@ -4644,6 +4674,19 @@ function CO.install(id, info)
             CO.copyFile(live .. "/" .. name, new .. "/" .. name)
         end
     end
+    debugLog("[companion] " .. id .. " " .. info.version .. " (" .. info.name .. ") unpacked and checked")
+    return true, { version = meta_version or info.version, tag = info.tag, digest = info.digest, at = os.time() }
+end
+
+-- The verified .new folder becomes the live one (the old one kept as
+-- .prev for CO.rollback). Runs in the parent, after the subprocess is
+-- done: a "tap to cancel" can't land between the two renames.
+function CO.swapIn(id)
+    local def = CO.DEF[id]
+    local live, new, prev = CO.folder(id), CO.folder(id) .. ".new", CO.folder(id) .. ".prev"
+    if lfs.attributes(new .. "/main.lua", "mode") ~= "file" then
+        return nil, T(_("%1's new folder went missing before it could be put in place."), def.label)
+    end
     CO.rmrf(prev)
     if lfs.attributes(live, "mode") == "directory" then
         if not os.rename(live, prev) then
@@ -4656,8 +4699,7 @@ function CO.install(id, info)
         CO.rmrf(new)
         return nil, T(_("Couldn't put the new %1 folder in place."), def.label)
     end
-    debugLog("[companion] installed " .. id .. " " .. info.version .. " (" .. info.name .. ")")
-    return true, { version = meta_version or info.version, tag = info.tag, digest = info.digest, at = os.time() }
+    return true
 end
 
 -- The previous folder back in place (after a bad update).
@@ -8289,6 +8331,14 @@ function Bookbridge:applyClaimSettings(settings, done_msg)
         UIManager:show(InfoMessage:new{ text = _("The server sent nothing to import.") })
         return false
     end
+    if type(settings.annas_url) == "string" and settings.annas_url ~= "" then
+        -- Anna's Archive now goes through the server's helper: the
+        -- reader's own session is for the direct path and is dropped
+        self.annas_session = nil
+        if self.annas_download_key and self.annas_download_key ~= "" then
+            done_msg = (done_msg or "") .. "\n" .. _("Anna's Archive searches now go through the server's helper.")
+        end
+    end
     self:saveAllSettings()
     self.session_cookie = nil     -- (a new login: sign in afresh)
     debugLog("[setup] imported " .. applied .. " setting(s) from the server")
@@ -8481,6 +8531,8 @@ function Bookbridge:companionState(id)
         loaded = self.ui ~= nil and self.ui[id] ~= nil,
         record = self.companions and self.companions[id] or nil,
         has_prev = lfs.attributes(dir .. ".prev", "mode") == "directory",
+        -- a development checkout linked in: never replaced from GitHub
+        linked = CO.isLink(dir),
     }
 end
 
@@ -8492,6 +8544,29 @@ function Bookbridge:installCompanion(id, opts)
     opts = opts or {}
     local def = CO.DEF[id]
     local state = self:companionState(id)
+    if state.linked then
+        if not opts.auto then
+            UIManager:show(InfoMessage:new{ text = T(_("%1's folder is a link (a development copy?), so Bookbridge leaves it alone."), def.label) })
+        end
+        return nil
+    end
+    -- one at a time: a manual install while the automatic check is on the
+    -- same companion would race over the same .new folder
+    if self._companion_busy then
+        if not opts.auto then
+            UIManager:show(InfoMessage:new{ text = T(_("%1 is already being installed -- give it a moment."), CO.DEF[self._companion_busy].label), timeout = 3 })
+        end
+        return nil
+    end
+    self._companion_busy = id
+    local what, ok_run, run_err = nil, pcall(function() what = self:installCompanionNow(id, opts, state) end)
+    self._companion_busy = nil
+    if not ok_run then error(run_err, 0) end
+    return what
+end
+
+function Bookbridge:installCompanionNow(id, opts, state)
+    local def = CO.DEF[id]
     local Trapper = require("ui/trapper")
     local completed, info, err = Trapper:dismissableRunInSubprocess(function()
         return CO.latest(id)
@@ -8512,10 +8587,19 @@ function Bookbridge:installCompanion(id, opts)
     local done, ok, ierr = Trapper:dismissableRunInSubprocess(function()
         return CO.install(id, info)
     end, not opts.auto and T(_("Installing %1 v%2 (%3 MB)... tap to cancel"), def.label, info.version, mb) or nil)
-    if not done then return nil end
+    if not done then
+        CO.rmrf(CO.folder(id) .. ".new")   -- (cancelled mid-download: nothing half-made stays)
+        return nil
+    end
     if not ok then
         if opts.auto then debugLog("[companion] " .. id .. ": install failed: " .. tostring(ierr))
         else UIManager:show(InfoMessage:new{ text = ierr or T(_("Couldn't install %1."), def.label) }) end
+        return nil
+    end
+    local swapped, serr = CO.swapIn(id)
+    if not swapped then
+        if opts.auto then debugLog("[companion] " .. id .. ": " .. tostring(serr))
+        else UIManager:show(InfoMessage:new{ text = serr }) end
         return nil
     end
     self.companions = self.companions or {}
@@ -8556,7 +8640,8 @@ function Bookbridge:askCompanionRestart(changes)
     local ConfirmBox = require("ui/widget/confirmbox")
     local lines = {}
     for _unused, c in ipairs(changes) do
-        lines[#lines + 1] = T(c.what == "updated" and _("%1 updated to v%2") or _("%1 v%2 installed"), c.def.label, c.version)
+        lines[#lines + 1] = T(c.what == "updated" and _("%1 updated to v%2")
+            or (c.what == "restored" and _("%1 v%2 is back") or _("%1 v%2 installed")), c.def.label, c.version)
     end
     UIManager:show(ConfirmBox:new{
         text = table.concat(lines, "\n") .. "\n\n" .. _("It takes effect when KOReader restarts.\n\nRestart now?"),
@@ -8636,6 +8721,26 @@ function Bookbridge:companionItems(id)
     else
         items[#items + 1] = { text = T(_("Not installed yet: %1"), def.what), enabled = false }
         items[#items + 1] = install_item(T(_("Install %1 (%2)"), def.label, def.credit))
+    end
+    if state.has_prev and not state.linked then
+        -- (the folder an update replaced is kept until the next one)
+        items[#items + 1] = { text = _("Go back to the previous version"), keep_menu_open = true, callback = function()
+            local ConfirmBox = require("ui/widget/confirmbox")
+            UIManager:show(ConfirmBox:new{
+                text = T(_("Put %1's previous version back? The current one is removed."), def.label),
+                ok_text = _("Go back"), cancel_text = _("Cancel"),
+                ok_callback = function()
+                    local ok, err = CO.rollback(id)
+                    if not ok then
+                        UIManager:show(InfoMessage:new{ text = err })
+                        return
+                    end
+                    if self.companions then self.companions[id] = nil end
+                    self:saveAllSettings()
+                    self:askCompanionRestart({ { def = def, version = CO.installedVersion(id) or "?", what = "restored" } })
+                end,
+            })
+        end }
     end
     return items
 end
@@ -8752,6 +8857,19 @@ function Bookbridge:autoCheckForUpdate(reason)
         self:saveAllSettings()
         if not info.manifest or #info.changed == 0 then
             debugLog("[update] auto (" .. reason .. "): up to date (build " .. tostring(info.build or info.version or "?") .. ")")
+            self:autoUpdateCompanions()
+            auto_update_state.running = false
+            return
+        end
+        -- From GitHub, only a strictly newer version installs on its own: a
+        -- copy of the same version whose files differ is a local or
+        -- rebuilt one (a checkout, a release being prepared), and
+        -- replacing it quietly with the published files would be a
+        -- downgrade in all but the number. "Check for updates" still
+        -- offers it. (A self-hosted source is followed build for build.)
+        if not (update_url and update_url ~= "") and not isNewerVersion(info.version, PLUGIN_VERSION) then
+            debugLog("[update] auto (" .. reason .. "): the latest release is v" .. tostring(info.version)
+                .. ", not newer than this v" .. PLUGIN_VERSION .. " (files differ) -- not installed on its own")
             self:autoUpdateCompanions()
             auto_update_state.running = false
             return
@@ -9199,8 +9317,9 @@ function Bookbridge:addToMainMenu(menu_items)
                 -- unresolved and a relay is configured, so it stays out of
                 -- the way the rest of the time.
                 text_func = function()
-                    return T(_("Review %1 unmatched book(s)"),
-                        self.pending_unmatched and #self.pending_unmatched or 0)
+                    local n = self.pending_unmatched and #self.pending_unmatched or 0
+                    if n == 0 then return _("Review unmatched books") end
+                    return T(_("Review %1 unmatched book(s)"), n)
                 end,
                 enabled_func = function()
                     return self.pending_unmatched ~= nil and #self.pending_unmatched > 0
@@ -10134,6 +10253,13 @@ SRC.DEF.zlibrary = {
         if state.installed then return _("Z-Library is installed -- restart KOReader to use it.") end
         return _("Install the Z-Library plugin first (Bookbridge > Z-Library > Install).")
     end,
+    -- the two words after the name in Settings > Sources
+    short_missing = function(self)
+        local state = self:companionState("zlibrary")
+        if state.installed and state.disabled then return _("disabled") end
+        if state.installed then return _("restart needed") end
+        return _("not installed")
+    end,
     session = function()
         local Config = CO.module("zlibrary.config")
         local ok, s = pcall(function() return Config.getUserSession() end)
@@ -10258,6 +10384,12 @@ SRC.DEF.annasarchive = {
         while true do
             local results, _code, err, err_code = self:annasSearch(query)
             if err == _("Cancelled.") then return nil, nil, true end
+            -- (direct from the reader, AA.search has already tried every
+            -- domain: no second round; the helper reports one domain)
+            local via_helper = self.annas_url ~= nil and self.annas_url ~= ""
+            if err_code == "MIRROR_DOWN" and not via_helper then
+                return nil, _("Anna's Archive isn't answering on any of its domains right now.")
+            end
             if err_code == "MIRROR_DOWN" and attempt < 3 then
                 attempt = attempt + 1
                 local r = self:annasMirrorRefresh()
@@ -10387,7 +10519,8 @@ function Bookbridge:showSourcesDialog()
         local on = SRC.enabled(self, id)
         local ready = src.configured(self)
         buttons[#buttons + 1] = {
-            { text = (on and "\u{2611} " or "\u{2610} ") .. src.label .. (ready and "" or ("  (" .. _("not set up") .. ")")),
+            { text = (on and "\u{2611} " or "\u{2610} ") .. src.label
+                .. (ready and "" or ("  (" .. (src.short_missing and src.short_missing(self) or _("not set up")) .. ")")),
               align = "left",
               callback = function()
                   self.sources_enabled = type(self.sources_enabled) == "table" and self.sources_enabled or {}
@@ -11336,7 +11469,7 @@ end
 -- through a plain HTTPS download into a sibling temp file, renamed only on
 -- full success, with the file's growth polled for the progress bar (the
 -- download runs in a fork, which can't reach this process's widgets).
-function Bookbridge:downloadReleaseFile(release, src)
+function Bookbridge:downloadReleaseFile(release, src, caller_menu)
     src = src or SRC.DEF[release.source]
     if not src or not src.fetchUrl then
         UIManager:show(InfoMessage:new{ text = _("This release can only be requested, not downloaded here.") })
@@ -11348,6 +11481,7 @@ function Bookbridge:downloadReleaseFile(release, src)
         UIManager:show(InfoMessage:new{ text = err or _("No download URL returned.") })
         return
     end
+    if caller_menu then UIManager:close(caller_menu) end
 
     local dir = (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
     if lfs.attributes(dir, "mode") ~= "directory" then
@@ -11436,10 +11570,17 @@ function Bookbridge:downloadReleaseFile(release, src)
         local annas_url, download_key, tld, socks5_proxy =
             self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
         local md5, path = release.md5, save_path
+        local session = self.annas_session
         UIManager:scheduleIn(0.1, function()
             local Trapper2 = require("ui/trapper")
             Trapper2:wrap(function()
-                local isbn13, sess = doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy, self.annas_session)
+                -- (a real HTTPS round trip: off the UI thread, no dialog)
+                local completed, got = Trapper2:dismissableRunInSubprocess(function()
+                    local isbn13, sess = doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy, session)
+                    return { isbn13 = isbn13, session = sess }
+                end, nil)
+                if not completed or type(got) ~= "table" then return end
+                local isbn13, sess = got.isbn13, got.session
                 if sess then self:applyAnnasExtra({ session = sess }) end
                 if isbn13 then
                     addDownloadIsbnHint(path, isbn13)
@@ -11474,11 +11615,13 @@ function Bookbridge:confirmReleaseRequest(book, release, caller_menu)
     buttons[#buttons + 1] = {
         text = can_download and _("Download") or _("Request"),
         callback = function()
-            if caller_menu then UIManager:close(caller_menu) end
             local Trapper = require("ui/trapper")
             if can_download then
-                Trapper:wrap(function() self:downloadReleaseFile(release, src) end)
+                -- (the list stays until the source hands over a link: a
+                -- "sign in first" answer shouldn't cost the search)
+                Trapper:wrap(function() self:downloadReleaseFile(release, src, caller_menu) end)
             else
+                if caller_menu then UIManager:close(caller_menu) end
                 Trapper:wrap(function() self:submitRequest(withAuthorField(book), release) end)
             end
         end,
@@ -13942,7 +14085,7 @@ function Bookbridge:checkConnections(which, progress_text)
                 local state
                 if results then state = "ok"
                 elseif err_code == "MIRROR_DOWN" then state = "mirror"
-                elseif code == 401 and tostring(err):find("rejected the download key", 1, true) then state = "token"
+                elseif err_code == "KEY" or (code == 401 and tostring(err):find("rejected the download key", 1, true)) then state = "token"
                 elseif code == 401 then state = "challenge"
                 else state = "down" end
                 out.annas = { state = state, code = code, extra = extra }

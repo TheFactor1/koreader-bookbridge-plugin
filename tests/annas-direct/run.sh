@@ -182,10 +182,42 @@ ck(results == nil and ecode2 == "CHALLENGE", "every domain down or challenged: t
 WEB["annas-archive.gl"] = good_site()
 results, code2, err2, ecode2, extra = AA.search("gd", "bad", "emma", nil, { tlds = { "gd", "gl" }, at = os.time() })
 ck(results == nil and code2 == 401 and err2 == AA.KEY_REJECTED, "a bad key: reported at once (another domain won't help)")
+ck(ecode2 == "KEY", "...with the KEY code, so the status screen needn't match the English")
 -- too many redirects
 WEB["annas-archive.pk"] = function(method, path) if method == "POST" then return 302, { ["set-cookie"] = SETCOOKIE_JOINED }, "" end return 302, { location = "/search?q=x&r=" .. tostring(math.random()) }, "" end
 results, code2, err2, ecode2 = AA.searchOn("pk", "good", "emma", nil)
 ck(results == nil and ecode2 == "MIRROR_DOWN" and err2:find("redirects"), "a redirect loop: MIRROR_DOWN after 5 hops")
+-- the session cookie stays on the domain that issued it
+WEB["annas-archive.gl"] = function(method, path, headers)
+    if path:match("^/dyn/api/fast_download") then return 302, { location = "https://files.example/book.epub" }, "" end
+    return good_site()(method, path, headers)
+end
+WEB["files.example"] = function(method, path, headers) return 200, {}, "FILE" end
+CALLS = {}
+local bodyx = AA.fetch("https://annas-archive.gl/dyn/api/fast_download.json?md5=x", "aa_account_id2=SECRET", {})
+local leaked, sent_home = false, false
+for _, call in ipairs(CALLS) do
+    if call.host == "files.example" and call.cookie then leaked = true end
+    if call.host == "annas-archive.gl" and call.cookie == "aa_account_id2=SECRET" then sent_home = true end
+end
+ck(bodyx == "FILE" and sent_home and not leaked, "a redirect to another host: followed, without the session cookie")
+WEB["annas-archive.gl"] = good_site()
+-- meta: formats with digits (azw3, fb2, cbz) are formats, not something else
+m = AA.parseMeta("English [en] \194\183 AZW3 \194\183 1.2MB \194\183 2009")
+ck(m.format == "azw3" and m.year == "2009", "azw3 is read as the format")
+ck(AA.parseMeta("FB2 \194\183 0.3MB").format == "fb2" and AA.parseMeta("12 \194\183 0.3MB").format == nil, "fb2 too; a bare number isn't a format")
+-- an unreachable mirrors.json is not refetched on every search
+WEB["raw.githubusercontent.com"] = nil
+CALLS = {}
+results, code2, err2, ecode2, extra = AA.search("gl", "good", "emma", nil, nil)
+local list_calls = 0; for _, call in ipairs(CALLS) do if call.host == "raw.githubusercontent.com" then list_calls = list_calls + 1 end end
+ck(results and list_calls == 1 and extra.mirrors.tlds[1] == "gd", "mirrors.json unreachable: built-in list, one attempt")
+CALLS = {}
+results = AA.search("gl", "good", "emma", extra.session, extra.mirrors)
+list_calls = 0; for _, call in ipairs(CALLS) do if call.host == "raw.githubusercontent.com" then list_calls = list_calls + 1 end end
+ck(results and list_calls == 0, "...and the failure is remembered: no refetch on the next search")
+ck(os.time() - extra.mirrors.at >= AA.MIRRORS_TTL - AA.MIRRORS_RETRY - 5, "...for a quarter of an hour, not a day")
+WEB["raw.githubusercontent.com"] = function() return 200, {}, '{"tlds":["gd","gl","pk"]}' end
 
 -- 7. mirror refresh, download link, isbn
 WEB["annas-archive.gd"] = function(method, path, headers, body) return 403, CHALLENGE_H, CHALLENGE end

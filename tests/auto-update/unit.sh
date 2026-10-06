@@ -22,6 +22,7 @@ function doCheckForUpdate() return CHECK, 0, CHECK == nil and "no route" or nil 
 package.loaded["ui/trapper"] = { wrap = function(_, f) f() end, dismissableRunInSubprocess = function(_, f) return true, f() end }
 dofile(os.getenv("FN"))
 Bookbridge.autoUpdateCompanions = function() end   -- (companions ride along; tested in tests/companions)
+PLUGIN_VERSION = "0.7.0"; function isNewerVersion(r, l) return tostring(r) > tostring(l) end
 local saved = 0; local installed = 0
 local function plugin(t) return setmetatable(t, { __index = Bookbridge }) end
 local dev = plugin({ auto_update = true, update_url = "http://srv", saveAllSettings = function(s) saved = saved + 1 end, applyUpdate = function(s, info) installed = installed + 1 end })
@@ -67,6 +68,18 @@ ck(#LOG == 0, "running from a git checkout: never self-updates (it overwrote the
 LOG = {}; NOW = NOW + 24 * 3600
 Bookbridge.autoCheckForUpdate(plugin({ auto_update = true, update_url = "", path = "/mnt/us/koreader/plugins/bookbridge.koplugin", saveAllSettings = function() end }), "wake")
 ck(#LOG > 0, "an ordinary install (no .git above it) still updates")
+-- 7. from GitHub, the same version with different files is a local or rebuilt copy: left alone
+local gh_installed = 0
+local gh = plugin({ auto_update = true, update_url = "", path = "/mnt/us/koreader/plugins/bookbridge.koplugin", saveAllSettings = function() end, applyUpdate = function() gh_installed = gh_installed + 1 end })
+LOG = {}; NOW = NOW + 24 * 3600; CHECK = { manifest = true, changed = { "main.lua" }, build = "6a6a6a6", version = "0.7.0" }
+Bookbridge.autoCheckForUpdate(gh, "wake")
+ck(gh_installed == 0 and table.concat(LOG, "\n"):find("not newer", 1, true), "GitHub, same version, files differ: not installed on its own (a dev copy was 'updated' to the release before)")
+LOG = {}; NOW = NOW + 24 * 3600; CHECK = { manifest = true, changed = { "main.lua" }, build = "7b7b7b7", version = "0.8.0" }
+Bookbridge.autoCheckForUpdate(gh, "wake")
+ck(gh_installed == 1, "GitHub, a newer version: installed")
+LOG = {}; NOW = NOW + 24 * 3600; CHECK = { manifest = true, changed = { "main.lua" }, build = "8c8c8c8", version = "0.7.0" }
+Bookbridge.autoCheckForUpdate(dev, "wake")
+ck(installed == 2, "self-hosted, same version, files differ: followed build for build (so a :8092 rollback still works)")
 print(("=== AUTO UPDATE UNIT %d/%d"):format(n - fails, n), fails == 0 and "PASS" or "FAIL"); os.exit(fails == 0 and 0 or 1)
 LUA
 (cd "$KDIR" && FN="$W/fn.lua" ./luajit "$W/t.lua")

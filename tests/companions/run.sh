@@ -29,6 +29,16 @@ cp -r "$W/src" "$W/src2"; echo 'this is not lua (' > "$W/src2/plugins/zlibrary.k
 # a zip with the wrong top folder
 mkdir -p "$W/src3/other"; cp "$W/src/plugins/zlibrary.koplugin/main.lua" "$W/src3/other/"
 (cd "$W/src3" && zip -qr ../wrong.zip other)
+# a zip whose entries use backslashes (made on Windows) and one that tries to climb out
+python3 - "$W" <<'PY2'
+import sys, zipfile
+w = sys.argv[1]
+with zipfile.ZipFile(w + "/backslash.zip", "w") as z:
+    z.writestr("plugins\\zlibrary.koplugin\\_meta.lua", 'return { fullname = "Z-library", version = "1.0.99" }')
+    z.writestr("plugins\\zlibrary.koplugin\\main.lua", "return { ok = true }")
+    z.writestr("plugins\\zlibrary.koplugin\\zlibrary\\api.lua", "return {}")
+    z.writestr("plugins/zlibrary.koplugin/../escaped.lua", "return 1")
+PY2
 # an "installed" older copy with the user's credentials file
 echo 'return { fullname = "Z-library", version = "1.0.50" }' > "$W/plugins/zlibrary.koplugin/_meta.lua"
 echo 'return 1' > "$W/plugins/zlibrary.koplugin/main.lua"
@@ -38,9 +48,10 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
 GOOD_SHA=$(sha "$W/good.zip"); GOOD_SIZE=$(stat -c %s "$W/good.zip")
 BROKEN_SHA=$(sha "$W/broken.zip"); BROKEN_SIZE=$(stat -c %s "$W/broken.zip")
 WRONG_SHA=$(sha "$W/wrong.zip"); WRONG_SIZE=$(stat -c %s "$W/wrong.zip")
+BS_SHA=$(sha "$W/backslash.zip"); BS_SIZE=$(stat -c %s "$W/backslash.zip")
 
 cd "$KDIR" || exit 1
-W="$W" GOOD_SHA="$GOOD_SHA" GOOD_SIZE="$GOOD_SIZE" BROKEN_SHA="$BROKEN_SHA" BROKEN_SIZE="$BROKEN_SIZE" WRONG_SHA="$WRONG_SHA" WRONG_SIZE="$WRONG_SIZE" ./luajit - <<'LUA'
+W="$W" GOOD_SHA="$GOOD_SHA" GOOD_SIZE="$GOOD_SIZE" BROKEN_SHA="$BROKEN_SHA" BROKEN_SIZE="$BROKEN_SIZE" WRONG_SHA="$WRONG_SHA" WRONG_SIZE="$WRONG_SIZE" BS_SHA="$BS_SHA" BS_SIZE="$BS_SIZE" ./luajit - <<'LUA'
 package.path = "frontend/?.lua;common/?.lua;" .. package.path
 package.cpath = "common/?.so;libs/?.so;" .. package.cpath
 local W = os.getenv("W")
@@ -116,7 +127,11 @@ GITHUB = release("good.zip", os.getenv("GOOD_SHA"), os.getenv("GOOD_SIZE"))
 info = CO.latest("zlibrary")
 local rec
 ok, rec = CO.install("zlibrary", info)
-ck(ok == true and type(rec) == "table" and rec.version == "1.0.99", "good zip: installed, record " .. tostring(rec and rec.version))
+ck(ok == true and type(rec) == "table" and rec.version == "1.0.99", "good zip: unpacked and checked, record " .. tostring(rec and rec.version))
+ck(read(W .. "/plugins/zlibrary.koplugin/_meta.lua"):find("1.0.50") and read(W .. "/plugins/zlibrary.koplugin.new/_meta.lua"):find("1.0.99"),
+    "...the live folder is untouched until the parent swaps (a cancel can't land mid-swap)")
+ok, e = CO.swapIn("zlibrary")
+ck(ok == true, "swapIn: " .. tostring(e))
 ck(read(W .. "/plugins/zlibrary.koplugin/_meta.lua"):find("1.0.99"), "live folder is the new version")
 ck(exists(W .. "/plugins/zlibrary.koplugin/zlibrary/api.lua") and not exists(W .. "/plugins/zlibrary.koplugin/plugins"), "prefix plugins/zlibrary.koplugin/ stripped")
 ck(read(W .. "/plugins/zlibrary.koplugin/zlibrary_credentials.lua"):find("me@example.com"), "zlibrary_credentials.lua carried over")
@@ -127,6 +142,35 @@ ck(not exists(W .. "/plugins/.companion-zlibrary.zip"), "zip removed afterwards"
 ok, e = CO.rollback("zlibrary")
 ck(ok and read(W .. "/plugins/zlibrary.koplugin/_meta.lua"):find("1.0.50"), "rollback restores the previous version")
 ck(not exists(W .. "/plugins/zlibrary.koplugin.prev"), "...and consumes .prev")
+
+-- 8. a Windows-made zip (backslashes) unpacks; its "../" entry is skipped
+GITHUB = release("backslash.zip", os.getenv("BS_SHA"), os.getenv("BS_SIZE"))
+info = CO.latest("zlibrary")
+ok, e = CO.install("zlibrary", info)
+ck(ok == true, "backslash entry names: unpacked (" .. tostring(e) .. ")")
+ck(exists(W .. "/plugins/zlibrary.koplugin.new/zlibrary/api.lua"), "...with real folders")
+ck(not exists(W .. "/plugins/escaped.lua") and not exists(W .. "/plugins/zlibrary.koplugin.new/escaped.lua"), "...and the ../ entry went nowhere")
+CO.rmrf(W .. "/plugins/zlibrary.koplugin.new")
+
+-- 9. a symlinked plugin folder is removed as a link, never emptied
+lfs.mkdir(W .. "/devcopy"); local f = io.open(W .. "/devcopy/keep.lua", "w"); f:write("return 1"); f:close()
+os.execute("ln -s '" .. W .. "/devcopy' '" .. W .. "/plugins/linked'")
+ck(CO.isLink(W .. "/plugins/linked"), "a symlink is recognised")
+CO.rmrf(W .. "/plugins/linked")
+ck(not exists(W .. "/plugins/linked") and exists(W .. "/devcopy/keep.lua"), "rmrf on a symlink: link gone, target intact")
+
+-- 10. swapIn without a verified .new refuses and leaves the live folder
+ok, e = CO.swapIn("zlibrary")
+ck(not ok and read(W .. "/plugins/zlibrary.koplugin/_meta.lua"):find("1.0.50"), "swapIn with no .new: refused, live folder kept")
+
+-- 11. Readest's re-uploads: -10 beats -9 (a number, not a string)
+GITHUB = { tag_name = "v0.12.12", assets = {
+    { name = "Readest-0.12.12-9.koplugin.zip", browser_download_url = "x9", size = 9, digest = "sha256:" .. string.rep("9", 64) },
+    { name = "Readest-0.12.12-10.koplugin.zip", browser_download_url = "x10", size = 10, digest = "sha256:" .. string.rep("a", 64) },
+    { name = "Readest-0.12.12-2.koplugin.zip", browser_download_url = "x2", size = 2, digest = "sha256:" .. string.rep("2", 64) },
+} }
+info = CO.latest("readest")
+ck(info and info.name == "Readest-0.12.12-10.koplugin.zip", "highest re-upload number wins: " .. tostring(info and info.name))
 
 print(string.format("=== %d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
