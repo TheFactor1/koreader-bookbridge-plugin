@@ -203,7 +203,7 @@ ck(row(b:collectStatusRows(), "Anna's Archive").mandatory == "Key works", "statu
 NET = { annas = "token" }; b:saveAndVerify("annas")
 ck(last():find("rejected this download key", 1, true) and row(b:collectStatusRows(), "Anna's Archive").mandatory == "Key refused", "bad key: 'rejected this download key' / 'Key refused'")
 NET = { annas = "mirror" }; b:saveAndVerify("annas")
-ck(last():find("mirror (.gd) isn't answering", 1, true) and row(b:collectStatusRows(), "Anna's Archive").mandatory == "Mirror down", "mirror down: says which and what to try")
+ck(last():find("isn't answering on any domain", 1, true) and last():find(".gd", 1, true) and row(b:collectStatusRows(), "Anna's Archive").mandatory == "Mirror down", "mirror down: says it tried every domain, and which was current")
 NET = { annas = "challenge" }; b:saveAndVerify("annas")
 ck(last():find("bot check", 1, true), "bot challenge: key couldn't be tested right now")
 b.annas_download_key = nil; NET = { annas_ok = true }; b:saveAndVerify("annas")

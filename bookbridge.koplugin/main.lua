@@ -112,6 +112,9 @@ function Bookbridge:loadSettings()
     self.annas_url = self.sm_settings.data.shelfmark.annas_url
     self.annas_download_key = self.sm_settings.data.shelfmark.annas_download_key
     self.annas_tld = self.sm_settings.data.shelfmark.annas_tld or "gd"
+    -- (the direct client's sign-in and the domain list, see AA)
+    self.annas_session = self.sm_settings.data.shelfmark.annas_session
+    self.annas_mirrors = self.sm_settings.data.shelfmark.annas_mirrors
     -- Companions (see CO) and sources (see SRC): what's installed, and in
     -- which order books are looked for.
     self.companions = self.sm_settings.data.shelfmark.companions or {}
@@ -221,6 +224,8 @@ function Bookbridge:saveAllSettings(msg)
         annas_url = self.annas_url,
         annas_download_key = self.annas_download_key,
         annas_tld = self.annas_tld,
+        annas_session = self.annas_session,
+        annas_mirrors = self.annas_mirrors,
         companions = self.companions,
         companions_in_ko_menu = self.companions_in_ko_menu,
         sources_order = self.sources_order,
@@ -447,10 +452,11 @@ end
 function Bookbridge:editAnnasSettings()
     self.annas_settings_dialog = MultiInputDialog:new{
         title = _("Anna's Archive settings"),
+        description = _("Your member key from annas-archive.gd/account (Type on your phone works here). The reader talks to Anna's Archive directly; a helper server is only for the advanced option."),
         fields = {
-            { text = self.annas_url, hint = _("annas-archive-api URL, e.g. http://host:8087") },
-            { text = self.annas_download_key, text_type = "password", hint = _("Donator download key (optional)") },
-            { text = self.annas_tld, hint = _("Mirror TLD, e.g. gd (leave blank for default)") },
+            { text = self.annas_download_key, text_type = "password", hint = _("Member key") },
+            { text = self.annas_tld, hint = _("Domain ending, e.g. gd, gl, pk (blank: automatic)") },
+            { text = self.annas_url, hint = _("Advanced: annas-archive-api server URL (leave blank)") },
         },
         buttons = {
             self:phoneButtonRow(),
@@ -466,9 +472,11 @@ function Bookbridge:editAnnasSettings()
                     text = _("Apply"),
                     callback = function()
                         local fields = self.annas_settings_dialog:getFields()
-                        self.annas_url = fields[1] ~= "" and fields[1]:gsub("/*$", "") or nil
-                        self.annas_download_key = fields[2] ~= "" and fields[2] or nil
-                        self.annas_tld = fields[3] ~= "" and fields[3] or "gd"
+                        self.annas_download_key = fields[1] ~= "" and fields[1]:gsub("%s", "") or nil
+                        self.annas_tld = fields[2] ~= "" and fields[2]:lower():gsub("[%s%.]", "") or "gd"
+                        self.annas_url = fields[3] ~= "" and fields[3]:gsub("/*$", "") or nil
+                        -- (a changed key or domain: start a fresh sign-in)
+                        self.annas_session = nil
                         UIManager:close(self.annas_settings_dialog)
                         self:saveAndVerify("annas")
                     end,
@@ -1416,6 +1424,401 @@ end
 -- Anna's Archive account secret key (never stored here, always passed
 -- per-request via the Authorization header), which Anna's Archive
 -- apparently doesn't challenge the way it challenges anonymous requests.
+-- ===== AA begin: Anna's Archive, straight from the reader =====
+-- With only a member key, no helper server: sign in (POST /account/ with
+-- the key -> the aa_* cookies), fetch the search page as that member and
+-- read the results out of its HTML, ask /dyn/api/fast_download.json for
+-- the file's link. Anna's Archive runs the same site on several domains
+-- (annas-archive.gd, .gl, .pk ...); each fronts a bot check (DDoS-Guard)
+-- that a plain client can't pass, and whether a signed-in member gets
+-- through differs per domain and per day -- so a challenge is treated like
+-- a dead domain: the next one is tried, and the one that works is kept.
+-- The list of domains ships here and is topped up from this repository
+-- (mirrors.json), so a seized domain is replaced without a release.
+--
+-- Written from the site's behaviour (annas-archive-api was the reference
+-- for what to ask; no code from it -- it carries no license). KOReader's
+-- https never follows redirects itself and allows no custom socket, so
+-- redirects are followed by hand and the Tailscale proxy isn't involved
+-- (public hosts bypass it anyway, see proxyForUrl).
+local AA = {}
+AA.TLDS = { "gd", "gl", "pk" }
+AA.UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+AA.SESSION_TTL = 6 * 3600
+AA.MIRRORS_TTL = 24 * 3600
+AA.MAX_REDIRECTS = 5
+AA.MIRROR_LIST_URL = "https://raw.githubusercontent.com/TheFactor1/koreader-bookbridge-plugin/main/mirrors.json"
+AA.KEY_REJECTED = "Anna's Archive rejected the download key -- check it in Settings."
+
+function AA.tld(tld)
+    tld = type(tld) == "string" and tld:lower():gsub("^%.+", ""):gsub("%s", "") or ""
+    if not tld:match("^%l%l+$") then tld = "gd" end
+    return tld
+end
+
+function AA.base(tld)
+    return "https://annas-archive." .. AA.tld(tld)
+end
+
+-- One HTTPS request. o: cookie, form (table), accept, block, total.
+-- -> body, code, headers | nil, code, headers, err, err_code
+function AA.request(method, url, o)
+    o = o or {}
+    local headers = { ["User-Agent"] = AA.UA, ["Accept-Language"] = "en-US,en;q=0.9" }
+    if o.accept then headers["Accept"] = o.accept end
+    if o.cookie then headers["Cookie"] = o.cookie end
+    local source
+    if o.form then
+        local parts = {}
+        for k, v in pairs(o.form) do parts[#parts + 1] = socketurl.escape(k) .. "=" .. socketurl.escape(v) end
+        local body = table.concat(parts, "&")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers["Content-Length"] = tostring(#body)
+        source = ltn12.source.string(body)
+    end
+    socketutil:set_timeout(o.block or 15, o.total or 40)
+    local sink, chunks = socketutil.table_sink()
+    local request = { method = method, url = url, headers = headers, sink = sink, source = source, redirect = false }
+    local ok, code, rheaders = pcall(function() return socket.skip(1, https.request(request)) end)
+    socketutil:reset_timeout()
+    if not ok then
+        debugLog("[annas] connection error: " .. tostring(code))
+        return nil, nil, nil, T(_("Couldn't reach Anna's Archive: %1"), tostring(code)), "MIRROR_DOWN"
+    end
+    if type(code) ~= "number" then
+        debugLog("[annas] no answer: " .. tostring(code))
+        return nil, nil, nil, T(_("Couldn't reach Anna's Archive (%1)."), tostring(code)), "MIRROR_DOWN"
+    end
+    return table.concat(chunks), code, rheaders or {}
+end
+
+-- The bot check: a 403 from DDoS-Guard, or a redirect to a ?check=1 page.
+function AA.isChallenge(code, headers)
+    headers = headers or {}
+    if code == 403 and tostring(headers.server or headers.Server or ""):lower():find("ddos%-guard") then return true end
+    if code and code >= 300 and code < 400 and tostring(headers.location or headers.Location or ""):find("[?&]check=1") then return true end
+    return false
+end
+
+-- The real site writes its name with a curly apostrophe; a parked domain
+-- answering 200 with somebody else's page has neither.
+function AA.looksLikeAnnas(body)
+    if type(body) ~= "string" then return false end
+    return body:find("Anna\226\128\153s Archive", 1, true) ~= nil or body:find("Anna's Archive", 1, true) ~= nil
+end
+
+-- GET with redirects followed by hand (a challenge is reported, never
+-- followed). -> body, code, headers | nil, code, headers, err, err_code
+function AA.fetch(url, cookie, o)
+    o = o or {}
+    local current = url
+    for _hop = 0, AA.MAX_REDIRECTS do
+        local body, code, headers, err, err_code = AA.request("GET", current, { cookie = cookie, accept = o.accept, block = o.block, total = o.total })
+        if not body then return nil, code, headers, err, err_code end
+        if AA.isChallenge(code, headers) then
+            return nil, 401, headers, _("This Anna's Archive domain is behind a bot check right now."), "CHALLENGE"
+        end
+        local location = headers.location or headers.Location
+        if code >= 300 and code < 400 and location then
+            current = socketurl.absolute(current, location)
+        else
+            return body, code, headers
+        end
+    end
+    return nil, nil, nil, _("Too many redirects from Anna's Archive."), "MIRROR_DOWN"
+end
+
+-- The session cookies out of a Set-Cookie header. LuaSocket joins several
+-- Set-Cookie headers with commas, so split only before a "name=" (a comma
+-- inside an Expires date stays put); keep the aa_* ones.
+function AA.parseSetCookies(headers)
+    local raw = headers and (headers["set-cookie"] or headers["Set-Cookie"])
+    if type(raw) ~= "string" then return nil end
+    local out = {}
+    for part in (raw:gsub(",%s*([%w_%-]+=)", "\n%1") .. "\n"):gmatch("([^\n]*)\n") do
+        local nv = part:match("^%s*(aa_[%w_]+=[^;]*)")
+        if nv then out[#out + 1] = nv end
+    end
+    return #out > 0 and table.concat(out, "; ") or nil
+end
+
+-- -> cookie | nil, code, err, err_code ("MIRROR_DOWN", "CHALLENGE", "KEY")
+function AA.login(base, key)
+    debugLog("[annas] -> POST " .. base .. "/account/")
+    local body, code, headers, err, err_code = AA.request("POST", base .. "/account/", { form = { key = key }, block = 15, total = 40 })
+    if not body then return nil, code, err, err_code end
+    if AA.isChallenge(code, headers) then
+        return nil, 401, _("This Anna's Archive domain is behind a bot check right now."), "CHALLENGE"
+    end
+    local cookie = AA.parseSetCookies(headers)
+    if cookie then
+        debugLog("[annas] <- signed in (" .. tostring(code) .. ")")
+        return cookie
+    end
+    if not AA.looksLikeAnnas(body) then
+        return nil, code, _("This doesn't look like Anna's Archive -- the domain may be down."), "MIRROR_DOWN"
+    end
+    return nil, 401, _(AA.KEY_REJECTED), "KEY"
+end
+
+-- A signed-in session, reused for six hours. sess = {cookie, at, tld}.
+-- -> cookie, sess | nil, code, err, err_code
+function AA.session(tld, key, sess, force)
+    tld = AA.tld(tld)
+    if not force and type(sess) == "table" and sess.cookie and sess.tld == tld
+            and type(sess.at) == "number" and os.time() - sess.at < AA.SESSION_TTL then
+        return sess.cookie, sess
+    end
+    local cookie, code, err, err_code = AA.login(AA.base(tld), key)
+    if not cookie then return nil, code, err, err_code end
+    return cookie, { cookie = cookie, at = os.time(), tld = tld }
+end
+
+function AA.decodeEntities(s)
+    if type(s) ~= "string" then return s end
+    s = s:gsub("&#(%d+);", function(n)
+        n = tonumber(n)
+        if not n or n > 0x10FFFF then return "" end
+        -- (UTF-8 by hand: KOReader's util.unicodeCodepointToUtf8 exists, but
+        -- this block stays self-contained for the tests)
+        if n < 0x80 then return string.char(n) end
+        if n < 0x800 then return string.char(0xC0 + math.floor(n / 0x40), 0x80 + n % 0x40) end
+        if n < 0x10000 then return string.char(0xE0 + math.floor(n / 0x1000), 0x80 + math.floor(n / 0x40) % 0x40, 0x80 + n % 0x40) end
+        return string.char(0xF0 + math.floor(n / 0x40000), 0x80 + math.floor(n / 0x1000) % 0x40, 0x80 + math.floor(n / 0x40) % 0x40, 0x80 + n % 0x40)
+    end)
+    s = s:gsub("&#[xX](%x+);", function(h) return AA.decodeEntities("&#" .. tonumber(h, 16) .. ";") end)
+    s = s:gsub("&quot;", '"'):gsub("&#39;", "'"):gsub("&apos;", "'"):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&nbsp;", " "):gsub("&amp;", "&")
+    return s
+end
+
+function AA.stripTags(s)
+    return (tostring(s or ""):gsub("<script.-</script>", " "):gsub("<[^>]->", " "))
+end
+
+function AA.clean(s)
+    return (AA.decodeEntities(AA.stripTags(s)):gsub("\194\160", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- The metadata line: "English [en] · MOBI · 1.8MB · 1818 · 📕 Book (fiction) · 🚀/lgli/zlib"
+-- Segments are told apart by shape, not position (any of them can be
+-- missing).
+function AA.parseMeta(text)
+    local out = { format = nil, language = nil, size = nil, year = nil, content_type = nil }
+    for seg in (text .. "\194\183"):gmatch("(.-)\194\183") do
+        seg = seg:gsub("^%s+", ""):gsub("%s+$", "")
+        if seg ~= "" then
+            local low = seg:lower()
+            if not out.language and seg:match("%[%l%l%l?[-%w]*%]") then
+                out.language = seg
+            elseif not out.size and low:match("^[%d%.,]+%s?[kmg]?b$") then
+                out.size = seg
+            elseif not out.year and seg:match("^1[5-9]%d%d$") or (not out.year and seg:match("^20%d%d$")) then
+                out.year = seg
+            elseif not out.format and #low <= 6 and low:match("^[%a%-]+$") and not seg:find("[", 1, true) then
+                out.format = low
+            elseif not out.content_type and seg:find("\240[\128-\191][\128-\191][\128-\191]") and not seg:find("/", 1, true) then
+                out.content_type = (seg:gsub("\240[\128-\191][\128-\191][\128-\191]", "")):gsub("^%s+", ""):gsub("%s+$", "")
+            end
+        end
+    end
+    return out
+end
+
+-- The results on a search page: one card per book, found by its title
+-- link (href="/md5/<32 hex>" with class js-vim-focus); the card is the
+-- stretch from the previous card marker. Everything is matched inside that
+-- slice with string.find and init positions (a page is 300-600 KB).
+function AA.parseSearch(html, base)
+    local results = {}
+    if type(html) ~= "string" then return results end
+    base = (base or ""):gsub("/+$", "")
+    local pos = 1
+    while true do
+        local s, e, md5, cls = html:find('<a href="/md5/(%x+)" class="([^"]*)"', pos)
+        if not s then break end
+        pos = e + 1
+        if #md5 == 32 and cls:find("js-vim-focus", 1, true) then
+            local title_end = html:find("</a>", e, true) or e
+            local title = AA.clean(html:sub(e + 2, title_end - 1))
+            -- the card: back to the nearest card marker, forward to the next title link
+            local card_start = 1
+            local p = 1
+            while true do
+                local q = html:find('pt-3 pb-3', p, true)
+                if not q or q > s then break end
+                card_start = q; p = q + 1
+            end
+            local next_title = html:find('class="[^"]*js%-vim%-focus', e) or #html
+            local card = html:sub(card_start, next_title)
+            local author = card:match('icon%-%[mdi%-%-user%-edit%][^>]*></span>%s*(.-)</a>')
+            local cover = card:match('list_cover_aarecord_id__[^>]*>%s*<img[^>]-src="([^"]+)"')
+            if cover and not cover:match("^https?://") then cover = base .. "/" .. cover:gsub("^/", "") end
+            local meta_html = card:match('font%-semibold text%-sm leading%-%[1%.2%][^"]*">(.-)</div>')
+            if not meta_html then
+                for div in card:gmatch("<div[^>]*>(.-)</div>") do
+                    if div:find("\194\183", 1, true) and (div:find("\240\159\147", 1, true) or div:find("MB", 1, true) or div:find("KB", 1, true)) then meta_html = div end
+                end
+            end
+            local meta_text = ""
+            if meta_html then
+                local cut = meta_html:find("<a ", 1, true)
+                meta_text = AA.clean(cut and meta_html:sub(1, cut - 1) or meta_html)
+            end
+            local meta = AA.parseMeta(meta_text)
+            results[#results + 1] = {
+                title = title, author = author and AA.clean(author) or "",
+                format = meta.format, downloads = false,
+                cover_url = cover, url = base .. "/md5/" .. md5, md5 = md5,
+                size = meta.size, year = meta.year, language = meta.language, content_type = meta.content_type,
+                meta_line = meta_text ~= "" and meta_text or nil,
+            }
+        end
+    end
+    return results
+end
+
+-- One search on one domain, signed in. opts.probe: one result (the key
+-- check). -> results, 200, nil, nil, sess | nil, code, err, err_code, sess
+function AA.searchOn(tld, key, query, sess, opts)
+    opts = opts or {}
+    tld = AA.tld(tld)
+    local base = AA.base(tld)
+    local cookie, s2, err, err_code = AA.session(tld, key, sess)
+    if not cookie then return nil, s2, err, err_code, sess end
+    sess = s2
+    local url = base .. "/search?q=" .. socketurl.escape(query)
+    debugLog("[annas] -> GET " .. url)
+    local body, code, _headers, ferr, fcode = AA.fetch(url, cookie, { block = opts.probe and 10 or 15, total = opts.probe and 30 or 45 })
+    if fcode == "CHALLENGE" and not opts.no_retry then
+        -- a stale session looks exactly like being signed out: once more
+        -- with a fresh sign-in
+        cookie, s2, err, err_code = AA.session(tld, key, nil, true)
+        if not cookie then return nil, s2, err, err_code, sess end
+        sess = s2
+        body, code, _headers, ferr, fcode = AA.fetch(url, cookie, { block = 15, total = 45 })
+    end
+    if not body then return nil, code, ferr, fcode, sess end
+    if code ~= 200 then return nil, code, T(_("Anna's Archive answered HTTP %1."), tostring(code)), "MIRROR_DOWN", sess end
+    local results = AA.parseSearch(body, base)
+    if #results == 0 then
+        if not AA.looksLikeAnnas(body) then
+            return nil, code, _("This doesn't look like Anna's Archive -- the domain may be down."), "MIRROR_DOWN", sess
+        end
+        if body:find("/md5/", 1, true) then
+            return nil, code, _("Anna's Archive changed its page layout; Bookbridge needs an update to read it."), "LAYOUT", sess
+        end
+    end
+    local limit = opts.probe and 1 or 20
+    while #results > limit do results[#results] = nil end
+    debugLog("[annas] <- " .. #results .. " result(s) from annas-archive." .. tld)
+    return results, 200, nil, nil, sess
+end
+
+-- The domains to try: the built-ins plus the list fetched from this
+-- repository (cached a day), the current one first.
+function AA.candidates(tld, mirrors)
+    local seen, out = {}, {}
+    local function add(t) t = AA.tld(t); if not seen[t] then seen[t] = true; out[#out + 1] = t end end
+    add(tld)
+    if type(mirrors) == "table" and type(mirrors.tlds) == "table" then
+        for _unused, t in ipairs(mirrors.tlds) do if type(t) == "string" then add(t) end end
+    end
+    for _unused, t in ipairs(AA.TLDS) do add(t) end
+    return out
+end
+
+function AA.remoteTlds()
+    local body, code = AA.request("GET", AA.MIRROR_LIST_URL, { block = 10, total = 20 })
+    if not body or code ~= 200 then return nil end
+    local ok, d = pcall(JSON.decode, body)
+    if not ok or type(d) ~= "table" or type(d.tlds) ~= "table" then return nil end
+    local tlds = {}
+    for _unused, t in ipairs(d.tlds) do if type(t) == "string" and t:match("^%l%l+$") then tlds[#tlds + 1] = t end end
+    return #tlds > 0 and tlds or nil
+end
+
+-- Search across the domains: the current one, then the others when it is
+-- down or behind a bot check. extra = {session, tld, switched, mirrors}.
+-- -> results, 200, nil, nil, extra | nil, code, err, err_code, extra
+function AA.search(tld, key, query, sess, mirrors, opts)
+    opts = opts or {}
+    if type(mirrors) ~= "table" or type(mirrors.at) ~= "number" or os.time() - mirrors.at > AA.MIRRORS_TTL then
+        local remote = AA.remoteTlds()
+        mirrors = { tlds = remote or (type(mirrors) == "table" and mirrors.tlds) or AA.TLDS, at = remote and os.time() or (type(mirrors) == "table" and mirrors.at) or 0 }
+    end
+    local start = AA.tld(tld)
+    local last_code, last_err, last_err_code, saw_challenge
+    for _unused, t in ipairs(AA.candidates(start, mirrors)) do
+        local results, code, err, err_code, s2 = AA.searchOn(t, key, query, sess, opts)
+        sess = s2 or sess
+        if results then
+            return results, 200, nil, nil, { session = sess, tld = t, switched = t ~= start, mirrors = mirrors }
+        end
+        last_code, last_err, last_err_code = code, err, err_code
+        if err_code == "CHALLENGE" then saw_challenge = { code = code, err = err } end
+        if err_code == "KEY" or err_code == "LAYOUT" then
+            -- (a bad key or a changed page won't get better on another domain)
+            return nil, code, err, err_code == "KEY" and nil or err_code, { session = sess, tld = t, switched = false, mirrors = mirrors }
+        end
+        debugLog("[annas] annas-archive." .. t .. ": " .. tostring(err_code) .. " -- trying the next domain")
+    end
+    -- (a domain that answered with a bot check means the site is up and
+    -- blocking -- worth saying over "unreachable")
+    if saw_challenge then
+        return nil, saw_challenge.code, saw_challenge.err, "CHALLENGE", { session = sess, tld = start, switched = false, mirrors = mirrors }
+    end
+    return nil, last_code, last_err, "MIRROR_DOWN", { session = sess, tld = start, switched = false, mirrors = mirrors }
+end
+
+-- Which domain answers (the current one checked first). The same shape
+-- the helper's /api/mirror-refresh had: {previousTld, activeTld, switched, allDead}.
+function AA.refreshMirror(tld, key, mirrors)
+    local start = AA.tld(tld)
+    local remote = AA.remoteTlds()
+    mirrors = { tlds = remote or (type(mirrors) == "table" and mirrors.tlds) or AA.TLDS, at = remote and os.time() or 0 }
+    for _unused, t in ipairs(AA.candidates(start, mirrors)) do
+        local body, code, headers = AA.request("GET", AA.base(t) .. "/", { block = 10, total = 20 })
+        local alive = body ~= nil and (AA.isChallenge(code, headers) or (code >= 300 and code < 400) or (code == 200 and AA.looksLikeAnnas(body)))
+        if alive then
+            return { previousTld = start, activeTld = t, switched = t ~= start, allDead = false, mirrors = mirrors }
+        end
+    end
+    return { previousTld = start, activeTld = start, switched = false, allDead = true, mirrors = mirrors }
+end
+
+-- The file's link for a member: /dyn/api/fast_download.json.
+-- -> url | nil, code, err
+function AA.fastDownload(tld, key, md5)
+    local url = AA.base(tld) .. "/dyn/api/fast_download.json?md5=" .. socketurl.escape(md5) .. "&key=" .. socketurl.escape(key or "")
+    debugLog("[annas] -> GET " .. AA.base(tld) .. "/dyn/api/fast_download.json?md5=" .. md5)
+    local body, code, headers, err, err_code = AA.fetch(url, nil, { block = 15, total = 40 })
+    if not body then return nil, code, err, err_code end
+    local ok, d = pcall(JSON.decode, body)
+    if not ok or type(d) ~= "table" then return nil, code, _("Unreadable answer from Anna's Archive for the download link.") end
+    d = stripJsonNull(d)
+    if type(d.download_url) == "string" and d.download_url ~= "" then
+        return d.download_url, code
+    end
+    local msg = type(d.error) == "string" and d.error or _("No download link in Anna's Archive's answer.")
+    local info = type(d.account_fast_download_info) == "table" and d.account_fast_download_info or nil
+    if info and info.downloads_left ~= nil then
+        msg = msg .. " " .. T(_("(%1 fast downloads left today)"), tostring(info.downloads_left))
+    end
+    return nil, code, msg
+end
+
+-- Best-effort ISBN-13 off the book's own page. -> isbn13 | nil ; sess
+function AA.fetchIsbn(tld, key, md5, sess)
+    local cookie, s2 = AA.session(tld, key, sess)
+    if not cookie then return nil, sess end
+    local body = AA.fetch(AA.base(tld) .. "/md5/" .. md5, cookie, { block = 10, total = 30 })
+    if not body then return nil, s2 end
+    local text = AA.stripTags(body)
+    local isbn = text:match("%f[%d](97[89]%d%d%d%d%d%d%d%d%d%d)%f[%D]")
+    return isbn, s2
+end
+-- ===== AA end =====
+
 -- Confirmed live: Shelfmark's own built-in direct_download integration
 -- needs a real headless-Chrome DDoS-guard solve on every single search
 -- (10-15s minimum, 60-120s+ on a cold cache per Shelfmark's own docs, and
@@ -1432,7 +1835,11 @@ end
 
 local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy, opts)
     if not annas_url or annas_url == "" then
-        return nil, nil, _("Anna's Archive API URL isn't set.")
+        -- no helper server: straight to Anna's Archive with the key (AA)
+        if not download_key or download_key == "" then
+            return nil, nil, _("Add your Anna's Archive key in Settings > Connections > Anna's Archive.")
+        end
+        return AA.search(tld, download_key, query, opts and opts.session, opts and opts.mirrors, opts)
     end
     -- opts.probe: the key check -- one result, no live download counts.
     local probe = opts and opts.probe
@@ -1508,9 +1915,9 @@ end
 -- Bookbridge:annasSearch's caller) -- never on a timer. Asks the backend to
 -- check whether its configured Anna's Archive mirror is actually still
 -- Anna's Archive and, if not, switch to another known-alive one.
-local function doAnnasMirrorRefresh(annas_url, socks5_proxy)
+local function doAnnasMirrorRefresh(annas_url, socks5_proxy, opts)
     if not annas_url or annas_url == "" then
-        return nil, nil, _("Anna's Archive API URL isn't set.")
+        return AA.refreshMirror(opts and opts.tld, opts and opts.key, opts and opts.mirrors), 200
     end
     local url = annas_url .. "/api/mirror-refresh"
     debugLog("[annas] -> GET " .. url)
@@ -1547,6 +1954,10 @@ local function doAnnasMirrorRefresh(annas_url, socks5_proxy)
 end
 
 local function doAnnasFetchDownloadUrl(annas_url, download_key, tld, md5, socks5_proxy)
+    if not annas_url or annas_url == "" then
+        if not download_key or download_key == "" then return nil, nil, _("Add your Anna's Archive key in Settings.") end
+        return AA.fastDownload(tld, download_key, md5)
+    end
     local url = annas_url .. "/api/download?md5=" .. socketurl.escape(md5)
         .. "&tld=" .. socketurl.escape(tld or "")
     local headers = { ["authorization"] = "Bearer " .. (download_key or "") }
@@ -1599,7 +2010,11 @@ end
 -- opens. Never a hard failure: a timeout, a non-200, an unreadable body,
 -- or simply no isbn13 in the response all return nil the same way -- the
 -- caller already treats "no hint" as the ordinary case, not an error.
-local function doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy)
+local function doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy, session)
+    if not annas_url or annas_url == "" then
+        if not download_key or download_key == "" then return nil end
+        return AA.fetchIsbn(tld, download_key, md5, session)
+    end
     local url = annas_url .. "/api/isbn?md5=" .. socketurl.escape(md5)
         .. "&tld=" .. socketurl.escape(tld or "")
     local headers = { ["authorization"] = "Bearer " .. (download_key or "") }
@@ -6828,12 +7243,33 @@ function Bookbridge:annasSearch(query, progress_text)
     local annas_url, download_key, tld, socks5_proxy =
         self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
 
-    local completed, results, code, err, err_code = Trapper:dismissableRunInSubprocess(function()
-        return doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy)
+    local opts = { session = self.annas_session, mirrors = self.annas_mirrors }
+    local completed, results, code, err, err_code, extra = Trapper:dismissableRunInSubprocess(function()
+        return doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy, opts)
     end, progress_text or _("Searching Anna's Archive..."))
 
     if not completed then return nil, nil, _("Cancelled.") end
+    self:applyAnnasExtra(extra)
     return results, code, err, err_code
+end
+
+-- What the direct client learned (its session, the domain that answers,
+-- the domain list): kept for next time, saved only when something changed.
+function Bookbridge:applyAnnasExtra(extra)
+    if type(extra) ~= "table" then return end
+    local changed = false
+    if type(extra.session) == "table" and extra.session.cookie and
+            not (type(self.annas_session) == "table" and self.annas_session.cookie == extra.session.cookie) then
+        self.annas_session = extra.session; changed = true
+    end
+    if type(extra.mirrors) == "table" and extra.mirrors.at and extra.mirrors.at ~= (type(self.annas_mirrors) == "table" and self.annas_mirrors.at) then
+        self.annas_mirrors = extra.mirrors; changed = true
+    end
+    if type(extra.tld) == "string" and extra.switched and extra.tld ~= self.annas_tld then
+        debugLog("[annas] now using annas-archive." .. extra.tld)
+        self.annas_tld = extra.tld; changed = true
+    end
+    if changed then self:saveAllSettings() end
 end
 
 -- See doAnnasMirrorRefresh above for when this actually gets called.
@@ -6841,11 +7277,15 @@ function Bookbridge:annasMirrorRefresh()
     local Trapper = require("ui/trapper")
     local annas_url, socks5_proxy = self.annas_url, self.socks5_proxy
 
+    local opts = { tld = self.annas_tld, key = self.annas_download_key, mirrors = self.annas_mirrors }
     local completed, result, code, err = Trapper:dismissableRunInSubprocess(function()
-        return doAnnasMirrorRefresh(annas_url, socks5_proxy)
+        return doAnnasMirrorRefresh(annas_url, socks5_proxy, opts)
     end, _("Looking for a working Anna's Archive mirror..."))
 
     if not completed then return nil, nil, _("Cancelled.") end
+    if type(result) == "table" and (not annas_url or annas_url == "") then
+        self:applyAnnasExtra({ tld = result.activeTld, switched = result.switched, mirrors = result.mirrors })
+    end
     return result, code, err
 end
 
@@ -9808,11 +10248,11 @@ SRC.DEF.zlibrary = {
 -- in annas-archive-api for why it's on demand, not in the background.
 SRC.DEF.annasarchive = {
     label = "Anna's Archive",
-    credit = "Anna's Archive, with your own member key",
+    credit = "Anna's Archive, with your own member key (no server needed)",
     configured = function(self)
-        return self.annas_url ~= nil and self.annas_url ~= ""
+        return (self.annas_url ~= nil and self.annas_url ~= "") or (self.annas_download_key ~= nil and self.annas_download_key ~= "")
     end,
-    missing = function(self) return _("Anna's Archive isn't set up (Settings > Connections > Anna's Archive).") end,
+    missing = function(self) return _("Anna's Archive isn't set up: add your key under Settings > Connections > Anna's Archive.") end,
     search = function(self, query)
         local attempt = 0
         while true do
@@ -10992,14 +11432,15 @@ function Bookbridge:downloadReleaseFile(release, src)
 
     -- Best-effort ISBN capture for later Hardcover matching (Anna's
     -- Archive's record is often the cleanest ISBN the book will carry).
-    if src.isbn and self.annas_url and self.annas_url ~= "" and release.md5 then
+    if src.isbn and release.md5 and ((self.annas_url and self.annas_url ~= "") or (self.annas_download_key and self.annas_download_key ~= "")) then
         local annas_url, download_key, tld, socks5_proxy =
             self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
         local md5, path = release.md5, save_path
         UIManager:scheduleIn(0.1, function()
             local Trapper2 = require("ui/trapper")
             Trapper2:wrap(function()
-                local isbn13 = doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy)
+                local isbn13, sess = doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy, self.annas_session)
+                if sess then self:applyAnnasExtra({ session = sess }) end
                 if isbn13 then
                     addDownloadIsbnHint(path, isbn13)
                     debugLog("[annas] captured isbn13 " .. isbn13 .. " for " .. path)
@@ -13381,8 +13822,8 @@ function Bookbridge:collectStatusRows()
     add({ text = _("Readest -- your library & sync"), mandatory = rd, action = rd_act })
 
     -- Anna's Archive (optional)
-    add({ text = _("Anna's Archive -- extra source (optional)"),
-        mandatory = (self.annas_url and self.annas_url ~= "") and (checks.annas and ({
+    add({ text = _("Anna's Archive -- search & downloads"),
+        mandatory = ((self.annas_url and self.annas_url ~= "") or (self.annas_download_key and self.annas_download_key ~= "")) and (checks.annas and ({
                 ok = _("Key works"), token = _("Key refused"), mirror = _("Mirror down"),
                 challenge = _("Bot check -- retry"), nokey = _("No key yet"), down = _("Can't reach"),
             })[checks.annas.state] or _("Saved")) or _("Not set up"),
@@ -13431,6 +13872,7 @@ function Bookbridge:showStatus(opts)
     local checks = self._status_checks
     local stale = not checks or os.time() - (checks.at or 0) > STATUS_CHECK_MAX_AGE
     local anything = (self.server_url and self.server_url ~= "") or (self.cwa_url and self.cwa_url ~= "")
+        or (self.hardcover_token and self.hardcover_token ~= "") or (self.annas_download_key and self.annas_download_key ~= "")
         or (self.hardcover_token and self.hardcover_token ~= "")
     if stale and anything and not opts.no_auto_check then
         local ok_nm, NetworkMgr = pcall(require, "ui/network/manager")
@@ -13473,7 +13915,8 @@ function Bookbridge:checkConnections(which, progress_text)
         server_url = want("shelfmark") and self.server_url, username = self.username, password = self.password,
         cwa_url = want("cwa") and self.cwa_url, cwa_username = self.cwa_username, cwa_password = self.cwa_password,
         token = want("hardcover") and self.hardcover_token, annas_url = want("annas") and self.annas_url,
-        annas_key = self.annas_download_key, annas_tld = self.annas_tld, proxy = self.socks5_proxy,
+        annas_key = want("annas") and self.annas_download_key, annas_tld = self.annas_tld, proxy = self.socks5_proxy,
+        annas_session = self.annas_session, annas_mirrors = self.annas_mirrors,
     }
     local completed, res = Trapper:dismissableRunInSubprocess(function()
         local out = {}
@@ -13489,19 +13932,20 @@ function Bookbridge:checkConnections(which, progress_text)
             local data, err = doHardcoverGraphQL(cfg.token, "query { me { id } }")
             out.hardcover = { state = data and "ok" or (tostring(err):find(HC_TOKEN_REJECTED, 1, true) and "token" or "down") }
         end
-        if cfg.annas_url and cfg.annas_url ~= "" then
+        if (cfg.annas_url and cfg.annas_url ~= "") or (cfg.annas_key and cfg.annas_key ~= "") then
             if cfg.annas_key and cfg.annas_key ~= "" then
-                -- The service logs in to Anna's Archive with the key for a
-                -- search (POST /account/) -- that tests the key without
-                -- spending one of the account's downloads.
-                local results, code, err, err_code = doAnnasSearch(cfg.annas_url, cfg.annas_key, cfg.annas_tld, "the", cfg.proxy, { probe = true })
+                -- Signing in to Anna's Archive with the key for a one-result
+                -- search tests the key without spending a download (the
+                -- helper server does the same when one is set).
+                local results, code, err, err_code, extra = doAnnasSearch(cfg.annas_url, cfg.annas_key, cfg.annas_tld, "the", cfg.proxy,
+                    { probe = true, session = cfg.annas_session, mirrors = cfg.annas_mirrors })
                 local state
                 if results then state = "ok"
                 elseif err_code == "MIRROR_DOWN" then state = "mirror"
                 elseif code == 401 and tostring(err):find("rejected the download key", 1, true) then state = "token"
                 elseif code == 401 then state = "challenge"
                 else state = "down" end
-                out.annas = { state = state, code = code }
+                out.annas = { state = state, code = code, extra = extra }
             else
                 out.annas = { state = doTestService(cfg.annas_url, cfg.proxy) and "nokey" or "down" }
             end
@@ -13526,6 +13970,7 @@ function Bookbridge:checkConnections(which, progress_text)
         end
     end
     if res.hardcover then
+        if res.annas and res.annas.extra then self:applyAnnasExtra(res.annas.extra) end
         if res.hardcover.state == "token" then hc_rejected_token = self.hardcover_token
         elseif res.hardcover.state == "ok" and hc_rejected_token == self.hardcover_token then hc_rejected_token = nil end
     end
@@ -13552,7 +13997,7 @@ function Bookbridge:saveAndVerify(key)
         shelfmark = self.server_url and self.server_url ~= "" and self.username and self.username ~= "",
         cwa = self.cwa_url and self.cwa_url ~= "" and self.cwa_username and self.cwa_username ~= "",
         hardcover = self.hardcover_token and self.hardcover_token ~= "",
-        annas = self.annas_url and self.annas_url ~= "",
+        annas = (self.annas_url and self.annas_url ~= "") or (self.annas_download_key and self.annas_download_key ~= ""),
     })[key]
     if not configured then
         UIManager:show(InfoMessage:new{ text = _("Saved."), timeout = 2 })
@@ -13579,7 +14024,7 @@ function Bookbridge:saveAndVerify(key)
         elseif r.state == "nokey" then
             text = _("Saved -- the Anna's Archive service is reachable. Add your download key to search and download.")
         elseif r.state == "mirror" then
-            text = T(_("Saved, but the Anna's Archive mirror (.%1) isn't answering. Try another domain ending in these settings, e.g. gl or li."), tostring(self.annas_tld or "gd"))
+            text = T(_("Saved, but Anna's Archive isn't answering on any domain right now (tried .%1 and the others). Try again later."), tostring(self.annas_tld or "gd"))
         elseif r.state == "challenge" then
             text = _("Saved, but Anna's Archive asked for a bot check, so the key couldn't be tested right now. Try again in a few minutes.")
         elseif r.state == "refused" then

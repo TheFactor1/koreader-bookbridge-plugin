@@ -1,0 +1,13 @@
+HTTP/2 403 
+server: ddos-guard
+date: Tue, 06 Oct 2026 04:17:50 GMT
+set-cookie: __ddg8_=wKTcNnMPNeVKUImP; Domain=.annas-archive.gd; Path=/; Expires=Tue, 06-Oct-2026 04:37:50 GMT
+set-cookie: __ddg10_=1791260270; Domain=.annas-archive.gd; Path=/; Expires=Tue, 06-Oct-2026 04:37:50 GMT
+set-cookie: __ddg9_=8.9.92.48; Domain=.annas-archive.gd; Path=/; Expires=Tue, 06-Oct-2026 04:37:50 GMT
+set-cookie: __ddgid_=l8VI8FElCny7Ag42; Domain=.annas-archive.gd; HttpOnly; Path=/; Expires=Wed, 06-Oct-2027 04:17:50 GMT
+set-cookie: __ddgmark_=E6YUxhqsqgZPUjzP; Domain=.annas-archive.gd; HttpOnly; Path=/; Expires=Wed, 07-Oct-2026 04:17:50 GMT
+set-cookie: __ddg5_=38K60w8ki5lCvcG1; Domain=.annas-archive.gd; Path=/; HttpOnly; Expires=Tue, 06-Oct-2026 07:17:50 GMT
+cache-control: no-cache, no-store, must-revalidate
+content-type: text/html; charset=UTF-8
+content-length: 902
+
