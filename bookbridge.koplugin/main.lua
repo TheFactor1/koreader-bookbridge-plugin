@@ -657,7 +657,9 @@ local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 -- also how the self-update code below finds where to write the files it
 -- downloads.
 local function getPluginDir()
-    local src = debug.getinfo(1, "S").source:gsub("^@", "")
+    -- (KOReader's user plugins dir ends in "/", so the source path reads
+    -- "plugins//bookbridge.koplugin/main.lua"; one slash is enough)
+    local src = debug.getinfo(1, "S").source:gsub("^@", ""):gsub("//+", "/")
     return src:match("^(.*)/[^/]+$") or "."
 end
 
