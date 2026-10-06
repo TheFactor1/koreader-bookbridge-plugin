@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.7.0, build 79af5a7
+## 2026-10-06 — v0.7.0, build 4718dcf
 
 - **New**: **Anna's Archive straight from the reader.** With your member
   key alone (Settings > Connections > Anna's Archive), Bookbridge signs in,
