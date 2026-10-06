@@ -10163,7 +10163,7 @@ function Bookbridge:startSearch()
     -- surfaces an author's other books, instead of relying on relevance
     -- ranking of a plain-text query to happen to turn them up.
     self.search_dialog = MultiInputDialog:new{
-        title = via_server and _("Search Shelfmark") or _("Find a book"),
+        title = _("Find a book"),
         fields = {
             { hint = _("Title or keywords") },
             { hint = _("Author (optional)") },
@@ -10361,6 +10361,17 @@ function Bookbridge:doSearch(params, existing_books, caller_menu)
     end
 
     if #books == 0 then
+        -- Shelfmark's catalogue is one source among several: with nothing
+        -- there, the others (Z-Library, Anna's Archive) are asked directly
+        -- for files, the way "Find a book" works without a server.
+        local others = false
+        for _unused, id in ipairs(self:sourcesInOrder()) do
+            if id ~= "shelfmark" and SRC.DEF[id].configured(self) then others = true end
+        end
+        if others and params.query and params.query ~= "" and params.query ~= "*" then
+            UIManager:show(InfoMessage:new{ text = _("Nothing in Shelfmark's catalogue -- asking your other sources for files..."), timeout = 2 })
+            return self:getBook(params.query, params.author)
+        end
         UIManager:show(InfoMessage:new{ text = _("No results.") })
         return
     end
@@ -10409,8 +10420,20 @@ function Bookbridge:doSearch(params, existing_books, caller_menu)
     self:prefetchCovers(first_page_books)
 
     local item_table = {}
-    for i, book in ipairs(books) do
-        item_table[i] = {
+    -- the other sources (Z-Library, Anna's Archive) hold files, not a
+    -- catalogue: one row asks them with the typed words, without picking a
+    -- Shelfmark edition first
+    local sources_row = false
+    if params.query and params.query ~= "" and params.query ~= "*" and not params.title_override then
+        for _unused, id in ipairs(self:sourcesInOrder()) do
+            if id ~= "shelfmark" and SRC.DEF[id].configured(self) then sources_row = true end
+        end
+    end
+    if sources_row then
+        item_table[1] = { text = T(_("\xE2\x8C\x95 Files for \"%1\" from your sources..."), truncate(params.query, 40)), is_sources = true } -- "⌕ ..."
+    end
+    for _unused, book in ipairs(books) do
+        item_table[#item_table + 1] = {
             text = formatBookRowText(book),
             book_data = book,
             cover_path = book.cover_path,
@@ -10459,6 +10482,10 @@ function Bookbridge:doSearch(params, existing_books, caller_menu)
                         page = (params.page or 1) + 1,
                     }, books, results_menu)
                 end)
+            elseif item.is_sources then
+                local Trapper = require("ui/trapper")
+                UIManager:close(results_menu)
+                Trapper:wrap(function() self:getBook(params.query, params.author) end)
             else
                 local Trapper = require("ui/trapper")
                 Trapper:wrap(function()
@@ -11034,6 +11061,10 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu)
                 errors[#errors + 1] = src.label .. ": " .. tostring(err)
             end
             if #releases > 0 and self.sources_stop_first then break end
+        elseif src.missing then
+            -- switched on but not ready (plugin awaiting a restart, no
+            -- key yet): said, not silently skipped
+            errors[#errors + 1] = src.label .. ": " .. tostring(src.missing(self))
         end
     end
     if #tried == 0 then
@@ -11174,6 +11205,13 @@ function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors,
     end
 
     self:sortReleases(releases, book)
+
+    -- A source that couldn't answer is named above the list (a couple of
+    -- seconds, no tap): "Z-Library: restart KOReader to use it" explains a
+    -- list that is Anna's Archive only.
+    if errors and #errors > 0 then
+        UIManager:show(InfoMessage:new{ text = table.concat(errors, "\n"), timeout = 4 })
+    end
 
     -- Prowlarr/indexer search is title-only by Shelfmark's own design (see
     -- the comment above browseReleases()) -- it never gets an author or

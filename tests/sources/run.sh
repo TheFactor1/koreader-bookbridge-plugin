@@ -232,6 +232,21 @@ ck(SHOWN[#SHOWN].kind == "viewer" and SHOWN[#SHOWN].buttons[1].text == "Download
 b:confirmReleaseRequest({ title = "P" }, { source = "prowlarr", title = "x" }, nil)
 ck(SHOWN[#SHOWN].buttons[1].text == "Request", "server release: Request button")
 
+-- a source switched on but not ready is named, never skipped in silence
+do
+    local api_mod, cfg_mod = package.loaded["zlibrary.api"], package.loaded["zlibrary.config"]
+    package.loaded["zlibrary.api"], package.loaded["zlibrary.config"] = nil, nil   -- (plugin not loaded: restart needed)
+    local b7 = bb({ annas_download_key = "k", _shelf = {} })
+    b7.annasSearch = function() return { { md5 = "a1", title = "Emma", format = "epub" } }, 200 end
+    local old_attr = lfs.attributes
+    lfs.attributes = function(path) if tostring(path):find("zlibrary.koplugin", 1, true) then return "directory" end end
+    CONT = {}
+    b7:browseReleases({ title = "Emma" })
+    lfs.attributes = old_attr
+    local note = table.concat(CONT.errors or {}, "|")
+    ck(#(CONT.releases or {}) == 1 and note:find("Z%-Library: Z%-Library is installed %-%- restart"), "Z-Library installed, not loaded: results from Anna's, and a 'restart KOReader' note (" .. note .. ")")
+    package.loaded["zlibrary.api"], package.loaded["zlibrary.config"] = api_mod, cfg_mod
+end
 -- the Ledger's one-glance states
 do
     local b5 = bb({ ui = { zlibrary = {} } })
