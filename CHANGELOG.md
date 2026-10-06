@@ -4,7 +4,7 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
-## 2026-10-06 — v0.9.0, build 2913775
+## 2026-10-06 — v0.9.0, build 9c51bcd
 
 Your devices in step, through Readest.
 
