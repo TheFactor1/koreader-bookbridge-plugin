@@ -13,7 +13,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 { awk '/^-- ===== CO begin/{f=1} f{print} f&&/^-- ===== CO end/{exit}' "$M"
   awk 'index($0, "local function annasResultToRelease(") == 1 {f=1} f{print} f&&/^end$/{exit}' "$M"
   awk '/^-- ===== SRC begin/{f=1} f{print} f&&/^-- ===== SRC end/{exit}' "$M"
-  for f in browseReleases browseReleasesContinue sortReleases getBook sourcesInOrder sourcesConfigured sourcesSummary companionState confirmReleaseRequest; do
+  for f in browseReleases browseReleasesContinue sortReleases getBook sourcesInOrder sourcesConfigured sourcesSummary companionState confirmReleaseRequest zlibraryState annasState; do
       awk "/^function Bookbridge:$f\\(/{f=1} f{print} f&&/^end\$/{exit}" "$M"
   done
 } > "$W/fns.lua"
@@ -30,6 +30,7 @@ lfs = { attributes = function() return nil end, mkdir = function() end, dir = fu
 G_reader_settings = { readSetting = function() return nil end, saveSetting = function() end }
 getPluginDir = function() return "/nonexistent/plugins/bookbridge.koplugin" end
 Bookbridge = {}
+STATUS_CHECK_MAX_AGE = 600   -- (a top-level local in main.lua; annasState reads it)
 local LOG = {}
 debugLog = function(m) LOG[#LOG + 1] = m end
 truncate = function(s) return s end
@@ -65,6 +66,7 @@ package.loaded["zlibrary.api"] = {
 }
 package.loaded["zlibrary.config"] = {
     getUserSession = function() return ZL.session or {} end,
+    hasCredentials = function() return ZL.session ~= nil and ZL.session.userId ~= nil end,
     getBaseUrl = function() return "https://z-lib.example" end,
 }
 local function bb(t)
@@ -230,6 +232,28 @@ ck(SHOWN[#SHOWN].kind == "viewer" and SHOWN[#SHOWN].buttons[1].text == "Download
 b:confirmReleaseRequest({ title = "P" }, { source = "prowlarr", title = "x" }, nil)
 ck(SHOWN[#SHOWN].buttons[1].text == "Request", "server release: Request button")
 
+-- the Ledger's one-glance states
+do
+    local b5 = bb({ ui = { zlibrary = {} } })
+    -- (the config module was re-planted above without the credentials check)
+    package.loaded["zlibrary.config"].hasCredentials = function() return ZL.session ~= nil and (ZL.session.userId or ZL.session.user_id) ~= nil end
+    local old_attr = lfs.attributes
+    lfs.attributes = function(path) if tostring(path):find("zlibrary.koplugin", 1, true) then return "directory" end end
+    ZL.session = nil
+    local z = b5:zlibraryState()
+    ck(z.loaded and not z.signed_in and z.label == "Not signed in", "zlibraryState: plugin loaded, no account -> Not signed in")
+    ZL.session = { userId = "1", userKey = "k" }
+    ck(b5:zlibraryState().signed_in and b5:zlibraryState().label == "Signed in", "zlibraryState: with an account -> Signed in")
+    package.loaded["zlibrary.api"], package.loaded["zlibrary.config"] = nil, nil
+    lfs.attributes = old_attr
+    ck(bb({ ui = {} }):zlibraryState().label == "Not installed", "zlibraryState: no plugin -> Not installed")
+    local a = bb({}):annasState()
+    ck(not a.set and a.label == "No key", "annasState: nothing set -> No key")
+    local b6 = bb({ annas_download_key = "k" })
+    ck(b6:annasState().set and b6:annasState().label == "Key set", "annasState: a key, not yet checked -> Key set")
+    b6._status_checks = { at = os.time(), annas = { state = "token" } }
+    ck(b6:annasState().label == "Key refused", "annasState: a refused key says so")
+end
 print(string.format("=== %d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
 LUA

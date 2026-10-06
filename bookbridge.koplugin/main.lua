@@ -9056,6 +9056,83 @@ function Bookbridge:companionItems(id)
     return items
 end
 
+-- (declared here, above everything that reads it: a top-level local is
+-- only in scope below its line)
+-- ===== Status & setup =====
+-- One screen for the whole plugin: every part Bookbridge connects to, what
+-- state it is in, and what tapping it does to fix that. Opening it is instant
+-- and offline -- it only reads settings and local state. The network checks
+-- (logins, token) run only from "Check connections now", once each, so this
+-- screen never re-sends a refused password in the background.
+local STATUS_CHECK_MAX_AGE = 10 * 60
+
+-- The two book sources as one state each, for a home screen (the Reading
+-- Ledger) that wants to show and set them up without opening Bookbridge.
+-- -> { installed, disabled, loaded, signed_in, label }
+function Bookbridge:zlibraryState()
+    local st = self:companionState("zlibrary")
+    local signed_in = false
+    if st.loaded then
+        local Config = CO.module("zlibrary.config")
+        local ok, has = pcall(function() return Config and Config.hasCredentials and Config.hasCredentials() end)
+        signed_in = ok and has == true
+    end
+    local label
+    if not st.installed then label = _("Not installed")
+    elseif st.disabled then label = _("Disabled")
+    elseif not st.loaded then label = _("Restart needed")
+    elseif signed_in then label = _("Signed in")
+    else label = _("Not signed in") end
+    return { installed = st.installed, disabled = st.disabled, loaded = st.loaded, signed_in = signed_in, label = label }
+end
+
+-- One tap does whatever Z-Library needs next: install its plugin, restart,
+-- enable it, or open its own sign-in dialog (the plugin's credentials
+-- broker, so there is never a second dialog of ours). on_done(signed_in)
+-- is called after the dialog, when there was one.
+function Bookbridge:zlibrarySignIn(on_done)
+    local st = self:companionState("zlibrary")
+    if not st.installed then
+        local Trapper = require("ui/trapper")
+        Trapper:wrap(function() self:installCompanion("zlibrary") end)
+        return
+    end
+    if st.disabled then return self:enableCompanion("zlibrary") end
+    if not st.loaded then return self:askCompanionRestart({ { def = CO.DEF.zlibrary, version = st.version or "?", what = "installed" } }) end
+    local inst = self.ui and self.ui.zlibrary
+    if type(inst) == "table" and type(inst._promptForCredentials) == "function" then
+        local ok, err = pcall(function()
+            inst:_promptForCredentials(function(did_save, did_verify)
+                if did_save and not did_verify and type(inst.login) == "function" then
+                    pcall(function() inst:login(function() if on_done then on_done(self:zlibraryState().signed_in) end end, { no_prompt = true }) end)
+                    return
+                end
+                if on_done then on_done(self:zlibraryState().signed_in) end
+            end)
+        end)
+        if ok then return end
+        debugLog("[companion] zlibrary sign-in dialog: " .. tostring(err))
+    end
+    -- (a Z-Library plugin without the broker: its whole menu instead)
+    self:showCompanionMenu("zlibrary")
+end
+
+-- -> { set, state = "ok"|"token"|"mirror"|"challenge"|"down"|nil, label }
+function Bookbridge:annasState()
+    local set = (self.annas_download_key ~= nil and self.annas_download_key ~= "") or (self.annas_url ~= nil and self.annas_url ~= "")
+    local checks = self._status_checks
+    if checks and os.time() - (checks.at or 0) > STATUS_CHECK_MAX_AGE then checks = nil end
+    local state = checks and checks.annas and checks.annas.state or nil
+    local label
+    if not set then label = _("No key")
+    elseif state == "ok" then label = _("Key works")
+    elseif state == "token" then label = _("Key refused")
+    elseif state == "mirror" or state == "down" then label = _("Can't reach")
+    elseif state == "challenge" then label = _("Bot check -- retry")
+    else label = _("Key set") end
+    return { set = set, state = state, label = label }
+end
+
 -- One line per companion for the status screen.
 function Bookbridge:companionStatusRows(add)
     for _unused, id in ipairs({ "zlibrary" }) do   -- (Readest's row is with the sync ones)
@@ -14235,13 +14312,6 @@ function Bookbridge:showMyRequests()
     UIManager:show(requests_menu)
 end
 
--- ===== Status & setup =====
--- One screen for the whole plugin: every part Bookbridge connects to, what
--- state it is in, and what tapping it does to fix that. Opening it is instant
--- and offline -- it only reads settings and local state. The network checks
--- (logins, token) run only from "Check connections now", once each, so this
--- screen never re-sends a refused password in the background.
-local STATUS_CHECK_MAX_AGE = 10 * 60
 
 local function statusCheckedLabel(check, ok_text)
     if not check then return nil end
