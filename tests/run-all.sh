@@ -115,6 +115,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  pairing (no local KOReader)"; skipped="${skipped:+$skipped, }pairing"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Set up another device, two desktop readers end to end (needs a display)"
+out=$(bash tests/pairing-e2e/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  pairing-e2e (no display or local KOReader)"; skipped="${skipped:+$skipped, }pairing-e2e"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Status & setup screen (every part's state and its fix)"
 out=$(bash tests/status-screen/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"

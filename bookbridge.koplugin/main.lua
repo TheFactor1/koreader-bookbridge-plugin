@@ -4982,6 +4982,13 @@ end
 -- a phone or Kindle can be read on the homeserver without adb, screenshots of
 -- the log viewer, or remoting into the device. Plain text; the relay files it
 -- under a timestamped name and never serves it back.
+local CLIPBOARD_RECEIVER_PORT = tonumber(os.getenv("BOOKBRIDGE_CLIPBOARD_PORT")) or 8090
+-- One receiver per KOReader, not per plugin instance: KOReader makes a new
+-- Bookbridge each time the file browser or a book opens, and the port can
+-- only be bound once. `owner` is the newest instance, which answers.
+-- (Kept in package.loaded so two installed copies share it too.)
+local CLIP = package.loaded["bookbridge.clipboard_receiver"] or { server = nil, mq = nil, owner = nil, qr = nil, session = nil, fw = nil }
+
 -- ===== PAIR begin =====
 -- Settings from one reader to another with nothing hosted. The reader
 -- showing the code encrypts its settings with a fresh 32-byte key and
@@ -13612,12 +13619,8 @@ end
 -- segments (which split on "/"). Then long-press any input field on the
 -- device -> Clipboard -> paste.
 -- (BOOKBRIDGE_CLIPBOARD_PORT: another port, for a desktop where 8090 is taken)
-local CLIPBOARD_RECEIVER_PORT = tonumber(os.getenv("BOOKBRIDGE_CLIPBOARD_PORT")) or 8090
--- One receiver per KOReader, not per plugin instance: KOReader makes a new
--- Bookbridge each time the file browser or a book opens, and the port can
--- only be bound once. `owner` is the newest instance, which answers.
--- (Kept in package.loaded so two installed copies share it too.)
-local CLIP = package.loaded["bookbridge.clipboard_receiver"] or { server = nil, mq = nil, owner = nil, qr = nil, session = nil, fw = nil }
+-- (CLIPBOARD_RECEIVER_PORT and CLIP are declared above the PAIR block: the
+-- pairing code, earlier in this file, serves its offer through them)
 package.loaded["bookbridge.clipboard_receiver"] = CLIP
 
 -- The page a phone gets at http://<reader>:8090. Plain HTML, no scripts
