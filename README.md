@@ -11,12 +11,45 @@ to, not the plugin; the name changed in September 2026. Settings and log files
 keep their `shelfmark*` names, and an existing install moves itself into the
 new folder on its first start after updating.*
 
-A KOReader plugin that ties the device to a self-hosted reading stack:
-[Shelfmark](https://github.com/calibrain/shelfmark) for requesting books,
-Calibre-Web-Automated (CWA) for the library, and [Hardcover](https://hardcover.app)
-for tracking what you read. Runs on Kindle, Android and desktop KOReader.
+A KOReader plugin that finds books and keeps your reading in sync, with
+nothing to host: books from **Z-Library** (through its own plugin, which
+Bookbridge installs for you) and **Anna's Archive** (your own key), your
+library and your place in **Readest**'s cloud (its plugin, also installed by
+Bookbridge), progress on **Hardcover**. A self-hosted
+[bookbridge-server](https://github.com/TheFactor1/bookbridge-server)
+(Shelfmark + Calibre-Web) stays optional: it adds requests, library sync and
+connect-by-code. Runs on Kindle, Kobo, Android and desktop KOReader.
 
-## Set it up, step by step
+## Sources
+
+Bookbridge finds and fetches books through the sources below. It doesn't host,
+store or hand out any books itself -- each source is someone else's service,
+reached with your own account, and what you download is up to you and the law
+where you live. Pick one or more under **Bookbridge > Settings > Sources**,
+in the order you want them asked.
+
+| Source | What you need | Where it's set up |
+|---|---|---|
+| **Z-Library** | The [zlibrary.koplugin](https://github.com/ZlibraryKO/zlibrary.koplugin) plugin (Bookbridge installs and updates it: **Bookbridge > Z-Library > Install**) and, for downloads, your own Z-Library account | Sign in under **Bookbridge > Z-Library > Settings > Set credentials**. Searching works without an account |
+| **Anna's Archive** | Your own Anna's Archive member key (fast downloads) | Settings > Connections > Anna's Archive (paste the key, or **Type on your phone**). Today this still goes through the `annas-archive-api` helper of a bookbridge-server; the reader talking to Anna's Archive directly is the next release |
+| **Shelfmark** *(optional, self-hosted)* | A computer that stays on, running [bookbridge-server](https://github.com/TheFactor1/bookbridge-server) (one command) | **Connect a book server** -- see *Set it up with a server* below |
+
+Your library and your place live in **Readest** (its cloud and the books on
+the device): **Bookbridge > Library (Readest)** -- see *Readest* below.
+
+## Set it up without a server
+
+1. Put Bookbridge on the reader (Step 2 of the server guide below: download
+   `bookbridge.koplugin.zip` from the latest release, copy the folder into
+   KOReader's `plugins`, restart KOReader).
+2. **Bookbridge > Z-Library > Install** (it downloads the Z-Library plugin
+   from its GitHub release, checks it, and asks to restart), then **Bookbridge
+   > Library (Readest) > Install** for your library and sync. Both are
+   kept up to date together with Bookbridge.
+3. **Bookbridge > Find a book**: title, author, pick a file, **Download**.
+   The book lands in your home folder and Bookbridge offers to open it.
+
+## Set it up with a server
 
 **What you need**
 
@@ -144,14 +177,12 @@ everything and prints both.
 
 ## What you need to host
 
-Bookbridge is only the part on the reader. Everything it does talks to a
-server you run yourself, or to an account you already have. **You need a
-computer that runs Docker and stays on** -- the plugin can't replace that.
-Only Shelfmark is required; each other piece switches on one feature.
+Nothing, for finding books, your library and your progress (see *Sources*).
+A server of your own adds the pieces below; each one switches on one feature.
 
 | Piece | Needed? | What Bookbridge gains | Where it comes from | What you enter in Bookbridge |
 |---|---|---|---|---|
-| [Shelfmark](https://github.com/calibrain/shelfmark) | **Required** | Search & request books from the reader | Its own Docker image; see its README. Default port 8084 | Settings > Connections > Shelfmark: address, username, password |
+| [Shelfmark](https://github.com/calibrain/shelfmark) | Optional | Search its catalogue and *request* books (someone approves, it fetches them) | Its own Docker image; see its README. Default port 8084 | Settings > Connections > Shelfmark: address, username, password |
 | A Calibre-Web server -- [Calibre-Web-Automated](https://github.com/crocodilestick/Calibre-Web-Automated) or [Calibre-Web-NextGen](https://github.com/new-usemame/Calibre-Web-NextGen) | Optional | Library sync, downloads of delivered books | Its own Docker image. Default port 8083. Give it the **same ingest folder** Shelfmark downloads into, so requested books land in the library | Settings > Connections > Calibre-Web: address, username, password |
 | [annas-archive-api](https://github.com/bitesized/annas-archive-api) | Optional | Anna's Archive as a search and download source | Its own Docker image (by bitesized). Default port 3000 | Settings > Connections > Anna's Archive: address and your Anna's Archive account key |
 | An update source | Optional | Automatic updates of the plugin | Any plain web server that serves this repo's `bookbridge.koplugin/` folder (with its `manifest.json`) -- e.g. nginx pointed at a checkout | Settings > Update source |
@@ -162,10 +193,12 @@ Accounts, not servers:
 - **[Hardcover](https://hardcover.app)** -- reading progress, lists, followed
   authors. Paste an API token from hardcover.app/account/api into Hardcover
   settings.
-- **[Readest](https://readest.com)** -- keeps your place in sync with the
-  Readest app on a phone or tablet. Install the Readest KOReader plugin
-  (from [readest/readest](https://github.com/readest/readest) releases), sign
-  in under Tools > Readest and turn its auto sync on. See *Readest* below.
+- **[Readest](https://readest.com)** -- your library in its cloud, and your
+  place in sync with the Readest app on a phone or tablet. **Bookbridge >
+  Library (Readest) > Install** puts its KOReader plugin in place; sign in
+  there and turn its auto sync on. See *Readest* below.
+- **Z-Library** -- a book source, through its plugin: **Bookbridge >
+  Z-Library > Install**, then sign in there for downloads.
 
 **Easiest:** [bookbridge-server](https://github.com/TheFactor1/bookbridge-server)
 installs all of the servers above with one command, sets their logins up for
@@ -265,8 +298,9 @@ choices** clears every match so books are decided again.
 
 ## Readest (phone & tablet sync)
 
-Bookbridge works alongside the separate Readest KOReader plugin, which does the
-syncing itself; Bookbridge fills three gaps it leaves:
+Bookbridge installs the Readest KOReader plugin for you (**Bookbridge >
+Library (Readest)** holds its whole menu) and that plugin does the syncing
+itself; Bookbridge fills three gaps it leaves:
 
 - **A book you're reading goes into your Readest library.** After a few pages
   in one sitting the reader's own file is uploaded (quietly), so the phone or
@@ -333,10 +367,24 @@ This plugin stands on other people's work:
   OPDS and KOReader-sync endpoints are what Bookbridge is tested against.
 - [annas-archive-api](https://github.com/bitesized/annas-archive-api) by
   bitesized — the search and download service behind the Anna's Archive
-  features.
-- [Readest](https://github.com/readest/readest) by chrox and contributors —
-  its KOReader plugin does the phone/tablet sync; Bookbridge calls its own
-  upload and sync code rather than re-implementing it.
+  features today (run on a bookbridge-server). It carries no license, so
+  nothing from it is copied here; Bookbridge only talks to it.
+- [Readest](https://github.com/readest/readest) by Huang Xin (chrox) and
+  contributors, AGPL-3.0 — the reading app and its cloud library. Its
+  KOReader plugin does the sign-in and the phone/tablet sync. **Used, not
+  copied:** Bookbridge installs that plugin from Readest's own GitHub
+  releases (checksum-verified), shows its menu under its own, and calls its
+  upload and sync code at runtime; none of its code is in this repository.
+  **Written here:** when to upload a book, saving your place on sleep,
+  syncing on wake, and the installer.
+- [zlibrary.koplugin](https://github.com/ZlibraryKO/zlibrary.koplugin) by
+  ZlibraryKO and contributors, AGPL-3.0 — the Z-Library source. **Used, not
+  copied:** Bookbridge installs it from its GitHub releases
+  (checksum-verified), shows its menu under its own, and calls its search,
+  download-link and download functions; it does the Z-Library sign-in,
+  mirrors and bot-check handling itself. **Written here:** only the part
+  that finds the plugin and hands books to and from it. Its README calls it
+  educational; the same goes here.
 - The Tailscale VPN KOReader plugin by Jadehawk — its local SOCKS5 proxy is
   how a Kindle reaches the server over Tailscale.
 
@@ -350,4 +398,6 @@ This plugin stands on other people's work:
 an AI** (Claude, by Anthropic). Matt directed the work, tested every build on
 his own Kindle, Android phone and desktop KOReader, reported what he saw, and
 decided what to build and what to drop. No line here was hand-written by a
-person; treat it accordingly and read before you trust.
+person; treat it accordingly and read before you trust. Code from other
+people's projects stays theirs and is listed under **Credits**, with what is
+used and what was written here.

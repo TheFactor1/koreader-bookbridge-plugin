@@ -112,6 +112,13 @@ function Bookbridge:loadSettings()
     self.annas_url = self.sm_settings.data.shelfmark.annas_url
     self.annas_download_key = self.sm_settings.data.shelfmark.annas_download_key
     self.annas_tld = self.sm_settings.data.shelfmark.annas_tld or "gd"
+    -- Companions (see CO) and sources (see SRC): what's installed, and in
+    -- which order books are looked for.
+    self.companions = self.sm_settings.data.shelfmark.companions or {}
+    self.companions_in_ko_menu = self.sm_settings.data.shelfmark.companions_in_ko_menu == true
+    self.sources_order = self.sm_settings.data.shelfmark.sources_order
+    self.sources_enabled = self.sm_settings.data.shelfmark.sources_enabled or {}
+    self.sources_stop_first = self.sm_settings.data.shelfmark.sources_stop_first == true
     -- shelfmark-ai-relay: suggests a match for files doSyncLibrary could not
     -- resolve on its own. Optional -- everything works exactly as before when
     -- unset, the leftovers just stay reported as "check manually".
@@ -189,6 +196,8 @@ function Bookbridge:init()
     self:registerFileDialogButtons()
     -- Always-on clipboard receiver so a phone can push text into the clipboard.
     self:startClipboardReceiver()
+    -- (the other plugin instances exist a tick from now)
+    UIManager:nextTick(function() self:tuckCompanions() end)
     self:maybeShowFirstRunSetup()
 end
 
@@ -212,6 +221,11 @@ function Bookbridge:saveAllSettings(msg)
         annas_url = self.annas_url,
         annas_download_key = self.annas_download_key,
         annas_tld = self.annas_tld,
+        companions = self.companions,
+        companions_in_ko_menu = self.companions_in_ko_menu,
+        sources_order = self.sources_order,
+        sources_enabled = self.sources_enabled,
+        sources_stop_first = self.sources_stop_first,
         hardcover_token = self.hardcover_token,
         hardcover_language = self.hardcover_language,
         hardcover_progress_sync = self.hardcover_progress_sync,
@@ -626,7 +640,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.5.0"
+local PLUGIN_VERSION = "0.6.0"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -3973,6 +3987,279 @@ end
 -- form-encoded data with a bare numeric pk, not upstream's JSON with a
 -- list-valued pk. /upload hasn't been checked against upstream at all;
 -- this was built directly from CWA's own fork source.
+
+-- ===== CO begin: companion plugins =====
+-- Bookbridge is one download: it installs and keeps up to date the two
+-- plugins it builds on -- the Readest KOReader plugin (your library in
+-- Readest's cloud, and your place in sync) and the Z-Library plugin (a book
+-- source) -- from their own GitHub releases, and shows their features under
+-- its own menu. Their code stays theirs: Bookbridge never copies it, only
+-- calls it, and both are credited in the README.
+--
+-- A release asset is verified against the SHA-256 digest and size GitHub's
+-- API reports for it, unpacked beside the live folder, every Lua file
+-- parse-checked, then swapped in; the previous folder stays as .prev. One
+-- new top-level local (CO) for all of it: LuaJIT allows 200 in this file.
+local CO = {}
+CO.DEF = {
+    zlibrary = {
+        label = "Z-Library", folder = "zlibrary.koplugin", menu_key = "zlibrary_main",
+        repo = "ZlibraryKO/zlibrary.koplugin", credit = "zlibrary.koplugin by ZlibraryKO (AGPL-3.0)",
+        asset = "^zlibrary_plugin_v[%d%.]+%.zip$", ver_pat = "_v([%d%.]+)%.zip$",
+        strip = "plugins/zlibrary.koplugin/", keep = { "zlibrary_credentials.lua" },
+        what = "a book source: search and download from Z-Library",
+    },
+    readest = {
+        label = "Readest", folder = "readest.koplugin", menu_key = "readest_sync",
+        repo = "readest/readest", credit = "the Readest KOReader plugin by Readest (AGPL-3.0)",
+        asset = "^Readest%-[%d%.]+%-%d+%.koplugin%.zip$", ver_pat = "^Readest%-([%d%.]+)%-",
+        strip = "readest.koplugin/", keep = {},
+        what = "your library in Readest's cloud, and your place in sync with the Readest app",
+    },
+}
+CO.ORDER = { "zlibrary", "readest" }
+
+-- The folder KOReader loads plugins from: Bookbridge's own parent, as an
+-- absolute path (a desktop KOReader reports its own plugins folder
+-- relative to where it runs).
+function CO.pluginsDir()
+    local dir = getPluginDir():match("^(.*)/[^/]+$") or "."
+    if dir:sub(1, 1) ~= "/" then
+        local cwd = lfs.currentdir and lfs.currentdir() or nil
+        if cwd then dir = cwd .. "/" .. dir end
+    end
+    return dir
+end
+
+function CO.folder(id)
+    return CO.pluginsDir() .. "/" .. CO.DEF[id].folder
+end
+
+-- The version a plugin folder carries (its _meta.lua), read as text: no
+-- need to run the file.
+function CO.installedVersion(id)
+    local f = io.open(CO.folder(id) .. "/_meta.lua", "r")
+    if not f then return nil end
+    local text = f:read("*a") or ""
+    f:close()
+    return text:match("version%s*=%s*[\"']([^\"']+)[\"']")
+end
+
+-- Instances only exist while KOReader runs with the plugin enabled; their
+-- modules stay in package.loaded, which is how Bookbridge reaches them
+-- (a plugin's folder is on package.path only while it loads).
+function CO.module(name)
+    local m = package.loaded[name]
+    return type(m) == "table" and m or nil
+end
+
+-- The newest release: {tag, version, url, size, digest} or nil, err.
+function CO.latest(id)
+    local def = CO.DEF[id]
+    local body, code, err = doHttpGetString("https://api.github.com/repos/" .. def.repo .. "/releases/latest",
+        nil, "[companion]", 15, 30)
+    if not body then
+        return nil, err or T(_("Couldn't reach GitHub (HTTP %1)."), tostring(code))
+    end
+    local ok, rel = pcall(JSON.decode, body)
+    if not ok or type(rel) ~= "table" or type(rel.assets) ~= "table" then
+        return nil, _("GitHub's answer couldn't be read.")
+    end
+    rel = stripJsonNull(rel)
+    local best
+    for _unused, a in ipairs(rel.assets) do
+        local name = type(a.name) == "string" and a.name or ""
+        if name:match(def.asset) then
+            -- (Readest re-uploads as -2, -3: the highest wins)
+            if not best or name > best.name then best = a end
+        end
+    end
+    if not best then
+        return nil, T(_("%1's latest release has no plugin zip."), def.label)
+    end
+    local version = best.name:match(def.ver_pat)
+    local digest = type(best.digest) == "string" and best.digest:match("^sha256:(%x+)$")
+    if not version or not digest or type(best.size) ~= "number" or type(best.browser_download_url) ~= "string" then
+        return nil, T(_("%1's release listing is missing what's needed to verify it."), def.label)
+    end
+    return { tag = rel.tag_name, version = version, url = best.browser_download_url,
+             size = best.size, digest = digest:lower(), name = best.name }
+end
+
+function CO.mkdirp(path)
+    local built = path:sub(1, 1) == "/" and "" or "."
+    for seg in path:gmatch("[^/]+") do
+        built = built .. "/" .. seg
+        if lfs.attributes(built, "mode") ~= "directory" then lfs.mkdir(built) end
+    end
+    return lfs.attributes(path, "mode") == "directory"
+end
+
+function CO.rmrf(path)
+    local mode = lfs.attributes(path, "mode")
+    if mode == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then CO.rmrf(path .. "/" .. name) end
+        end
+        lfs.rmdir(path)
+    elseif mode then
+        os.remove(path)
+    end
+end
+
+function CO.copyFile(from, to)
+    local f = io.open(from, "rb")
+    if not f then return false end
+    local data = f:read("*a")
+    f:close()
+    local g = io.open(to, "wb")
+    if not g then return false end
+    g:write(data or "")
+    g:close()
+    return true
+end
+
+-- Every .lua under a folder must parse: a half-written download never
+-- replaces a working plugin.
+function CO.parseCheck(dir)
+    for name in lfs.dir(dir) do
+        if name ~= "." and name ~= ".." then
+            local p = dir .. "/" .. name
+            local mode = lfs.attributes(p, "mode")
+            if mode == "directory" then
+                local ok, err = CO.parseCheck(p)
+                if not ok then return nil, err end
+            elseif name:match("%.lua$") then
+                local chunk, err = loadfile(p)
+                if not chunk then return nil, tostring(err) end
+            end
+        end
+    end
+    return true
+end
+
+-- Downloads, verifies, unpacks and swaps one companion in. Runs in a
+-- subprocess (nothing here touches the UI). -> true, info | nil, err
+function CO.install(id, info)
+    local def = CO.DEF[id]
+    local base = CO.pluginsDir()
+    local live, new, prev = CO.folder(id), CO.folder(id) .. ".new", CO.folder(id) .. ".prev"
+    local zip = base .. "/.companion-" .. id .. ".zip"
+    pcall(os.remove, zip)
+    CO.rmrf(new)
+
+    local ok, _code, dl_err = doHttpDownloadToFile(info.url, zip, "[companion]", 30, 900)
+    if not ok then
+        pcall(os.remove, zip)
+        return nil, dl_err or T(_("Couldn't download %1."), def.label)
+    end
+    local size = lfs.attributes(zip, "size")
+    if size ~= info.size then
+        pcall(os.remove, zip)
+        return nil, T(_("%1's download is the wrong size (%2 of %3 bytes) -- not installed."), def.label, tostring(size), tostring(info.size))
+    end
+    local got = sha256OfFile(zip)
+    if not got then
+        pcall(os.remove, zip)
+        return nil, _("This device can't checksum downloads, so companions can't be verified here.")
+    end
+    if got ~= info.digest then
+        pcall(os.remove, zip)
+        debugLog("[companion] digest mismatch for " .. id .. ": got " .. got .. ", want " .. info.digest)
+        return nil, T(_("%1's download didn't match GitHub's checksum -- not installed."), def.label)
+    end
+
+    local ok_arc, Archiver = pcall(require, "ffi/archiver")
+    if not ok_arc or not Archiver or not Archiver.Reader then
+        pcall(os.remove, zip)
+        return nil, _("This KOReader can't unpack zip files (no archiver).")
+    end
+    local reader = Archiver.Reader:new()
+    if not reader:open(zip) then
+        pcall(os.remove, zip)
+        return nil, T(_("%1's zip couldn't be opened: %2"), def.label, tostring(reader.err))
+    end
+    CO.mkdirp(new)
+    local files = 0
+    for entry in reader:iterate() do
+        local path = entry.path or ""
+        if path:sub(1, #def.strip) == def.strip then
+            local rel = path:sub(#def.strip + 1)
+            if rel ~= "" and not rel:match("%.%./") and rel:sub(1, 1) ~= "/" and not rel:match("^%.%.$") then
+                if entry.mode == "directory" or rel:sub(-1) == "/" then
+                    CO.mkdirp(new .. "/" .. rel:gsub("/$", ""))
+                elseif entry.mode == "file" then
+                    local dest = new .. "/" .. rel
+                    CO.mkdirp(dest:match("^(.*)/[^/]+$") or new)
+                    if not reader:extractToPath(path, dest) then
+                        reader:close()
+                        pcall(os.remove, zip)
+                        CO.rmrf(new)
+                        return nil, T(_("Couldn't unpack %1: %2"), rel, tostring(reader.err))
+                    end
+                    files = files + 1
+                end
+            end
+        end
+    end
+    reader:close()
+    pcall(os.remove, zip)
+    if files == 0 or lfs.attributes(new .. "/main.lua", "mode") ~= "file" then
+        CO.rmrf(new)
+        return nil, T(_("%1's zip didn't contain the plugin (expected a %2 folder)."), def.label, def.strip)
+    end
+    local parsed, perr = CO.parseCheck(new)
+    if not parsed then
+        CO.rmrf(new)
+        return nil, T(_("%1's files didn't parse -- not installed: %2"), def.label, perr)
+    end
+    local meta_f = io.open(new .. "/_meta.lua", "r")
+    local meta = meta_f and meta_f:read("*a") or ""
+    if meta_f then meta_f:close() end
+    local meta_version = meta:match("version%s*=%s*[\"']([^\"']+)[\"']")
+    if meta_version and meta_version ~= info.version then
+        debugLog("[companion] " .. id .. ": _meta says " .. meta_version .. ", release says " .. info.version)
+    end
+
+    -- the user's own files survive an update
+    for _unused, name in ipairs(def.keep) do
+        if lfs.attributes(live .. "/" .. name, "mode") == "file" then
+            CO.copyFile(live .. "/" .. name, new .. "/" .. name)
+        end
+    end
+    CO.rmrf(prev)
+    if lfs.attributes(live, "mode") == "directory" then
+        if not os.rename(live, prev) then
+            CO.rmrf(new)
+            return nil, T(_("Couldn't move the old %1 folder aside."), def.label)
+        end
+    end
+    if not os.rename(new, live) then
+        os.rename(prev, live)
+        CO.rmrf(new)
+        return nil, T(_("Couldn't put the new %1 folder in place."), def.label)
+    end
+    debugLog("[companion] installed " .. id .. " " .. info.version .. " (" .. info.name .. ")")
+    return true, { version = meta_version or info.version, tag = info.tag, digest = info.digest, at = os.time() }
+end
+
+-- The previous folder back in place (after a bad update).
+function CO.rollback(id)
+    local live, prev = CO.folder(id), CO.folder(id) .. ".prev"
+    if lfs.attributes(prev, "mode") ~= "directory" then return nil, _("There is no previous version to go back to.") end
+    local gone = live .. ".broken"
+    CO.rmrf(gone)
+    if lfs.attributes(live, "mode") == "directory" and not os.rename(live, gone) then
+        return nil, _("Couldn't move the current folder aside.")
+    end
+    if not os.rename(prev, live) then
+        os.rename(gone, live)
+        return nil, _("Couldn't restore the previous version.")
+    end
+    CO.rmrf(gone)
+    return true
+end
+-- ===== CO end =====
 
 local function doCwaRawFormRequest(cwa_url, cookie, method, path, form_fields, extra_headers, socks5_proxy)
     local headers = {}
@@ -7740,6 +8027,221 @@ end
 -- Shared across plugin instances (FileManager and Reader each get one) so
 -- two instances can't double-check, and persisted so a reboot doesn't reset
 -- the six-hour clock.
+-- ===== companions: Bookbridge methods =====
+-- What a companion is up to on this device.
+function Bookbridge:companionState(id)
+    local def = CO.DEF[id]
+    local dir = CO.folder(id)
+    local installed = lfs.attributes(dir, "mode") == "directory"
+    local disabled = G_reader_settings and G_reader_settings:readSetting("plugins_disabled")
+    disabled = type(disabled) == "table" and disabled[id] == true
+    return {
+        def = def,
+        installed = installed,
+        version = installed and CO.installedVersion(id) or nil,
+        disabled = disabled,
+        loaded = self.ui ~= nil and self.ui[id] ~= nil,
+        record = self.companions and self.companions[id] or nil,
+        has_prev = lfs.attributes(dir .. ".prev", "mode") == "directory",
+    }
+end
+
+-- Installed or updated from its GitHub release, verified. Call inside
+-- Trapper:wrap. opts.auto: quiet, no restart prompt (the caller batches
+-- one); opts.force: reinstall the latest even when up to date.
+-- -> "installed" | "updated" | "current" | nil
+function Bookbridge:installCompanion(id, opts)
+    opts = opts or {}
+    local def = CO.DEF[id]
+    local state = self:companionState(id)
+    local Trapper = require("ui/trapper")
+    local completed, info, err = Trapper:dismissableRunInSubprocess(function()
+        return CO.latest(id)
+    end, not opts.auto and T(_("Looking up %1's latest release..."), def.label) or nil)
+    if not completed then return nil end
+    if not info then
+        if opts.auto then debugLog("[companion] " .. id .. ": " .. tostring(err))
+        else UIManager:show(InfoMessage:new{ text = err or T(_("Couldn't look up %1."), def.label) }) end
+        return nil
+    end
+    if state.installed and state.version and not opts.force and not isNewerVersion(info.version, state.version) then
+        if not opts.auto then
+            UIManager:show(InfoMessage:new{ text = T(_("%1 is up to date (v%2)."), def.label, state.version), timeout = 3 })
+        end
+        return "current"
+    end
+    local mb = string.format("%.1f", info.size / 1048576)
+    local done, ok, ierr = Trapper:dismissableRunInSubprocess(function()
+        return CO.install(id, info)
+    end, not opts.auto and T(_("Installing %1 v%2 (%3 MB)... tap to cancel"), def.label, info.version, mb) or nil)
+    if not done then return nil end
+    if not ok then
+        if opts.auto then debugLog("[companion] " .. id .. ": install failed: " .. tostring(ierr))
+        else UIManager:show(InfoMessage:new{ text = ierr or T(_("Couldn't install %1."), def.label) }) end
+        return nil
+    end
+    self.companions = self.companions or {}
+    self.companions[id] = ierr   -- (the record CO.install returns as its 2nd value)
+    self:saveAllSettings()
+    -- a plugin the user once disabled is wanted again if they install it here
+    if state.disabled and G_reader_settings then
+        local disabled = G_reader_settings:readSetting("plugins_disabled") or {}
+        disabled[id] = nil
+        G_reader_settings:saveSetting("plugins_disabled", disabled)
+    end
+    local what = state.installed and "updated" or "installed"
+    debugLog("[companion] " .. what .. " " .. id .. " v" .. tostring(info.version))
+    if not opts.auto then
+        self:askCompanionRestart({ { def = def, version = info.version, what = what } })
+    end
+    return what
+end
+
+-- Companions ride along with Bookbridge's own automatic updates: same
+-- setting, same cadence, same single restart question. Only ones already
+-- installed here are updated; nothing is installed unasked.
+function Bookbridge:autoUpdateCompanions()
+    local changes = {}
+    for _unused, id in ipairs(CO.ORDER) do
+        local state = self:companionState(id)
+        if state.installed and not state.disabled then
+            local what = self:installCompanion(id, { auto = true })
+            if what == "updated" or what == "installed" then
+                changes[#changes + 1] = { def = state.def, version = self:companionState(id).version or "?", what = what }
+            end
+        end
+    end
+    if #changes > 0 then self:askCompanionRestart(changes) end
+end
+
+function Bookbridge:askCompanionRestart(changes)
+    local ConfirmBox = require("ui/widget/confirmbox")
+    local lines = {}
+    for _unused, c in ipairs(changes) do
+        lines[#lines + 1] = T(c.what == "updated" and _("%1 updated to v%2") or _("%1 v%2 installed"), c.def.label, c.version)
+    end
+    UIManager:show(ConfirmBox:new{
+        text = table.concat(lines, "\n") .. "\n\n" .. _("It takes effect when KOReader restarts.\n\nRestart now?"),
+        ok_text = _("Restart now"),
+        cancel_text = _("Later"),
+        ok_callback = function() UIManager:restartKOReader() end,
+    })
+end
+
+function Bookbridge:enableCompanion(id)
+    if not G_reader_settings then return end
+    local disabled = G_reader_settings:readSetting("plugins_disabled") or {}
+    disabled[id] = nil
+    G_reader_settings:saveSetting("plugins_disabled", disabled)
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = T(_("%1 is enabled again. It loads when KOReader restarts.\n\nRestart now?"), CO.DEF[id].label),
+        ok_text = _("Restart now"), cancel_text = _("Later"),
+        ok_callback = function() UIManager:restartKOReader() end,
+    })
+end
+
+-- The companions' own entries leave KOReader's menu; their menus live under
+-- Bookbridge's instead (companionItems). Called a tick after init, when
+-- the other plugin instances exist (KOReader creates them in path order,
+-- Bookbridge first), and KOReader builds its menu lazily on first open, so
+-- this is in time.
+function Bookbridge:tuckCompanions()
+    if not self.ui then return end
+    for id in pairs(CO.DEF) do
+        local inst = self.ui[id]
+        if type(inst) == "table" and type(inst.addToMainMenu) == "function" and not inst._bb_menu then
+            inst._bb_menu = inst.addToMainMenu
+            local bb = self
+            inst.addToMainMenu = function(c, menu_items)
+                if bb.companions_in_ko_menu then return c._bb_menu(c, menu_items) end
+            end
+        end
+    end
+end
+
+-- A companion's whole menu (its own items, untouched), or what to do when
+-- it isn't here yet. Built when the Bookbridge menu is opened.
+function Bookbridge:companionItems(id)
+    local def = CO.DEF[id]
+    local state = self:companionState(id)
+    local items = {}
+    local function install_item(text)
+        return { text = text, keep_menu_open = true, callback = function()
+            local Trapper = require("ui/trapper")
+            Trapper:wrap(function() self:installCompanion(id) end)
+        end }
+    end
+    if state.loaded then
+        local inst = self.ui[id]
+        local collected = {}
+        local ok, err = pcall(inst._bb_menu or inst.addToMainMenu, inst, collected)
+        local m = ok and collected[def.menu_key]
+        local sub = m and (m.sub_item_table or (m.sub_item_table_func and m.sub_item_table_func()))
+        if type(sub) == "table" then
+            for _unused, it in ipairs(sub) do items[#items + 1] = it end
+        else
+            debugLog("[companion] " .. id .. " menu: " .. tostring(err))
+        end
+        items[#items + 1] = { text = T(_("About: %1"), def.credit), separator = true, keep_menu_open = true,
+            callback = function()
+                UIManager:show(InfoMessage:new{ text = T(_("%1 -- %2.\n\nInstalled v%3. Bookbridge installs and updates it from github.com/%4 and shows it here; the code is theirs."),
+                    def.label, def.what, state.version or "?", def.repo) })
+            end }
+        items[#items + 1] = install_item(_("Check for a newer version"))
+    elseif state.installed and state.disabled then
+        items[#items + 1] = { text = T(_("%1 is installed but disabled"), def.label), enabled = false }
+        items[#items + 1] = { text = _("Enable it"), callback = function() self:enableCompanion(id) end }
+    elseif state.installed then
+        items[#items + 1] = { text = T(_("%1 v%2 is installed -- restart KOReader to use it"), def.label, state.version or "?"),
+            callback = function() UIManager:restartKOReader() end }
+    else
+        items[#items + 1] = { text = T(_("Not installed yet: %1"), def.what), enabled = false }
+        items[#items + 1] = install_item(T(_("Install %1 (%2)"), def.label, def.credit))
+    end
+    return items
+end
+
+-- One line per companion for the status screen.
+function Bookbridge:companionStatusRows(add)
+    for _unused, id in ipairs({ "zlibrary" }) do   -- (Readest's row is with the sync ones)
+        local def = CO.DEF[id]
+        local state = self:companionState(id)
+        local label, action
+        if state.loaded then
+            label = "v" .. tostring(state.version or "?")
+            action = function() self:showCompanionMenu(id) end
+        elseif state.installed and state.disabled then
+            label = _("Disabled"); action = function() self:enableCompanion(id) end
+        elseif state.installed then
+            label = _("Restart needed"); action = function() UIManager:restartKOReader() end
+        else
+            label = _("Not installed")
+            action = function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:installCompanion(id) end)
+            end
+        end
+        add({ text = T(_("%1 -- book source"), def.label), mandatory = label, action = action })
+    end
+end
+
+function Bookbridge:showCompanionMenu(id)
+    local Device = require("device")
+    local CenterContainer = require("ui/widget/container/centercontainer")
+    local TouchMenu = require("ui/widget/touchmenu")
+    local container = CenterContainer:new{ ignore = "height", dimen = Device.screen:getSize() }
+    local menu = TouchMenu:new{
+        width = Device.screen:getWidth(),
+        tab_item_table = { { text = CO.DEF[id].label, icon = "appbar.menu", sub_item_table = self:companionItems(id) } },
+        show_parent = container,
+    }
+    menu.close_callback = function() UIManager:close(container) end
+    container[1] = menu
+    UIManager:show(container)
+end
+-- ===== companions end =====
+
 local auto_update_state = { last = nil, running = false, not_before = nil }
 local AUTO_UPDATE_INTERVAL = 6 * 3600
 local AUTO_UPDATE_RETRY = 10 * 60   -- after a check that couldn't reach the server
@@ -7807,12 +8309,14 @@ function Bookbridge:autoCheckForUpdate(reason)
         self:saveAllSettings()
         if not info.manifest or #info.changed == 0 then
             debugLog("[update] auto (" .. reason .. "): up to date (build " .. tostring(info.build or info.version or "?") .. ")")
+            self:autoUpdateCompanions()
             auto_update_state.running = false
             return
         end
         debugLog("[update] auto (" .. reason .. "): build " .. tostring(info.build or "?")
             .. " available (" .. table.concat(info.changed, ", ") .. ") -- installing")
         self:applyUpdate(info, { auto = true })
+        self:autoUpdateCompanions()
         auto_update_state.running = false
     end)
 end
@@ -8180,7 +8684,19 @@ function Bookbridge:addToMainMenu(menu_items)
                 separator = true,
             },
             {
-                text = _("Search & request a book"),
+                -- the companions' own menus, under this one (see CO)
+                text = _("Z-Library"),
+                sub_item_table_func = function() return self:companionItems("zlibrary") end,
+            },
+            {
+                text = _("Library (Readest)"),
+                sub_item_table_func = function() return self:companionItems("readest") end,
+                separator = true,
+            },
+            {
+                text_func = function()
+                    return (self.server_url and self.server_url ~= "") and _("Search & request a book") or _("Find a book")
+                end,
                 keep_menu_open = true,
                 callback = function() self:startSearch() end,
             },
@@ -8197,6 +8713,7 @@ function Bookbridge:addToMainMenu(menu_items)
             -- it meaningfully more exposure than typed search ever had.
             {
                 text = _("Most popular"),
+                enabled_func = function() return self.server_url ~= nil and self.server_url ~= "" end,
                 keep_menu_open = true,
                 callback = function()
                     local Trapper = require("ui/trapper")
@@ -8207,6 +8724,7 @@ function Bookbridge:addToMainMenu(menu_items)
             },
             {
                 text = _("My requests"),
+                enabled_func = function() return self.server_url ~= nil and self.server_url ~= "" end,
                 keep_menu_open = true,
                 callback = function()
                     local Trapper = require("ui/trapper")
@@ -8215,6 +8733,7 @@ function Bookbridge:addToMainMenu(menu_items)
             },
             {
                 text = _("Sync library with Calibre-Web"),
+                enabled_func = function() return self.cwa_url ~= nil and self.cwa_url ~= "" end,
                 keep_menu_open = true,
                 -- Trapper:wrap, like every other network entry point in this
                 -- menu. This one was missing it, which meant syncLibrary ran
@@ -8363,6 +8882,22 @@ function Bookbridge:addToMainMenu(menu_items)
                 text = _("Settings"),
                 sub_item_table = {
                     {
+                        text = _("Show companions in KOReader's menu too"),
+                        help_text = _("Z-Library and Readest live under Bookbridge. Switch this on to also have their own entries in KOReader's menu."),
+                        checked_func = function() return self.companions_in_ko_menu == true end,
+                        callback = function()
+                            self.companions_in_ko_menu = not self.companions_in_ko_menu
+                            self:saveAllSettings()
+                            -- (KOReader rebuilds its menu next time it opens)
+                            if self.ui and self.ui.menu then self.ui.menu.tab_item_table = nil end
+                        end,
+                    },
+                    {
+                        text = _("Sources (Z-Library, Anna's Archive, Shelfmark)..."),
+                        keep_menu_open = true,
+                        callback = function() self:showSourcesDialog() end,
+                    },
+                    {
                         text = _("Connections"),
                         sub_item_table = {
                             {
@@ -8459,6 +8994,7 @@ function Bookbridge:addToMainMenu(menu_items)
                     },
                     {
                         text = _("Send debug log to server"),
+                        enabled_func = function() return self.pairing_relay_url ~= nil and self.pairing_relay_url ~= "" end,
                         keep_menu_open = true,
                         callback = function()
                             local Trapper = require("ui/trapper")
@@ -8593,13 +9129,14 @@ end
 -- ===== search + request flow =====
 
 function Bookbridge:startSearch()
+    local via_server = self.server_url ~= nil and self.server_url ~= ""
     -- Two fields rather than one free-text box: Hardcover (the configured
     -- metadata provider) exposes a dedicated "author" search field,
     -- separate from its generic title/keyword search -- using it actually
     -- surfaces an author's other books, instead of relying on relevance
     -- ranking of a plain-text query to happen to turn them up.
     self.search_dialog = MultiInputDialog:new{
-        title = _("Search Shelfmark"),
+        title = via_server and _("Search Shelfmark") or _("Find a book"),
         fields = {
             { hint = _("Title or keywords") },
             { hint = _("Author (optional)") },
@@ -8622,7 +9159,11 @@ function Bookbridge:startSearch()
                         if query ~= "" or author ~= "" then
                             local Trapper = require("ui/trapper")
                             Trapper:wrap(function()
-                                self:doSearch({ query = query, author = author, page = 1 })
+                                if via_server then
+                                    self:doSearch({ query = query, author = author, page = 1 })
+                                else
+                                    self:getBook(query, author)
+                                end
                             end)
                         end
                     end,
@@ -9107,86 +9648,210 @@ local function annasResultToRelease(result)
     }
 end
 
--- Entry point: runs the Anna's Archive search, and only when it fails
--- specifically because the mirror looks dead (err_code "MIRROR_DOWN", not a
--- bad key, a bot challenge, or a plain "no results") offers to look for a
--- working one before falling through to Prowlarr -- see mirror-watch.js in
--- annas-archive-api for why this is a manual, on-demand action rather than
--- something checked automatically in the background.
--- caller_menu, when given, is closed here rather than by the caller before
--- invoking this -- see the identical note on doSearch's own caller_menu.
--- Only needed on this, the entry point: annasSearch retries below already
--- run after caller_menu has been closed on the very first call.
-function Bookbridge:browseReleases(book, manual_query, caller_menu)
-    if caller_menu then UIManager:close(caller_menu) end
+-- ===== SRC begin: book sources =====
+-- Where a book's file is looked for, in the order the reader chooses
+-- (Settings > Sources): Z-Library (through its own plugin, a companion --
+-- see CO), Anna's Archive, and a Shelfmark server's release search when
+-- one is connected. Each source answers the same questions, so
+-- browseReleases needs to know nothing about any of them.
+--   configured(self)           is there anything to ask?
+--   search(self, query, book)  -> releases | nil, err | nil, nil, true (cancelled)
+--   fetchUrl(self, release)    -> url | nil, err | nil, nil, true (cancelled)   (sources that download)
+--   download(self, url, path)  -> ok, err   (optional: a source that must fetch its own way)
+--   tempPath(path)             -> the file to watch grow while download runs (optional)
+local SRC = {}
+SRC.ALL = { "zlibrary", "annasarchive", "shelfmark" }
+SRC.DEF = {}
 
-    -- Anna's Archive as the primary source, Prowlarr/Shelfmark's own
-    -- direct_download only as a fallback when Anna's Archive genuinely has
-    -- nothing -- explicit choice per user request ("Prowlarr as the
-    -- backup and annas as main"), not a merge of both on every search.
-    -- annasSearch is fast enough (3-6s typical, see the note above
-    -- doAnnasSearch) that trying it first costs little even on the
-    -- occasions it comes up empty and Prowlarr ends up doing the real
-    -- work anyway.
-    local aa_query = (manual_query and manual_query ~= "") and manual_query or defaultReleaseQuery(book)
-    local aa_results, _aa_code, aa_err, aa_err_code = self:annasSearch(aa_query)
-    if aa_err == _("Cancelled.") then return end
-
-    if aa_err_code == "MIRROR_DOWN" then
-        -- Automatic mirror recovery (no prompt). The annas-archive-api
-        -- service verifies a candidate is really Anna's Archive before
-        -- switching (see isMirrorAlive in mirror-watch.js), so this never
-        -- silently sends the donator key to a squatted parking page. We are
-        -- already inside the caller's Trapper wrap, so annasMirrorRefresh's
-        -- network round-trip doesn't need its own. A depth guard stops an
-        -- endless switch/retry loop if a "working" mirror keeps failing.
-        local attempt = (self._aa_mirror_attempt or 0) + 1
-        self._aa_mirror_attempt = attempt
-        if attempt <= 3 then
-            local result = self:annasMirrorRefresh()
-            if result and result.switched then
-                UIManager:show(InfoMessage:new{
-                    text = T(_("Anna's Archive mirror was down — switched to annas-archive.%1, searching again..."), result.activeTld),
-                    timeout = 2,
-                })
-                self:browseReleases(book, manual_query)
-                return
-            elseif result and not result.allDead then
-                -- The current mirror tested fine now: the failure was a blip.
-                -- Retry the same search rather than bothering the user.
-                self:browseReleases(book, manual_query)
-                return
-            end
-        end
-        -- Every known mirror is unreachable, or we have retried enough:
-        -- fall through to the other sources rather than dead-ending.
-        self._aa_mirror_attempt = nil
-        UIManager:show(InfoMessage:new{
-            text = _("Anna's Archive is unreachable right now — searching other sources."),
-            timeout = 3,
-        })
-        self:browseReleasesContinue(book, manual_query, nil)
-        return
+function SRC.releaseTitle(author, title)
+    title = title or "?"
+    if type(author) == "string" and author ~= "" and author ~= "Unknown Author" then
+        return author .. " - " .. title
     end
-
-    self._aa_mirror_attempt = nil
-    self:browseReleasesContinue(book, manual_query, aa_results)
+    return title
 end
 
-function Bookbridge:browseReleasesContinue(book, manual_query, aa_results)
-    local releases
-    if aa_results and #aa_results > 0 then
-        releases = {}
-        for _, r in ipairs(aa_results) do
-            table.insert(releases, annasResultToRelease(r))
+-- Z-Library, through zlibrary.koplugin (ZlibraryKO, AGPL-3.0): its own code
+-- does the talking -- mirrors, bot checks, logins are its business. Reached
+-- through package.loaded, which is where a loaded plugin's modules live;
+-- every call is guarded, so a changed plugin means "unavailable", never a
+-- crash. Searching needs no account; downloading does (signed in under
+-- Bookbridge > Z-Library).
+SRC.DEF.zlibrary = {
+    label = "Z-Library",
+    credit = "zlibrary.koplugin by ZlibraryKO (AGPL-3.0)",
+    configured = function(self)
+        return CO.module("zlibrary.api") ~= nil and CO.module("zlibrary.config") ~= nil
+    end,
+    missing = function(self)
+        local state = self:companionState("zlibrary")
+        if state.installed and state.disabled then return _("Z-Library is installed but disabled (Bookbridge > Z-Library > Enable).") end
+        if state.installed then return _("Z-Library is installed -- restart KOReader to use it.") end
+        return _("Install the Z-Library plugin first (Bookbridge > Z-Library > Install).")
+    end,
+    session = function()
+        local Config = CO.module("zlibrary.config")
+        local ok, s = pcall(function() return Config.getUserSession() end)
+        if ok and type(s) == "table" and s.user_id and s.user_id ~= "" and s.user_key and s.user_key ~= "" then
+            return s.user_id, s.user_key
         end
-    end
+        return nil
+    end,
+    search = function(self, query)
+        local Api = CO.module("zlibrary.api")
+        local src = SRC.DEF.zlibrary
+        local uid, key = src.session()
+        local Trapper = require("ui/trapper")
+        local completed, res = Trapper:dismissableRunInSubprocess(function()
+            local ok, r = pcall(Api.search, query, uid, key, nil, nil, nil, 1)
+            if not ok then return { error = "plugin: " .. tostring(r) } end
+            if type(r) ~= "table" then return { error = "plugin: no answer" } end
+            -- only plain values cross back from the subprocess
+            local out = { error = r.error and tostring(r.error) or nil, results = {} }
+            for _unused, b in ipairs(type(r.results) == "table" and r.results or {}) do
+                out.results[#out.results + 1] = {
+                    id = tostring(b.id or ""), hash = tostring(b.hash or ""),
+                    title = type(b.title) == "string" and b.title or nil,
+                    author = type(b.author) == "string" and b.author or nil,
+                    format = type(b.format) == "string" and b.format or nil,
+                    size = type(b.size) == "string" and b.size or (type(b.size) == "number" and tostring(b.size)) or nil,
+                    year = (type(b.year) == "string" or type(b.year) == "number") and tostring(b.year) or nil,
+                    lang = type(b.lang) == "string" and b.lang or nil,
+                    cover = type(b.cover) == "string" and b.cover or nil,
+                    href = type(b.href) == "string" and b.href or nil,
+                }
+            end
+            return out
+        end, T(_("Searching Z-Library for %1..."), query))
+        if not completed then return nil, nil, true end
+        if type(res) ~= "table" then return nil, _("Z-Library unavailable -- its plugin may have changed; update both.") end
+        res.results = type(res.results) == "table" and res.results or {}
+        if res.error and #res.results == 0 then
+            if res.error:match("^plugin:") then
+                debugLog("[zlibrary] " .. res.error)
+                return nil, _("Z-Library unavailable -- its plugin may have changed; update both.")
+            end
+            return nil, res.error
+        end
+        local releases = {}
+        for _unused, b in ipairs(res.results) do
+            if b.id ~= "" and b.hash ~= "" then
+                local fmt = b.format and b.format:lower()
+                if fmt == "n/a" then fmt = nil end
+                releases[#releases + 1] = {
+                    title = SRC.releaseTitle(b.author, b.title),
+                    format = fmt,
+                    indexer = "Z-Library",
+                    source = "zlibrary",
+                    zl_id = b.id, zl_hash = b.hash,
+                    annas_author = (b.author and b.author ~= "Unknown Author") and b.author or nil,
+                    size = (b.size and b.size ~= "N/A") and b.size or nil,
+                    year = (b.year and b.year ~= "N/A") and b.year or nil,
+                    language = (b.lang and b.lang ~= "N/A") and b.lang or nil,
+                    cover_url = b.cover,
+                    extra = {},
+                }
+            end
+        end
+        return releases
+    end,
+    fetchUrl = function(self, release)
+        local Api = CO.module("zlibrary.api")
+        local src = SRC.DEF.zlibrary
+        local uid, key = src.session()
+        if not uid then
+            return nil, _("Downloading from Z-Library needs your account: sign in under Bookbridge > Z-Library > Settings > Set credentials.")
+        end
+        local Trapper = require("ui/trapper")
+        local completed, res = Trapper:dismissableRunInSubprocess(function()
+            local ok, r = pcall(Api.getDownloadLink, uid, key, release.zl_id, release.zl_hash)
+            if not ok then return { error = "plugin: " .. tostring(r) } end
+            if type(r) ~= "table" then return { error = "plugin: no answer" } end
+            return { error = r.error and tostring(r.error) or nil, url = type(r.download_link) == "string" and r.download_link or nil }
+        end, _("Asking Z-Library for the file..."))
+        if not completed then return nil, nil, true end
+        if type(res) ~= "table" or (res.error and res.error:match("^plugin:")) then
+            debugLog("[zlibrary] " .. tostring(res and res.error))
+            return nil, _("Z-Library unavailable -- its plugin may have changed; update both.")
+        end
+        if not res.url then return nil, res.error or _("Z-Library gave no download link.") end
+        return res.url
+    end,
+    -- its own downloader: it sends the session cookie and a referer the
+    -- mirror expects, writes to its own temp file and renames when done
+    tempPath = function(save_path)
+        local Api = CO.module("zlibrary.api")
+        local ok, p = pcall(function() return Api.getDownloadTempPath(save_path) end)
+        return (ok and type(p) == "string") and p or (save_path .. ".downloading")
+    end,
+    download = function(self, url, save_path)
+        local Api = CO.module("zlibrary.api")
+        local Config = CO.module("zlibrary.config")
+        local src = SRC.DEF.zlibrary
+        local uid, key = src.session()
+        local ok_base, base = pcall(function() return Config.getBaseUrl() end)
+        local ok, r = pcall(Api.downloadBook, url, save_path, uid, key, ok_base and base or nil, nil)
+        if not ok then return nil, "plugin: " .. tostring(r) end
+        if type(r) ~= "table" then return nil, "plugin: no answer" end
+        if r.success then return true end
+        return nil, r.error and tostring(r.error) or _("Download failed.")
+    end,
+}
 
-    if not releases then
-        -- No standalone "Searching..." toast here -- the apiRequest call
-        -- below already shows its own Trapper progress dialog with a more
-        -- specific message for this exact wait; a toast first would just be
-        -- a second, redundant refresh announcing the same thing.
+-- Anna's Archive (today through the annas-archive-api helper; a member key
+-- alone comes next). Dead-mirror recovery lives here: see mirror-watch.js
+-- in annas-archive-api for why it's on demand, not in the background.
+SRC.DEF.annasarchive = {
+    label = "Anna's Archive",
+    credit = "Anna's Archive, with your own member key",
+    configured = function(self)
+        return self.annas_url ~= nil and self.annas_url ~= ""
+    end,
+    missing = function(self) return _("Anna's Archive isn't set up (Settings > Connections > Anna's Archive).") end,
+    search = function(self, query)
+        local attempt = 0
+        while true do
+            local results, _code, err, err_code = self:annasSearch(query)
+            if err == _("Cancelled.") then return nil, nil, true end
+            if err_code == "MIRROR_DOWN" and attempt < 3 then
+                attempt = attempt + 1
+                local r = self:annasMirrorRefresh()
+                if r and r.switched then
+                    UIManager:show(InfoMessage:new{
+                        text = T(_("Anna's Archive mirror was down -- switched to annas-archive.%1, searching again..."), r.activeTld),
+                        timeout = 2,
+                    })
+                elseif not (r and not r.allDead) then
+                    return nil, _("Anna's Archive is unreachable right now.")
+                end
+            elseif results then
+                local releases = {}
+                for _unused, r in ipairs(results) do releases[#releases + 1] = annasResultToRelease(r) end
+                return releases
+            else
+                return nil, err or _("Anna's Archive search failed.")
+            end
+        end
+    end,
+    fetchUrl = function(self, release)
+        local url, _code, err = self:annasFetchDownloadUrl(release.md5)
+        if err == _("Cancelled.") then return nil, nil, true end
+        if not url then return nil, err or _("No download URL returned.") end
+        return url
+    end,
+    isbn = true,   -- (an ISBN hint is fetched after the download)
+}
+
+-- A connected Shelfmark server's own release search (Prowlarr and the
+-- rest). What it finds is requested, not downloaded here.
+SRC.DEF.shelfmark = {
+    label = "Shelfmark",
+    credit = "your Shelfmark server",
+    configured = function(self)
+        return self.server_url ~= nil and self.server_url ~= ""
+    end,
+    missing = function(self) return _("No Shelfmark server is connected.") end,
+    search = function(self, query, book, manual_query)
         local qs = {
             "provider=" .. socketurl.escape(book.provider or ""),
             "book_id=" .. socketurl.escape(book.provider_id or ""),
@@ -9198,41 +9863,167 @@ function Bookbridge:browseReleasesContinue(book, manual_query, aa_results)
         if manual_query and manual_query ~= "" then
             table.insert(qs, "manual_query=" .. socketurl.escape(manual_query))
         end
-
-        -- Longer timeout than apiRequest's 15/45 default -- confirmed live,
-        -- this endpoint alone can legitimately run past 45s: Shelfmark's
-        -- own docs say a release search needing a fresh Anna's Archive
-        -- bot-challenge solve can take 60-120s on a cold cache (its own
-        -- server-side search budget is 300s for exactly that reason). This
-        -- is exactly the case this whole function now tries to avoid by
-        -- trying annasSearch first -- but if that came back empty (rather
-        -- than erroring), Shelfmark's own direct_download might still
-        -- have something annasSearch's specific query/mirror didn't, so
-        -- it's still worth the wait here rather than giving up. The
-        -- Trapper progress dialog is dismissable, so a longer timeout
-        -- doesn't trap anyone -- they can still cancel any time they
-        -- don't want to wait.
+        -- Longer than apiRequest's default: a release search that needs a
+        -- fresh bot-challenge solve on the server can take a couple of
+        -- minutes (Shelfmark's own budget is 300 s). The dialog is
+        -- dismissable, so nobody is trapped.
         local resp, code, err = self:apiRequest("GET", "/api/releases?" .. table.concat(qs, "&"),
-            _("Searching release sources (Prowlarr, Anna's Archive, etc. -- can take a couple of minutes)..."),
-            30, 150)
-        if err then
-            self:showServiceError(err)
-            return
-        end
+            _("Asking Shelfmark's release sources (can take a couple of minutes)..."), 30, 150)
+        if err == _("Cancelled.") then return nil, nil, true end
+        if err then return nil, err end
         if code ~= 200 or not resp or not resp.releases then
-            local msg = (resp and (resp.message or resp.error)) or _("Release search failed.")
-            UIManager:show(InfoMessage:new{ text = msg })
-            return
+            return nil, (resp and (resp.message or resp.error)) or _("Release search failed.")
         end
-        if #resp.releases == 0 then
+        return resp.releases
+    end,
+}
+
+-- Enabled sources, in the chosen order (unknown ids dropped, new ones
+-- appended, so an old setting keeps working after a source is added).
+function SRC.order(self)
+    local seen, out = {}, {}
+    for _unused, id in ipairs(type(self.sources_order) == "table" and self.sources_order or {}) do
+        if SRC.DEF[id] and not seen[id] then seen[id] = true; out[#out + 1] = id end
+    end
+    for _unused, id in ipairs(SRC.ALL) do
+        if not seen[id] then seen[id] = true; out[#out + 1] = id end
+    end
+    return out
+end
+
+function SRC.enabled(self, id)
+    if type(self.sources_enabled) ~= "table" then return true end
+    return self.sources_enabled[id] ~= false
+end
+-- ===== SRC end =====
+
+-- Straight to the sources with a title and author (no Shelfmark in
+-- between): what "Find a book" does without a server, and what the Reading
+-- Ledger's "Get it" calls. Inside Trapper:wrap.
+function Bookbridge:getBook(title, author)
+    local book = { title = title ~= "" and title or nil, authors = (author and author ~= "") and { author } or nil }
+    self:browseReleases(book, nil)
+end
+
+function Bookbridge:sourcesInOrder()
+    local out = {}
+    for _unused, id in ipairs(SRC.order(self)) do
+        if SRC.enabled(self, id) then out[#out + 1] = id end
+    end
+    return out
+end
+
+-- Is any enabled source ready to answer? (The Ledger asks.)
+function Bookbridge:sourcesConfigured()
+    for _unused, id in ipairs(self:sourcesInOrder()) do
+        if SRC.DEF[id].configured(self) then return true end
+    end
+    return false
+end
+
+function Bookbridge:sourcesSummary()
+    local names = {}
+    for _unused, id in ipairs(self:sourcesInOrder()) do
+        if SRC.DEF[id].configured(self) then names[#names + 1] = SRC.DEF[id].label end
+    end
+    return #names > 0 and table.concat(names, " · ") or _("None set up")
+end
+
+-- Settings > Sources: on/off and order per source, and whether to stop at
+-- the first one that has results.
+function Bookbridge:showSourcesDialog()
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local dlg
+    local order = SRC.order(self)
+    local buttons = {}
+    local function reopen() UIManager:close(dlg); self:saveAllSettings(); self:showSourcesDialog() end
+    for i, id in ipairs(order) do
+        local src = SRC.DEF[id]
+        local on = SRC.enabled(self, id)
+        local ready = src.configured(self)
+        buttons[#buttons + 1] = {
+            { text = (on and "\u{2611} " or "\u{2610} ") .. src.label .. (ready and "" or ("  (" .. _("not set up") .. ")")),
+              align = "left",
+              callback = function()
+                  self.sources_enabled = type(self.sources_enabled) == "table" and self.sources_enabled or {}
+                  self.sources_enabled[id] = not on
+                  reopen()
+              end },
+            { text = "\u{25B2}", enabled = i > 1, callback = function()
+                  order[i], order[i - 1] = order[i - 1], order[i]
+                  self.sources_order = order
+                  reopen()
+              end },
+            { text = "\u{25BC}", enabled = i < #order, callback = function()
+                  order[i], order[i + 1] = order[i + 1], order[i]
+                  self.sources_order = order
+                  reopen()
+              end },
+        }
+    end
+    buttons[#buttons + 1] = { { text = (self.sources_stop_first and "\u{2611} " or "\u{2610} ") .. _("Stop at the first source that has results"),
+        align = "left",
+        callback = function() self.sources_stop_first = not self.sources_stop_first; reopen() end } }
+    buttons[#buttons + 1] = { { text = _("Close"), callback = function() UIManager:close(dlg) end } }
+    dlg = ButtonDialog:new{
+        title = _("Sources, in the order they're asked") .. "\n" .. _("Z-Library: zlibrary.koplugin by ZlibraryKO. Anna's Archive: your own key. Shelfmark: your server, if any."),
+        buttons = buttons,
+    }
+    UIManager:show(dlg)
+end
+
+
+-- Entry point for finding a book's file: every enabled source in the
+-- reader's order (Settings > Sources), results merged and sorted below.
+-- caller_menu, when given, is closed here rather than by the caller --
+-- see the identical note on doSearch's own caller_menu.
+function Bookbridge:browseReleases(book, manual_query, caller_menu)
+    if caller_menu then UIManager:close(caller_menu) end
+    local query = (manual_query and manual_query ~= "") and manual_query or defaultReleaseQuery(book)
+    local releases, tried, errors = {}, {}, {}
+    for _unused, id in ipairs(self:sourcesInOrder()) do
+        local src = SRC.DEF[id]
+        if src.configured(self) then
+            tried[#tried + 1] = src.label
+            local got, err, cancelled = src.search(self, query, book, manual_query)
+            if cancelled then return end
+            if type(got) == "table" then
+                for _u2, r in ipairs(got) do releases[#releases + 1] = r end
+            elseif err then
+                errors[#errors + 1] = src.label .. ": " .. tostring(err)
+            end
+            if #releases > 0 and self.sources_stop_first then break end
+        end
+    end
+    if #tried == 0 then
+        self:showResilientConfirmBox{
+            text = _("No book source is set up yet.\n\nInstall the Z-Library plugin, add an Anna's Archive key, or connect a Shelfmark server -- Settings > Sources shows what's on."),
+            ok_text = _("Sources"),
+            ok_callback = function() self:showSourcesDialog() end,
+        }
+        return
+    end
+    self:browseReleasesContinue(book, manual_query, releases, errors, tried)
+end
+
+function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors, tried)
+    releases = releases or {}
+    if #releases == 0 then
+        local where = table.concat(tried or {}, ", ")
+        local detail = (errors and #errors > 0) and ("\n\n" .. table.concat(errors, "\n")) or ""
+        if SRC.DEF.shelfmark.configured(self) and SRC.enabled(self, "shelfmark") then
+            -- the server can keep looking: a plain request
             UIManager:show(InfoMessage:new{
-                text = _("No releases found for this book. You can still submit a plain request and let Shelfmark keep looking."),
-                timeout = 3,
+                text = T(_("Nothing found on %1. You can still submit a plain request and let Shelfmark keep looking."), where) .. detail,
+                timeout = 4,
             })
             self:confirmBookLevelRequest(book)
             return
         end
-        releases = resp.releases
+        UIManager:show(InfoMessage:new{
+            text = T(_("Nothing found on %1 for \"%2\"."), where, truncate(defaultReleaseQuery(book), 80) or "?") .. detail,
+        })
+        return
     end
 
     -- Relevance first, then EPUB, then the server's own ordering (a plain
@@ -9886,8 +10677,8 @@ function Bookbridge:promptCustomReleaseQuery(book, prefill, caller_menu)
 
     local dialog
     dialog = InputDialog:new{
-        title = _("Custom Prowlarr/indexer query"),
-        description = _("Sent to indexers as-is, in place of Shelfmark's default title-only search. Edit freely -- e.g. drop the author if this comes back empty, or add a format like \"epub\"."),
+        title = _("Custom search query"),
+        description = _("Sent to every source as-is. Edit freely -- e.g. drop the author if this comes back empty, or add a format like \"epub\"."),
         input = default_query,
         buttons = {
             {
@@ -10077,27 +10868,28 @@ end
 -- means "Sync library with CWA" picks it up naturally on its next run,
 -- same as any other externally-acquired book (Z-Library, the standalone
 -- plugin, etc).
-function Bookbridge:downloadFromAnnasArchive(release)
-    local dl_url, _code, err = self:annasFetchDownloadUrl(release.md5)
-    if err then
-        self:showServiceError(err)
+-- A release's file onto the reader, from whichever source it came from
+-- (src = SRC.DEF[release.source]). Sources that must fetch their own way
+-- (Z-Library sends its session) provide download/tempPath; the rest go
+-- through a plain HTTPS download into a sibling temp file, renamed only on
+-- full success, with the file's growth polled for the progress bar (the
+-- download runs in a fork, which can't reach this process's widgets).
+function Bookbridge:downloadReleaseFile(release, src)
+    src = src or SRC.DEF[release.source]
+    if not src or not src.fetchUrl then
+        UIManager:show(InfoMessage:new{ text = _("This release can only be requested, not downloaded here.") })
         return
     end
+    local dl_url, err, cancelled = src.fetchUrl(self, release)
+    if cancelled then return end
     if not dl_url then
-        UIManager:show(InfoMessage:new{ text = _("No download URL returned.") })
+        UIManager:show(InfoMessage:new{ text = err or _("No download URL returned.") })
         return
     end
 
     local dir = (self.download_dir and self.download_dir ~= "") and self.download_dir or self:defaultDownloadDir()
     if lfs.attributes(dir, "mode") ~= "directory" then
-        -- One level at a time -- lfs.mkdir isn't recursive.
-        local built = ""
-        for segment in dir:gmatch("[^/]+") do
-            built = built .. "/" .. segment
-            if lfs.attributes(built, "mode") ~= "directory" then
-                lfs.mkdir(built)
-            end
-        end
+        CO.mkdirp(dir)
         if lfs.attributes(dir, "mode") ~= "directory" then
             UIManager:show(InfoMessage:new{ text = T(_("Couldn't create download folder: %1"), dir) })
             return
@@ -10105,50 +10897,22 @@ function Bookbridge:downloadFromAnnasArchive(release)
     end
 
     local ext = (type(release.format) == "string" and release.format ~= "") and release.format:lower() or "epub"
-    -- truncate(), not a raw :sub() -- byte-position slicing can cut a
-    -- multi-byte UTF-8 character in half (see truncate's own note at its
-    -- definition); release.title here is "Author - Title" from Anna's
-    -- Archive, which genuinely has multi-byte names/titles (confirmed live
-    -- elsewhere this session, e.g. "Joandomènec Ros i Aragonès").
-    -- Filesystem-unsafe characters stripped first so the cut lands on the
-    -- already-sanitized string.
+    -- truncate(), not a raw :sub(): "Author - Title" has multi-byte names
     local safe_title = truncate((release.title or "book"):gsub('[/\\:%*%?"<>|]', "_"), 120)
     local save_path = dir .. "/" .. safe_title .. "." .. ext
-
-    -- Downloads into a sibling temp file, renamed onto save_path only on
-    -- full success -- same reasoning as zlibrary.koplugin's own
-    -- Api.downloadBook (see the credit at the top of this file): opening
-    -- save_path directly would truncate any earlier copy before the first
-    -- byte of a retry ever arrives. This temp file is also what the
-    -- progress poll below watches grow -- a prior killed download never
-    -- got to clean up after itself, hence the pcall(os.remove...) first.
-    local temp_path = save_path .. ".downloading"
+    local temp_path = src.tempPath and src.tempPath(save_path) or (save_path .. ".downloading")
     pcall(os.remove, temp_path)
 
-    -- Best-effort real progress bar -- see doHttpHeadContentLength's own
-    -- note on why this needs a separate HEAD request at all. content_length
-    -- staying nil (HEAD unsupported/no Content-Length from this mirror)
-    -- just means ProgressbarDialog hides the bar itself and shows the
-    -- title/subtitle alone -- no separate fallback path needed.
-    local content_length = doHttpHeadContentLength(dl_url)
-
+    -- a real progress bar when the mirror says how big the file is
+    local content_length = (not src.download) and doHttpHeadContentLength(dl_url) or nil
     local ProgressbarDialog = require("ui/widget/progressbardialog")
     local progress_dialog = ProgressbarDialog:new{
-        title = _("Downloading… (tap to cancel)"),
+        title = _("Downloading... (tap to cancel)"),
         subtitle = safe_title,
         progress_max = content_length,
         refresh_time_seconds = 1,
     }
     progress_dialog:show()
-
-    -- Polls the temp file's size from this (parent) process rather than
-    -- getting a byte count out of the download itself: the download runs
-    -- in a forked child below so the UI stays responsive and cancelable,
-    -- and a fork can't reach back into this process's own widgets --
-    -- confirmed by reading ui/trapper.lua's own docs on
-    -- dismissableRunInSubprocess. Watching the file grow from out here
-    -- sidesteps that entirely (same trick zlibrary.koplugin's own
-    -- downloader uses).
     local stopped = false
     local function poll()
         if stopped then return end
@@ -10160,15 +10924,11 @@ function Bookbridge:downloadFromAnnasArchive(release)
     end
     UIManager:scheduleIn(1, poll)
 
-    -- false, not a text string: an invisible, screen-covering trap widget
-    -- that swallows the cancelling tap, same as zlibrary.koplugin's own
-    -- downloader -- progress_dialog above is purely the visual, this is
-    -- what actually makes tap-to-cancel work.
     local Trapper = require("ui/trapper")
-    local completed, ok, _dl_code, dl_err = Trapper:dismissableRunInSubprocess(function()
+    local completed, ok, dl_code, dl_err = Trapper:dismissableRunInSubprocess(function()
+        if src.download then return src.download(self, dl_url, save_path) end
         return doAnnasFileDownload(dl_url, temp_path)
     end, false)
-
     stopped = true
     UIManager:unschedule(poll)
     progress_dialog:close()
@@ -10179,40 +10939,44 @@ function Bookbridge:downloadFromAnnasArchive(release)
     end
     if not ok then
         pcall(os.remove, temp_path)
-        UIManager:show(InfoMessage:new{ text = dl_err or _("Download failed.") })
+        local msg = src.download and dl_code or dl_err   -- (download() returns ok, err)
+        if type(msg) == "string" and msg:match("^plugin:") then
+            debugLog("[source] " .. msg)
+            msg = T(_("%1 unavailable -- its plugin may have changed; update both."), src.label)
+        end
+        UIManager:show(InfoMessage:new{ text = msg or _("Download failed.") })
         return
     end
-
-    if not os.rename(temp_path, save_path) then
-        pcall(os.remove, temp_path)
-        UIManager:show(InfoMessage:new{ text = _("Download succeeded but couldn't be saved.") })
-        return
+    if lfs.attributes(save_path, "mode") ~= "file" then
+        -- (a source's own downloader renames for itself; ours does it here)
+        if not os.rename(temp_path, save_path) then
+            pcall(os.remove, temp_path)
+            UIManager:show(InfoMessage:new{ text = _("Download succeeded but couldn't be saved.") })
+            return
+        end
     end
-
-    -- In case this overwrote an existing copy of the same book -- see
-    -- invalidateBookInfoCache.
     invalidateBookInfoCache(save_path)
+    local FileManager = require("apps/filemanager/filemanager")
+    if FileManager.instance then FileManager.instance:onRefresh() end
+    UIManager:show(require("ui/widget/confirmbox"):new{
+        text = T(_("%1 is on your reader, in %2.\n\nOpen it now?"), release.title or _("The book"),
+            save_path:match("([^/]+)/[^/]+$") or dir),
+        ok_text = _("Open"),
+        cancel_text = _("Later"),
+        ok_callback = function()
+            require("apps/reader/readerui"):showReader(save_path)
+        end,
+    })
 
-    UIManager:show(InfoMessage:new{ text = T(_("Saved to %1"), save_path), timeout = 4 })
-
-    -- Best-effort ISBN capture, scheduled after the fact rather than done
-    -- inline above: this is purely a bonus for later Hardcover matching,
-    -- never something worth delaying "Saved to ..." for. Anna's Archive's
-    -- own metadata is often the cleanest ISBN this book will ever carry --
-    -- DeDRM/format conversion routinely strips or mangles whatever the
-    -- file itself had -- so capturing it now, keyed by save_path since
-    -- KOReader has no partial_md5_checksum for a file it's never opened,
-    -- means the very first match attempt (captureReadingProgress /
-    -- deriveFileDialogMetadata, both fall back to this when the file's own
-    -- identifiers come up empty) already has a real identifier to work
-    -- with instead of a fuzzy title/author guess.
-    if self.annas_url and self.annas_url ~= "" and release.md5 then
+    -- Best-effort ISBN capture for later Hardcover matching (Anna's
+    -- Archive's record is often the cleanest ISBN the book will carry).
+    if src.isbn and self.annas_url and self.annas_url ~= "" and release.md5 then
         local annas_url, download_key, tld, socks5_proxy =
             self.annas_url, self.annas_download_key, self.annas_tld, self.socks5_proxy
         local md5, path = release.md5, save_path
         UIManager:scheduleIn(0.1, function()
-            local Trapper = require("ui/trapper")
-            Trapper:wrap(function()
+            local Trapper2 = require("ui/trapper")
+            Trapper2:wrap(function()
                 local isbn13 = doAnnasFetchIsbn(annas_url, download_key, tld, md5, socks5_proxy)
                 if isbn13 then
                     addDownloadIsbnHint(path, isbn13)
@@ -10223,6 +10987,11 @@ function Bookbridge:downloadFromAnnasArchive(release)
     end
 end
 
+-- (kept for callers that know only Anna's Archive)
+function Bookbridge:downloadFromAnnasArchive(release)
+    return self:downloadReleaseFile(release, SRC.DEF.annasarchive)
+end
+
 -- caller_menu, when given, is the releases_menu this was opened from. It is
 -- deliberately left OPEN underneath this dialog so "Back to list" can simply
 -- close the dialog and reveal it again -- with its scroll position, page and
@@ -10230,7 +10999,8 @@ end
 -- builder. It is closed only on the paths that actually commit (download or
 -- request), which is what preserves the previous end state.
 function Bookbridge:confirmReleaseRequest(book, release, caller_menu)
-    local is_annas = release.source == "annasarchive"
+    local src = SRC.DEF[release.source]
+    local can_download = src ~= nil and src.fetchUrl ~= nil
     local buttons = {}
     if caller_menu then
         buttons[#buttons + 1] = {
@@ -10239,14 +11009,12 @@ function Bookbridge:confirmReleaseRequest(book, release, caller_menu)
         }
     end
     buttons[#buttons + 1] = {
-        text = is_annas and _("Download") or _("Request"),
+        text = can_download and _("Download") or _("Request"),
         callback = function()
             if caller_menu then UIManager:close(caller_menu) end
             local Trapper = require("ui/trapper")
-            if is_annas then
-                -- Immediate download, not a queued request -- see
-                -- downloadFromAnnasArchive's note on why this branch exists.
-                Trapper:wrap(function() self:downloadFromAnnasArchive(release) end)
+            if can_download then
+                Trapper:wrap(function() self:downloadReleaseFile(release, src) end)
             else
                 Trapper:wrap(function() self:submitRequest(withAuthorField(book), release) end)
             end
@@ -10254,7 +11022,7 @@ function Bookbridge:confirmReleaseRequest(book, release, caller_menu)
     }
 
     self:showResilientTextViewer{
-        title = is_annas and _("Download this release?") or _("Request this release?"),
+        title = can_download and _("Download this release?") or _("Request this release?"),
         text = describeReleaseDetail(release, book),
         buttons = buttons,
     }
@@ -12510,6 +13278,10 @@ function Bookbridge:collectStatusRows()
     end
 
     -- Shelfmark
+    self:companionStatusRows(add)
+    add({ text = _("Sources -- where books come from"), mandatory = self:sourcesSummary(),
+        action = function() self:showSourcesDialog() end })
+
     local sm, sm_act = nil, function() self:editServerSettings() end
     if not self.server_url or self.server_url == "" then sm = _("Not set up")
     elseif not self.username or self.username == "" then sm = _("Needs login")
@@ -12554,14 +13326,23 @@ function Bookbridge:collectStatusRows()
     local rs = self.ui and self.ui.readest
     local rd, rd_act
     if type(rs) ~= "table" or type(rs.settings) ~= "table" then
-        rd = _("Not installed")
-        rd_act = function()
-            UIManager:show(InfoMessage:new{ text = _("Readest keeps your place in sync with the Readest app on your phone or tablet.\n\nInstall the Readest KOReader plugin (readest.koplugin), restart KOReader, then sign in under Tools > Readest.") })
+        -- not running: Bookbridge installs it (a companion, see CO)
+        local state = self:companionState("readest")
+        if state.installed and state.disabled then
+            rd = _("Disabled"); rd_act = function() self:enableCompanion("readest") end
+        elseif state.installed then
+            rd = _("Restart needed"); rd_act = function() UIManager:restartKOReader() end
+        else
+            rd = _("Not installed")
+            rd_act = function()
+                local Trapper = require("ui/trapper")
+                Trapper:wrap(function() self:installCompanion("readest") end)
+            end
         end
     elseif not rs.settings.access_token then
         rd = _("Not signed in")
         rd_act = function()
-            UIManager:show(InfoMessage:new{ text = _("Sign in under Tools > Readest with the same account as the Readest app on your phone or tablet.") })
+            UIManager:show(InfoMessage:new{ text = _("Sign in under Bookbridge > Library (Readest) with the same account as the Readest app on your phone or tablet.") })
         end
     elseif not rs.settings.auto_sync then
         rd = _("Auto sync off")
@@ -12575,7 +13356,7 @@ function Bookbridge:collectStatusRows()
             UIManager:show(InfoMessage:new{ text = _("Books you read here go to your Readest library by themselves, and your place is saved when the Kindle sleeps.\n\nOn your phone or tablet, open books from the Readest library -- not from the Calibre-Web catalog -- so both have the same file.") })
         end
     end
-    add({ text = _("Readest -- sync with phone & tablet"), mandatory = rd, action = rd_act })
+    add({ text = _("Readest -- your library & sync"), mandatory = rd, action = rd_act })
 
     -- Anna's Archive (optional)
     add({ text = _("Anna's Archive -- extra source (optional)"),

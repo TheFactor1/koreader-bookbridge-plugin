@@ -10,8 +10,11 @@ KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 M="$REPO/bookbridge.koplugin/main.lua"
 { grep -E '^local HC_TOKEN_REJECTED = |^local hc_rejected_token = |^local CLIPBOARD_RECEIVER_PORT = |^local CLIP = |^local STATUS_CHECK_MAX_AGE = |^local STATUS_MAX = ' "$M"
+  # the companions (CO) and sources (SRC) blocks: the status screen lists both
+  awk '/^-- ===== CO begin/{f=1} f{print} f&&/^-- ===== CO end/{exit}' "$M"
+  awk '/^-- ===== SRC begin/{f=1} f{print} f&&/^-- ===== SRC end/{exit}' "$M"
   for f in statusCheckedLabel statusShort; do awk "/^local function $f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
-  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in collectStatusRows showStatus checkConnections runStatusChecks saveAndVerify autoTailscaleProxy showServiceError maybeShowFirstRunSetup editServerSettings phoneButtonRow showHostingGuide companionStatusRows companionState sourcesSummary sourcesInOrder sourcesConfigured; do awk "/^function Bookbridge:$f/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
   echo 'return function() return hc_rejected_token end, function(v) hc_rejected_token = v end'
 } > "$W/fns.lua"
 grep -q "collectStatusRows" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
@@ -48,7 +51,7 @@ doAnnasSearch = function(url, key, tld, q, proxy, opts)
 end
 local SOCK_OK = false
 socket = { tcp = function() return { settimeout = function() end, connect = function() return SOCK_OK and 1 or nil end, close = function() end } end }
-G_reader_settings = { _d = {}, isTrue = function(self, k) return self._d[k] == true end, saveSetting = function(self, k, v) self._d[k] = v end }
+G_reader_settings = { _d = {}, isTrue = function(self, k) return self._d[k] == true end, readSetting = function(self, k) return self._d[k] end, saveSetting = function(self, k, v) self._d[k] = v end }
 local DEVICE = { isDesktop = function() return false end, isAndroid = function() return false end }
 package.loaded["device"] = DEVICE
 local CB = {}
@@ -59,6 +62,7 @@ local ONLINE = true
 package.loaded["ui/network/manager"] = { isOnline = function() return ONLINE end }
 package.loaded["ui/trapper"] = { wrap = function(_s, f) return f() end, dismissableRunInSubprocess = function(_s, f) return true, f() end }
 package.loaded["bookbridge.clipboard_receiver"] = {}  -- (main.lua's CLIP picks this up)
+getPluginDir = function() return "/nonexistent/plugins/bookbridge.koplugin" end
 Bookbridge = {}
 local getRej, setRej = assert(load(io.open(W .. "/fns.lua"):read("*a")))()
 local pass, fail = 0, 0

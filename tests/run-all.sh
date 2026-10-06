@@ -91,6 +91,18 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks, $(ec
 elif [ $rc -eq 3 ]; then echo "SKIPPED  readest-sleep-push (no local KOReader)"; skipped="${skipped:+$skipped, }readest-sleep-push"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Companion plugins (verified zip, prefix stripped, parse-checked, .prev kept, rollback)"
+out=$(bash tests/companions/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  companions (no local KOReader or zip)"; skipped="${skipped:+$skipped, }companions"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
+section "Book sources (Z-Library through its plugin; order, on/off, stop-first; a changed plugin degrades)"
+out=$(bash tests/sources/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  sources (no local KOReader)"; skipped="${skipped:+$skipped, }sources"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Status & setup screen (every part's state and its fix)"
 out=$(bash tests/status-screen/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
