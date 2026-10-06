@@ -7492,7 +7492,9 @@ function ConnectCodeWidget:init()
 end
 
 function ConnectCodeWidget:onShow()
-    UIManager:setDirty(self, function() return "ui", self[1][1].dimen end)
+    -- (one full e-ink refresh: no ghost of the page underneath, and a clean
+    -- QR code for the phone's camera)
+    UIManager:setDirty(self, function() return "full", self[1][1].dimen end)
     return true
 end
 
@@ -10739,7 +10741,8 @@ function HardcoverReviewQR:onCloseWidget()
 end
 
 function HardcoverReviewQR:onShow()
-    UIManager:setDirty(self, function() return "ui", self[1][1].dimen end)
+    -- (full: a QR code scans badly through e-ink ghosting)
+    UIManager:setDirty(self, function() return "full", self[1][1].dimen end)
     if self.timeout then
         self._timeout_func = function()
             self._timeout_func = nil
