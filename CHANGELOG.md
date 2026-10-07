@@ -4,6 +4,14 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-07 — v0.9.4
+
+- **Fixed**: sending text from your phone could stop working after closing a
+  book, until the Kindle next slept and woke. Closing a book restarts the
+  receiver, and a background task started while it was up (a Readest upload,
+  a book search) can still hold its port for a moment, so the restart failed
+  and didn't try again. It now tries again every 3 seconds for a minute.
+
 ## 2026-10-07 — v0.9.3
 
 - **Better matches**: the right book often sat lower in the list than it

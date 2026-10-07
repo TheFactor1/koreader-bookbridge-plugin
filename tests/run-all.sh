@@ -121,6 +121,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  release-match (no local KOReader)"; skipped="${skipped:+$skipped, }release-match"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Clipboard receiver comes back when its port is still held (real sockets)"
+out=$(bash tests/clipboard-retry/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  clipboard-retry (no local KOReader)"; skipped="${skipped:+$skipped, }clipboard-retry"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Devices in step through Readest (statistics up/down, library uploads and downloads, throttle, storage full)"
 out=$(bash tests/readest-sync/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"

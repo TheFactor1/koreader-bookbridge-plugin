@@ -705,7 +705,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.9.3"
+local PLUGIN_VERSION = "0.9.4"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -14394,9 +14394,27 @@ function Bookbridge:startClipboardReceiver()
     end
     local ok, err = server:start()
     if not ok then
-        debugLog("[clipboard] failed to start: " .. tostring(err))
+        -- The port is still held a moment after it was let go: a background
+        -- task forked while the receiver was up (a Readest upload, a source
+        -- search) keeps a copy of the socket until it exits. Seen on Matt's
+        -- Kindle 2026-10-07: closing a book stopped the receiver, the restart
+        -- found the port taken, and nothing listened again until the next
+        -- wake. So it tries again, every 3 s for a minute.
+        CLIP.retries = (CLIP.retries or 0) + 1
+        debugLog("[clipboard] failed to start: " .. tostring(err)
+            .. (CLIP.retries <= 20 and (" -- again in 3 s (" .. CLIP.retries .. ")") or " -- giving up until the next wake"))
+        if CLIP.retries <= 20 then
+            if CLIP.retry then UIManager:unschedule(CLIP.retry) end
+            CLIP.retry = function()
+                CLIP.retry = nil
+                if CLIP.owner and not CLIP.owner._closed then CLIP.owner:startClipboardReceiver() end
+            end
+            UIManager:scheduleIn(3, CLIP.retry)
+        end
         return
     end
+    CLIP.retries = nil
+    if CLIP.retry then UIManager:unschedule(CLIP.retry); CLIP.retry = nil end
     CLIP.server = server
     CLIP.mq = UIManager:insertZMQ(server)
     -- (the firewall opens only once the port is ours, and once)
@@ -14416,6 +14434,9 @@ end
 function Bookbridge:stopClipboardReceiver()
     -- (an older instance going away leaves the newer one's receiver alone)
     if CLIP.owner and CLIP.owner ~= self then return end
+    -- (no retry left waiting: asleep, nobody should be listening)
+    if CLIP.retry then UIManager:unschedule(CLIP.retry); CLIP.retry = nil end
+    CLIP.retries = nil
     if CLIP.fw then
         os.execute("iptables -D INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
             " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null")
