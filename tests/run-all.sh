@@ -115,6 +115,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  sources (no local KOReader)"; skipped="${skipped:+$skipped, }sources"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Release matching (real Z-Library answers: the book itself first; stop at the source that has it)"
+out=$(bash tests/release-match/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  release-match (no local KOReader)"; skipped="${skipped:+$skipped, }release-match"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Devices in step through Readest (statistics up/down, library uploads and downloads, throttle, storage full)"
 out=$(bash tests/readest-sync/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"

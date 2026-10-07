@@ -127,6 +127,8 @@ function Bookbridge:loadSettings()
     self.sources_order = self.sm_settings.data.shelfmark.sources_order
     self.sources_enabled = self.sm_settings.data.shelfmark.sources_enabled or {}
     self.sources_stop_first = self.sm_settings.data.shelfmark.sources_stop_first == true
+    -- stop at the first source that has the book itself (on unless switched off)
+    self.sources_stop_exact = self.sm_settings.data.shelfmark.sources_stop_exact ~= false
     -- The Readest cloud library is the library your devices share (Matt,
     -- 2026-10-06): every book in the library folder goes up ("all"), or only
     -- books you open ("opened"), or none ("off"); books being read on another
@@ -279,6 +281,7 @@ function Bookbridge:saveAllSettings(msg)
         sources_order = self.sources_order,
         sources_enabled = self.sources_enabled,
         sources_stop_first = self.sources_stop_first,
+        sources_stop_exact = self.sources_stop_exact,
         readest_library_upload = self.readest_library_upload,
         readest_download = self.readest_download,
         readest_last_sync = self.readest_last_sync,
@@ -702,7 +705,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.9.2"
+local PLUGIN_VERSION = "0.9.3"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -5082,7 +5085,7 @@ PAIR.FIELDS = {
     "cwa_url", "cwa_username", "cwa_password",
     "annas_url", "annas_download_key", "annas_tld",
     "hardcover_token", "hardcover_language", "hardcover_progress_sync", "hardcover_review_qr_enabled",
-    "sources_order", "sources_enabled", "sources_stop_first",
+    "sources_order", "sources_enabled", "sources_stop_first", "sources_stop_exact",
     "companions_in_ko_menu", "ai_relay_url", "ai_relay_token", "pairing_relay_url",
 }
 
@@ -10805,6 +10808,7 @@ local function annasResultToRelease(result)
     end
     return {
         title = title,
+        book_title = type(result.title) == "string" and result.title or nil,
         format = result.format,
         indexer = "Anna's Archive",
         source = "annasarchive",
@@ -10856,6 +10860,147 @@ function SRC.releaseTitle(author, title)
         return author .. " - " .. title
     end
     return title
+end
+
+-- ===== How well a release matches the book asked for =====
+-- Seen on Matt's Kindle (2026-10-07, Z-Library's real answer for "The
+-- Kaiju Preservation Society John Scalzi"): its first result was the
+-- English book titled "Kaiju Preservation Society" -- no "The", so a plain
+-- "title is in it" test gave it nothing, while two Italian editions ("The
+-- Kaiju Preservation Society. Gli ultimi di una razza") got full marks and
+-- went above it. "Dust" scored "The Silo Series Collection: Wool, Shift,
+-- Dust..." the same as Dust. So titles are compared as words, without a
+-- leading article, a subtitle, brackets ("(9780765389138)", "(Wool 3)") or a
+-- series prefix ("Silo 03 - Dust"); the author is looked for in the
+-- release's own author field; the reader's language (the one Hardcover
+-- matches use) counts; collections, summaries and PDFs go down.
+SRC.LANG_NAMES = {
+    en = "english", de = "german", fr = "french", es = "spanish", it = "italian",
+    pt = "portuguese", nl = "dutch", ru = "russian", pl = "polish", sv = "swedish",
+    da = "danish", no = "norwegian", fi = "finnish", cs = "czech", hu = "hungarian",
+    tr = "turkish", ja = "japanese", zh = "chinese", ko = "korean", uk = "ukrainian",
+}
+-- about the book, not the book (the searched title is in them all)
+SRC.NOT_THE_BOOK = {
+    "summary", "analysis of", "workbook", "study guide", "conversation starters", "trivia",
+    "quicklet", "sparknotes", "cliffsnotes", "book club guide", "companion", "making of",
+    "radio script", "radio drama", "screenplay", "teleplay", "unauthorized biography",
+}
+-- more than the book
+SRC.MORE_THAN_THE_BOOK = {
+    "collection", "omnibus", "box set", "boxed set", "boxset", "bundle", "anthology",
+    "trilogy", "duology", "complete series", "books 1",
+}
+-- words a release name carries that the book's title doesn't
+SRC.RELEASE_NOISE = { epub = true, mobi = true, azw3 = true, azw = true, pdf = true, fb2 = true,
+    kepub = true, retail = true, ebook = true, ["e-book"] = true }
+
+-- lower case, words only ("Don't" = "dont", "&" = "and"); other scripts kept
+function SRC.words(s)
+    if type(s) ~= "string" then return "" end
+    s = s:lower():gsub("\226\128\153", ""):gsub("'", ""):gsub("&", " and ")
+    s = s:gsub("[%p%c]", " "):gsub("%s+", " ")
+    return (s:gsub("^ ", ""):gsub(" $", ""))
+end
+
+-- a title's core: no brackets, no subtitle, no leading article
+function SRC.core(title)
+    if type(title) ~= "string" then return "" end
+    local s = title:gsub("%b()", " "):gsub("%b[]", " ")
+    s = s:match("^([^:]*)") or s
+    s = SRC.words(s)
+    for _unused, a in ipairs({ "the ", "a ", "an " }) do
+        if s:sub(1, #a) == a and #s > #a then s = s:sub(#a + 1); break end
+    end
+    return s
+end
+
+function SRC.has(hay, needle)
+    return needle ~= "" and (" " .. hay .. " "):find(" " .. needle .. " ", 1, true) ~= nil
+end
+
+-- "yes" / "no" / nil (the release doesn't say, or no language is preferred)
+function SRC.langMatch(lang, want)
+    if type(lang) ~= "string" or lang == "" or type(want) ~= "string" or want == "" then return nil end
+    local l = lang:lower()
+    if l == want or l:find("[" .. want .. "]", 1, true) or l:find("^" .. want .. "[%-_]") then return "yes" end
+    local name = SRC.LANG_NAMES[want]
+    if name and l:find(name, 1, true) then return "yes" end
+    -- (a language Bookbridge has no name for: only its code can say yes)
+    return "no"
+end
+
+-- Scores a release against the book: { score =, exact = }. exact = the
+-- book itself (title and author), in the reader's language (or unsaid), as
+-- an EPUB -- what lets a search stop at that source.
+function SRC.match(release, book, lang)
+    local want_full = SRC.words(book and book.title)
+    local want = SRC.core(book and book.title)
+    local raw = type(release.book_title) == "string" and release.book_title or release.title or ""
+    local full = SRC.words(raw)
+    local score, title_exact = 0, false
+    if want ~= "" then
+        -- the core, then the last " - " part ("Howey, Hugh - Silo 03 - Dust"),
+        -- without release-name words the title itself doesn't have
+        local function clean(core)
+            local out = {}
+            for w in core:gmatch("%S+") do
+                local year = w:match("^%d%d%d%d$") and (w:sub(1, 2) == "19" or w:sub(1, 2) == "20")
+                if not ((SRC.RELEASE_NOISE[w] or year) and not SRC.has(want, w)) then out[#out + 1] = w end
+            end
+            return table.concat(out, " ")
+        end
+        local last = raw:match(".* %- (.-)$")
+        if clean(SRC.core(raw)) == want or (last and clean(SRC.core(last)) == want) then
+            title_exact = true
+            score = score + 1000
+            -- (the plain title, nothing around it, before the same book with extras)
+            if full == want_full or full == want then score = score + 20 end
+        elseif SRC.has(full, want_full) or clean(SRC.core(raw)):sub(1, #want + 1) == want .. " " then
+            score = score + 400
+        end
+    end
+    -- the author: in the release's own author field; in a "Author - Title"
+    -- name, before the first " - " (so "Don't Panic" by Neil Gaiman, about
+    -- Douglas Adams, isn't credited to Adams)
+    local author_hay
+    if type(release.annas_author) == "string" and release.annas_author ~= "" then
+        author_hay = SRC.words(release.annas_author)
+    else
+        local before = (release.title or ""):match("^(.-) %- ")
+        author_hay = SRC.words(before or release.title)
+        if release.book_title and not before then author_hay = SRC.words(release.book_title) end
+    end
+    local surnames = {}
+    for _unused, a in ipairs(book and type(book.authors) == "table" and book.authors or {}) do
+        local words = {}
+        for w in SRC.words(a):gmatch("%S+") do words[#words + 1] = w end
+        for i = #words, 1, -1 do
+            local w = words[i]
+            if #w > 2 and w ~= "jr" and w ~= "sr" and w ~= "iii" then surnames[#surnames + 1] = w; break end
+        end
+    end
+    local author_ok = false
+    for _unused, s in ipairs(surnames) do
+        if SRC.has(author_hay, s) then author_ok = true; break end
+    end
+    if author_ok then score = score + 300 end
+    local lang_ok = SRC.langMatch(release.language, lang)
+    if lang_ok == "yes" then score = score + 150 elseif lang_ok == "no" then score = score - 700 end
+    local about = false
+    for _unused, kw in ipairs(SRC.NOT_THE_BOOK) do
+        if SRC.has(full, kw) and not SRC.has(want_full, kw) then about = true; score = score - 900; break end
+    end
+    local more = false
+    for _unused, kw in ipairs(SRC.MORE_THAN_THE_BOOK) do
+        if SRC.has(full, kw) and not SRC.has(want_full, kw) then more = true; score = score - 350; break end
+    end
+    local fmt = type(release.format) == "string" and release.format:lower() or ""
+    local FORMAT = { epub = 60, kepub = 40, azw3 = 40, mobi = 30, fb2 = 30, pdf = -150, djvu = -150, cbz = -150, cbr = -150 }
+    score = score + (FORMAT[fmt] or 0)
+    local exact = title_exact and (author_ok or #surnames == 0) and lang_ok ~= "no"
+        and not about and not more and fmt == "epub"
+    return { score = score, exact = exact }
 end
 
 -- Z-Library, through zlibrary.koplugin (ZlibraryKO, AGPL-3.0): its own code
@@ -10940,6 +11085,7 @@ SRC.DEF.zlibrary = {
                 if fmt == "n/a" then fmt = nil end
                 releases[#releases + 1] = {
                     title = SRC.releaseTitle(b.author, b.title),
+                    book_title = b.title,
                     format = fmt,
                     indexer = "Z-Library",
                     source = "zlibrary",
@@ -11222,6 +11368,9 @@ function Bookbridge:showSourcesDialog()
               end },
         }
     end
+    buttons[#buttons + 1] = { { text = (self.sources_stop_exact and "\u{2611} " or "\u{2610} ") .. _("Stop at the first source that has the exact book"),
+        align = "left",
+        callback = function() self.sources_stop_exact = not self.sources_stop_exact; reopen() end } }
     buttons[#buttons + 1] = { { text = (self.sources_stop_first and "\u{2611} " or "\u{2610} ") .. _("Stop at the first source that has results"),
         align = "left",
         callback = function() self.sources_stop_first = not self.sources_stop_first; reopen() end } }
@@ -11234,18 +11383,25 @@ function Bookbridge:showSourcesDialog()
 end
 
 
--- Entry point for finding a book's file: every enabled source in the
+-- Entry point for finding a book's file: the enabled sources in the
 -- reader's order (Settings > Sources), results merged and sorted below.
+-- A source that has the book itself (SRC.match's exact: title, author,
+-- language, EPUB) ends the search there -- Matt, 2026-10-07: "If it finds
+-- the exact book needed, it stops at that engine"; the list then offers the
+-- rest. opts.all asks every source regardless.
 -- caller_menu, when given, is closed here rather than by the caller --
 -- see the identical note on doSearch's own caller_menu.
-function Bookbridge:browseReleases(book, manual_query, caller_menu)
+function Bookbridge:browseReleases(book, manual_query, caller_menu, opts)
     if caller_menu then UIManager:close(caller_menu) end
+    opts = opts or {}
     local query = (manual_query and manual_query ~= "") and manual_query or defaultReleaseQuery(book)
-    local releases, tried, errors, notes = {}, {}, {}, {}
-    local shelfmark_sat_out = false
+    local releases, tried, errors, notes, rest = {}, {}, {}, {}, {}
+    local shelfmark_sat_out, stopped = false, nil
     for _unused, id in ipairs(self:sourcesInOrder()) do
         local src = SRC.DEF[id]
-        if src.configured(self) then
+        if stopped then
+            if src.configured(self) then rest[#rest + 1] = src.label end
+        elseif src.configured(self) then
             local got, err, cancelled, skipped = src.search(self, query, book, manual_query)
             if cancelled then return end
             if skipped then
@@ -11259,7 +11415,12 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu)
                     errors[#errors + 1] = src.label .. ": " .. tostring(err)
                 end
             end
-            if #releases > 0 and self.sources_stop_first then break end
+            if not opts.all and #releases > 0 and self.sources_stop_first then stopped = src.label end
+            if not opts.all and not stopped and self.sources_stop_exact and type(got) == "table" then
+                for _u4, r in ipairs(got) do
+                    if SRC.match(r, book, self.hardcover_language).exact then stopped = src.label; break end
+                end
+            end
         elseif src.missing then
             -- switched on but not ready. Awaiting a restart: always said.
             -- Not set up at all (no key, never installed): said only when
@@ -11294,110 +11455,56 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu)
         }
         return
     end
-    self:browseReleasesContinue(book, manual_query, releases, errors, tried)
+    if stopped then debugLog("[sources] stopped at " .. stopped .. "; not asked: " .. table.concat(rest, ", ")) end
+    self:browseReleasesContinue(book, manual_query, releases, errors, tried, rest)
 end
 
--- Relevance first, then EPUB, then the reader's source order (Settings >
--- Sources), then download counts, then the order they arrived in (a plain
--- table.sort isn't stable, so the original index is the final tiebreaker).
+-- Best match first (SRC.match: title, author, language, format), then the
+-- reader's source order (Settings > Sources), then download counts, then
+-- the order they arrived in (a plain table.sort isn't stable, so the
+-- original index is the final tiebreaker).
 function Bookbridge:sortReleases(releases, book)
-    -- Prowlarr/indexer search is a broad keyword match, not a precise
-    -- one -- confirmed live: searching "The Stand" returned 29 pages,
-    -- most of them unrelated ("Last Stand", "Stand-In", even a
-    -- different, unrelated book that's also literally titled "The
-    -- Stand"). Release objects carry no author field of their own, but
-    -- indexer release titles conventionally include the author's name,
-    -- so that's the actual signal used here: an exact book-title
-    -- substring match plus an author-surname match scores highest.
-    local book_author = describeAuthor(book)
-    -- Release titles that are ADAPTATIONS/COMPANIONS about a book, not the
-    -- book itself, routinely still contain the searched title and author as
-    -- a substring -- a radio dramatization or "making of" book both
-    -- legitimately mention the original work by name. Confirmed live:
-    -- searching "The Hitchhiker's Guide to the Galaxy" surfaced both "Don't
-    -- Panic" (Neil Gaiman's biography of Douglas Adams) and "...Further
-    -- Radio Scripts" (a BBC radio-drama script collection) scoring as high
-    -- as an actual copy of the novel. Two cheap, targeted signals catch
-    -- these without trying to solve the general problem: (1) a curated
-    -- keyword list of adaptation/companion markers, penalized rather than
-    -- excluded -- if it's genuinely all that's available it should still be
-    -- requestable; (2) the author bonus only counts when the surname
-    -- appears before the release's first " - " separator (the scene-release
-    -- "Author - Title" convention) -- "Don't Panic" credits Neil Gaiman
-    -- there and only mentions "Douglas Adams" afterward as the subject, not
-    -- the author of the release.
-    local ADAPTATION_KEYWORDS = {
-        "radio script", "radio drama", "screenplay", "teleplay",
-        "study guide", "book club guide", "cliffsnotes", "sparknotes",
-        "companion", "making of", "unauthorized biography",
-    }
-    local function releaseRelevanceScore(release_title)
-        if type(release_title) ~= "string" then return 0 end
-        local rt = release_title:lower()
-        local score = 0
-        if type(book.title) == "string" and book.title ~= "" and rt:find(book.title:lower(), 1, true) then
-            score = score + 100
-        end
-        if book_author ~= "" then
-            local surname = book_author:match("(%S+)%s*$")
-            if surname and #surname > 2 then
-                local surname_pos = rt:find(surname:lower(), 1, true)
-                if surname_pos then
-                    local sep_pos = rt:find(" - ", 1, true)
-                    if not sep_pos or surname_pos < sep_pos then
-                        score = score + 50
-                    end
-                end
-            end
-        end
-        for _, kw in ipairs(ADAPTATION_KEYWORDS) do
-            if rt:find(kw, 1, true) then
-                score = score - 200
-                break
-            end
-        end
-        return score
-    end
-
-    -- releases is already set above -- either from Anna's Archive or from
-    -- resp.releases in the Prowlarr/Shelfmark fallback branch.
+    -- (how a release is scored: SRC.match, with the reasons)
     for _, r in ipairs(releases) do
         r.title = decodeHtmlEntities(r.title)
+        if r.book_title then r.book_title = decodeHtmlEntities(r.book_title) end
     end
     -- the reader's source order breaks ties (Settings > Sources): with the
-    -- same relevance and format, the preferred source's copy comes first
+    -- same match, the preferred source's copy comes first
     local source_rank = {}
     for i, id in ipairs(self:sourcesInOrder()) do source_rank[id] = i end
     for i, r in ipairs(releases) do
         r._orig_index = i
-        r._relevance = releaseRelevanceScore(r.title)
+        local m = SRC.match(r, book, self.hardcover_language)
+        r._relevance = m.score
+        r.exact_match = m.exact or nil
         r._source_rank = source_rank[r.source] or source_rank.shelfmark or 99
     end
     table.sort(releases, function(a, b)
         if a._relevance ~= b._relevance then return a._relevance > b._relevance end
-        local a_epub = (a.format and a.format:lower() == "epub") and 0 or 1
-        local b_epub = (b.format and b.format:lower() == "epub") and 0 or 1
-        if a_epub ~= b_epub then return a_epub < b_epub end
         if a._source_rank ~= b._source_rank then return a._source_rank < b._source_rank end
         -- Grabs as the last tiebreaker before falling back to the server's
-        -- own ordering -- among otherwise-equal candidates (same relevance,
-        -- same format), the one more people have actually grabbed is the
-        -- better bet, and it's the only volume/reliability signal usenet
-        -- releases carry at all (see the note on describeRelease).
-        local a_grabs = (a.extra and a.extra.grabs) or 0
-        local b_grabs = (b.extra and b.extra.grabs) or 0
+        -- own ordering -- among otherwise-equal candidates, the one more
+        -- people have actually grabbed is the better bet, and it's the only
+        -- volume/reliability signal usenet releases carry at all (see the
+        -- note on describeRelease).
+        local a_grabs = (a.extra and tonumber(a.extra.grabs)) or 0
+        local b_grabs = (b.extra and tonumber(b.extra.grabs)) or 0
         if a_grabs ~= b_grabs then return a_grabs > b_grabs end
         return a._orig_index < b._orig_index
     end)
-    for _, r in ipairs(releases) do
+    local top = {}
+    for i, r in ipairs(releases) do
+        if i <= 5 then top[#top + 1] = string.format("%d %s%s [%s %s %s]", r._relevance, r.exact_match and "= " or "",
+            tostring(r.title), tostring(r.source), tostring(r.format), tostring(r.language)) end
         r._orig_index = nil
         r._relevance = nil
         r._source_rank = nil
     end
-
+    debugLog("[sources] top: " .. table.concat(top, " | "))
 end
 
-function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors, tried)
+function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors, tried, rest)
     releases = releases or {}
     if #releases == 0 then
         local where = table.concat(tried or {}, ", ")
@@ -11445,6 +11552,10 @@ function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors,
     local item_table = {
         { text = _("\xE2\x9C\x8E Custom search query..."), is_custom_query = true }, -- "✎ ..."
     }
+    -- found at an earlier source: the ones not asked, a tap away
+    if rest and #rest > 0 then
+        table.insert(item_table, { text = "\u{2026} " .. T(_("Also ask %1"), table.concat(rest, ", ")), is_ask_rest = true })
+    end
     -- Not "for _, release" -- that shadows gettext's _() for the rest of
     -- this loop body, which calls it in the fallback branch below (found
     -- by an audit for this exact pattern, not hit by any release seen so
@@ -11520,6 +11631,9 @@ function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors,
             local ok, err = xpcall(function()
                 if item.is_custom_query then
                     self:promptCustomReleaseQuery(book, manual_query, releases_menu)
+                elseif item.is_ask_rest then
+                    local Trapper = require("ui/trapper")
+                    Trapper:wrap(function() self:browseReleases(book, manual_query, releases_menu, { all = true }) end)
                 else
                     self:confirmReleaseRequest(book, item.release_data, releases_menu)
                 end

@@ -4,6 +4,26 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-07 — v0.9.3
+
+- **Better matches**: the right book often sat lower in the list than it
+  should. On Z-Library's real answer for *The Kaiju Preservation Society*,
+  the English book titled "Kaiju Preservation Society" (no "The") got no
+  credit for its title, so two Italian editions went above it; for *Dust*,
+  "The Silo Series Collection: Wool, Shift, Dust..." scored the same as the
+  book. Titles are now compared word for word, ignoring a leading "The", a
+  subtitle, brackets ("(9780765389138)", "(Wool 3)") and series prefixes
+  ("Silo 03 - Dust"); the author is checked in the release's own author
+  field; your language counts (the one Hardcover matching uses, English by
+  default); collections, summaries and study guides go down; EPUB comes
+  before MOBI before PDF.
+- **Stops when it finds the book**: the sources are asked in order, and the
+  first one with the exact book (title and author, your language, EPUB) ends
+  the search -- Z-Library usually answers in a second, so the list comes up
+  without waiting for Anna's Archive and Shelfmark. The list's second row,
+  "Also ask Anna's Archive, Shelfmark", asks the rest. Settings > Sources >
+  "Stop at the first source that has the exact book" switches this off.
+
 ## 2026-10-07 — v0.9.2
 
 - **Faster**: getting a book through a Shelfmark server took about 35 s
