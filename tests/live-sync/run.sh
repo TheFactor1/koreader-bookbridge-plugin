@@ -56,8 +56,7 @@ stop_koreader() {
   # just started -- a clean run's most baffling failure. Blocking is the fix.
   setsid sh -c '
     for p in $(ss -ltnp "( sport = :'"$INSPECT"' )" 2>/dev/null | grep -oE "pid=[0-9]+" | cut -d= -f2 | sort -u); do kill "$p" 2>/dev/null; done
-    pkill -f "^\./luajit \./reader\.lua" 2>/dev/null
-    pkill -f "^/bin/sh \./koreader\.sh" 2>/dev/null
+    for p in $(pgrep -f "^(\./luajit \./reader\.lua|/bin/sh \./koreader\.sh)"); do tr "\\0" "\\n" < /proc/$p/environ 2>/dev/null | grep -q "^KO_HOME=" || kill "$p" 2>/dev/null; done
     true' >/dev/null 2>&1
   for i in $(seq 1 10); do ss -ltn "( sport = :$INSPECT )" | tail -n +2 | grep -q . || break; sleep 1; done
   KPID=""
@@ -103,7 +102,7 @@ ss -ltn "( sport = :$INSPECT )" | tail -n +2 | grep -q . && { say FAIL ":$INSPEC
 (cd "$KDIR" && setsid -f ./koreader.sh > "$W/koreader.log" 2>&1)
 for i in $(seq 1 30); do curl -s -o /dev/null --max-time 2 "$I/" && break; sleep 1; done
 curl -s -o /dev/null --max-time 2 "$I/" && say PASS "KOReader up, inspector answering on :$INSPECT" || { say FAIL "inspector never answered"; exit 1; }
-KPID=$(pgrep -f '^\./luajit \./reader\.lua' | tail -1)
+KPID=$(ss -ltnp "( sport = :$INSPECT )" 2>/dev/null | grep -oE "pid=[0-9]+" | head -1 | cut -d= -f2)
 # Identity: the instance answering must be the one THIS run launched, i.e.
 # it read this run's settings. Its download_dir is unique to this run.
 got=$(curl -s --max-time 5 "$I/ui/bookbridge/download_dir" | tr -d '"')

@@ -19,7 +19,7 @@ for f in "$SET/shelfmark.lua" "$SET/shelfmark_hardcover_pending.json" "$SET/shel
 ls -A "$SET" > "$W/settings-before.txt"
 stop_koreader() {
   setsid sh -c 'for p in $(ss -ltnp "( sport = :'"$INSPECT"' )" 2>/dev/null | grep -oE "pid=[0-9]+" | cut -d= -f2 | sort -u); do kill "$p" 2>/dev/null; done
-    pkill -f "^\./luajit \./reader\.lua" 2>/dev/null; pkill -f "^/bin/sh \./koreader\.sh" 2>/dev/null; true' >/dev/null 2>&1
+    for p in $(pgrep -f "^(\./luajit \./reader\.lua|/bin/sh \./koreader\.sh)"); do tr "\0" "\n" < /proc/$p/environ 2>/dev/null | grep -q "^KO_HOME=" || kill "$p" 2>/dev/null; done; true' >/dev/null 2>&1
   for i in $(seq 1 10); do ss -ltn "( sport = :$INSPECT )" | tail -n +2 | grep -q . || break; sleep 1; done
 }
 cleanup() {
