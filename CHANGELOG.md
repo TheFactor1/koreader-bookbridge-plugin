@@ -4,6 +4,18 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-07 — v0.9.2
+
+- **Faster**: getting a book through a Shelfmark server took about 35 s
+  before the files appeared. 25 s of it was Shelfmark searching Anna's
+  Archive -- which Bookbridge had just searched itself -- through a headless
+  browser solving a bot check. With Anna's Archive set up in Bookbridge,
+  Shelfmark is now asked for its other sources only (Prowlarr and the like);
+  without it, Shelfmark searches everything as before.
+- **Fixed**: the release search passed its "Asking Shelfmark..." message
+  where the request body goes, so the waiting box showed a number and the
+  timeouts were off by one place (150 s per read instead of 30).
+
 ## 2026-10-07 — v0.9.1
 
 Bug fixes from a review of v0.9.0.

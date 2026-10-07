@@ -702,7 +702,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.9.1"
+local PLUGIN_VERSION = "0.9.2"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -11077,20 +11077,60 @@ SRC.DEF.shelfmark = {
         if manual_query and manual_query ~= "" then
             table.insert(qs, "manual_query=" .. socketurl.escape(manual_query))
         end
-        -- Longer than apiRequest's default: a release search that needs a
-        -- fresh bot-challenge solve on the server can take a couple of
-        -- minutes (Shelfmark's own budget is 300 s). The dialog is
-        -- dismissable, so nobody is trapped.
-        local resp, code, err = self:apiRequest("GET", "/api/releases?" .. table.concat(qs, "&"),
-            _("Asking Shelfmark's release sources (can take a couple of minutes)..."), 30, 150)
-        if err == _("Cancelled.") then return nil, nil, true end
-        if err then return nil, err end
-        if code ~= 200 or not resp or not resp.releases then
-            return nil, (resp and (resp.message or resp.error)) or _("Release search failed.")
+        -- Anna's Archive, when Bookbridge asks it itself (its own source):
+        -- not again through Shelfmark, whose route to it starts a headless
+        -- browser for a bot check -- 25 of the 29 s a search took on Matt's
+        -- Kindle, for results already in the list. Shelfmark's other
+        -- release sources (Prowlarr, IRC, ...) are asked one by one instead.
+        local only
+        if SRC.enabled(self, "annasarchive") and SRC.DEF.annasarchive.configured(self) then
+            only = self:shelfmarkOtherSources()
+            if only and #only == 0 then return nil, nil, nil, true end   -- (nothing else to ask)
         end
-        return resp.releases
+        local all, errors = {}, {}
+        for _unused, src in ipairs(only or { false }) do
+            local path = "/api/releases?" .. table.concat(qs, "&") .. (src and ("&source=" .. socketurl.escape(src)) or "")
+            -- Longer than apiRequest's default: a release search that needs
+            -- a fresh bot-challenge solve on the server can take a couple of
+            -- minutes (Shelfmark's own budget is 300 s). The dialog is
+            -- dismissable, so nobody is trapped.
+            local resp, code, err = self:apiRequest("GET", path, nil,
+                only and _("Asking Shelfmark's release sources...") or _("Asking Shelfmark's release sources (can take a couple of minutes)..."), 30, 150)
+            if err == _("Cancelled.") then return nil, nil, true end
+            if err then
+                errors[#errors + 1] = err
+            elseif code ~= 200 or not resp or not resp.releases then
+                errors[#errors + 1] = (resp and (resp.message or resp.error)) or _("Release search failed.")
+            else
+                for _u2, r in ipairs(resp.releases) do all[#all + 1] = r end
+            end
+        end
+        if #all == 0 and #errors > 0 then return nil, table.concat(errors, "; ") end
+        return all
     end,
 }
+
+-- Shelfmark's enabled release sources other than its direct downloads
+-- (Anna's Archive and the like), for ebooks: { "prowlarr", ... }. Asked
+-- once a session; nil when Shelfmark doesn't say (then all are searched).
+function Bookbridge:shelfmarkOtherSources()
+    if self._sm_sources ~= nil then return self._sm_sources or nil end
+    local resp, code = self:apiRequest("GET", "/api/release-sources", nil, _("Asking Shelfmark..."), 10, 20)
+    local out
+    if code == 200 and type(resp) == "table" then
+        out = {}
+        for _unused, s in ipairs(resp) do
+            local types = type(s) == "table" and type(s.supported_content_types) == "table" and s.supported_content_types or { "ebook" }
+            local ebooks = false
+            for _u2, t in ipairs(types) do if t == "ebook" then ebooks = true end end
+            if type(s) == "table" and s.enabled == true and type(s.name) == "string" and s.name ~= "direct_download" and ebooks then
+                out[#out + 1] = s.name
+            end
+        end
+    end
+    self._sm_sources = out or false
+    return out
+end
 
 -- Enabled sources, in the chosen order (unknown ids dropped, new ones
 -- appended, so an old setting keeps working after a source is added).

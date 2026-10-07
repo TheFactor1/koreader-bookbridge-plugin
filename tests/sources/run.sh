@@ -321,6 +321,46 @@ do
     b6._status_checks = { at = os.time(), annas = { state = "token" } }
     ck(b6:annasState().label == "Key refused", "annasState: a refused key says so")
 end
+-- 4e. Anna's Archive asked by Bookbridge itself: Shelfmark isn't made to
+-- search it again (its route starts a headless browser for a bot check:
+-- 25 of 29 s on Matt's Kindle) -- its other release sources, one by one
+do
+    local PICK = { title = "Tomorrow", provider = "hardcover", provider_id = "479910" }
+    local function stub(b, sources)
+        b.asked = {}
+        b.apiRequest = function(self, method, path, body, text, block, total)
+            self.asked[#self.asked + 1] = { path = path, body = body, text = text, block = block, total = total }
+            if path == "/api/release-sources" then
+                if sources == "fail" then return nil, 500 end
+                return sources, 200
+            end
+            return { releases = { { title = path:match("source=(%w+)") or "all" } } }, 200
+        end
+    end
+    local SOURCES = { { name = "direct_download", enabled = true, supported_content_types = { "ebook", "audiobook" } },
+        { name = "prowlarr", enabled = true, supported_content_types = { "ebook", "audiobook" } },
+        { name = "irc", enabled = false }, { name = "audiobookbay", enabled = true, supported_content_types = { "audiobook" } } }
+    local b7 = bb({ server_url = "http://s", annas_download_key = "k" }); stub(b7, SOURCES)
+    local got = SRC.DEF.shelfmark.search(b7, "Tomorrow", PICK)
+    local paths = {}
+    for _, a in ipairs(b7.asked) do paths[#paths + 1] = a.path end
+    ck(#b7.asked == 2 and paths[1] == "/api/release-sources" and paths[2]:find("source=prowlarr", 1, true), "Anna's set up here: Shelfmark asked for Prowlarr only (" .. table.concat(paths, " | ") .. ")")
+    ck(got and #got == 1 and got[1].title == "prowlarr", "...and its results come back")
+    ck(b7.asked[2].body == nil and type(b7.asked[2].text) == "string" and b7.asked[2].block == 30 and b7.asked[2].total == 150,
+        "the request's message and timeouts in their places (the message was passed as the body)")
+    SRC.DEF.shelfmark.search(b7, "Tomorrow", PICK)
+    ck(#b7.asked == 3, "Shelfmark's source list asked once a session")
+    local b8 = bb({ server_url = "http://s" }); stub(b8, SOURCES)       -- no Anna's here
+    SRC.DEF.shelfmark.search(b8, "Tomorrow", PICK)
+    ck(#b8.asked == 1 and not b8.asked[1].path:find("source=", 1, true), "Anna's not set up here: Shelfmark searches all its sources")
+    local b9 = bb({ server_url = "http://s", annas_download_key = "k" }); stub(b9, "fail")
+    SRC.DEF.shelfmark.search(b9, "Tomorrow", PICK)
+    ck(#b9.asked == 2 and not b9.asked[2].path:find("source=", 1, true), "Shelfmark doesn't list its sources: all of them, as before")
+    local b10 = bb({ server_url = "http://s", annas_download_key = "k" }); stub(b10, { SOURCES[1] })
+    local _r, _e, _c, skipped = SRC.DEF.shelfmark.search(b10, "Tomorrow", PICK)
+    ck(skipped == true and #b10.asked == 1, "Shelfmark's only source is Anna's: it sits out (not named as searched)")
+end
+
 print(string.format("=== %d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
 LUA
