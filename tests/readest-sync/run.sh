@@ -21,6 +21,8 @@ head -c 2000 /dev/urandom > "$W/lib/sub/nested.pdf"
 head -c 10 /dev/urandom > "$W/lib/sub/deeper.sdr/metadata.epub"
 head -c 10 /dev/urandom > "$W/lib/partial.epub.downloading"
 head -c 10 /dev/urandom > "$W/lib/notes.txt.unknown"
+mkdir -p "$W/lib/dictionaries"; head -c 2000 /dev/urandom > "$W/lib/dictionaries/oxford.epub"
+head -c 2000 /dev/urandom > "$W/lib/Kindle book_EBOK.epub"
 cd "$KDIR" || exit 1
 W="$W" ./luajit - <<'LUA'
 package.path = "frontend/?.lua;common/?.lua;" .. package.path
@@ -39,6 +41,7 @@ local Q = {}   -- scheduled functions
 UIManager = { show = function(_s, w) SHOWN[#SHOWN + 1] = w end, scheduleIn = function(_s, _d, f) Q[#Q + 1] = f end,
     broadcastEvent = function() end }
 local function drain() local n = 0 while #Q > 0 and n < 200 do n = n + 1; table.remove(Q, 1)() end end
+local CALLS = {}
 local ONLINE = true
 package.loaded["ui/network/manager"] = { isOnline = function() return ONLINE end }
 package.loaded["library.exts"] = { EPUB = "epub", PDF = "pdf" }
@@ -46,12 +49,16 @@ package.loaded["util"] = { partialMD5 = function(path) return "md5:" .. path:mat
 package.loaded["readest_syncauth"] = { stub = true }
 -- Readest's upload: records, then answers as scripted
 local UP = { calls = {}, fail_from = nil, status = nil }
-package.loaded["library.syncbooks"] = { uploadAndRecord = function(row, opts, cb)
+local LIST = { calls = 0, ok = true }
+package.loaded["library.syncbooks"] = { syncBooks = function(opts, mode, cb) LIST.calls = LIST.calls + 1; CALLS[#CALLS + 1] = "books:" .. mode; cb(LIST.ok, LIST.ok and nil or "offline") end,
+  uploadAndRecord = function(row, opts, cb)
     UP.calls[#UP.calls + 1] = row
-    if UP.fail_from and #UP.calls >= UP.fail_from then return cb(false, "Insufficient storage quota", UP.status or 403) end
+    if UP.fail_from and #UP.calls >= UP.fail_from then return cb(false, UP.msg or "Insufficient storage quota", UP.status or 403) end
     row.uploaded_at = 1; opts.store.rows[row.hash] = row
     cb(true)
 end }
+local READING = false
+package.loaded["apps/reader/readerui"] = setmetatable({}, { __index = function(_t, k) if k == "instance" then return READING and {} or nil end end })
 local DQ = { started = {}, running = false }
 package.loaded["library.downloadqueue"] = { isRunning = function() return DQ.running end,
     start = function(books, opts) DQ.started[#DQ.started + 1] = { books = books, opts = opts } end }
@@ -59,10 +66,9 @@ local function store(rows)
     local st = { rows = rows or {} }
     function st:_getRowRaw(h) return self.rows[h] end
     function st:upsertBook(r) local e = self.rows[r.hash] or {}; for k, v in pairs(r) do if k ~= "_clear_fields" then e[k] = v end end; self.rows[r.hash] = e end
-    function st:listCloudOnlyBooks() local out = {} for _, r in pairs(self.rows) do if r.cloud_only then out[#out + 1] = r end end return out end
+    function st:listCloudOnlyBooks() local out = {} for _, r in pairs(self.rows) do if r.cloud_only and r.local_present ~= 1 then out[#out + 1] = r end end return out end
     return st
 end
-local CALLS = {}
 local function readest(st, settings)
     local rs = { settings = settings or { access_token = "t", user_id = "u", auto_sync = true }, path = "/rp", st = st }
     function rs:pushBookStats() CALLS[#CALLS + 1] = "push" end
@@ -83,7 +89,7 @@ local function bb(t)
     t.saveAllSettings = function(self) self.saved = (self.saved or 0) + 1 end
     return setmetatable(t, { __index = Bookbridge })
 end
-local function reset() CALLS, SHOWN, LOG, Q = {}, {}, {}, {}; UP.calls = {}; DQ.started = {}; SYNC.last = 0; SYNC.uploading = false end
+local function reset() for k in pairs(CALLS) do CALLS[k] = nil end; SHOWN, LOG, Q = {}, {}, {}; UP.calls = {}; UP.msg = nil; DQ.started = {}; SYNC.last = 0; SYNC.uploading = false; READING = false; LIST.ok = true end
 
 -- the scan: book files four levels down; not .sdr, partials, hidden or unknown
 local found = SYNC.scan(W .. "/lib")
@@ -91,6 +97,7 @@ local names = {}
 for _, f in ipairs(found) do names[f.path:match("([^/]+)$")] = f.format end
 ck(names["book-a.epub"] == "EPUB" and names["nested.pdf"] == "PDF", "scan: books, in subfolders too, with their format")
 ck(not names["metadata.epub"] and not names["partial.epub.downloading"] and not names["notes.txt.unknown"], "scan: not .sdr folders, partial downloads or unknown files")
+ck(not names["oxford.epub"] and not names["Kindle book_EBOK.epub"], "scan: not a Kindle's dictionaries, nor Amazon purchases (DRM)")
 
 -- 1. a run: statistics up, then down, then the cloud list
 reset()
@@ -116,6 +123,8 @@ ck(SHOWN[#SHOWN] and SHOWN[#SHOWN].text:find("3 book%(s%) uploaded"), "Sync now 
 reset(); SYNC.last = os.time()
 b:syncNow("sleep")
 ck(#CALLS == 1 and CALLS[1] == "push" and #Q == 0, "before sleep: statistics up only, even right after a run")
+reset(); b:syncNow("sleep"); b:syncNow("wake")
+ck(CALLS[2] == "push" and CALLS[3] == "pull", "a wake right after the sleep push still syncs (the push doesn't start the 10-minute wait)")
 
 -- 4. offline / not signed in / auto sync off: nothing, and Sync now says why
 reset(); ONLINE = false
@@ -137,9 +146,20 @@ ck(#CALLS == 0 and SHOWN[1] and SHOWN[1].text:find("isn't installed"), "no Reade
 
 -- 5. never uploads while a book is open
 reset()
-local reading = bb({ ui = { readest = readest(store()), document = { file = "x" } } })
-reading:syncNow("ledger"); drain()
-ck(#CALLS == 3 and #UP.calls == 0, "a book open: statistics and list sync, no uploads")
+READING = true
+local reading = bb({ ui = { readest = readest(store()) } })   -- (the file browser's instance, with a book open on top)
+reading:syncNow("manual", true); drain()
+ck(#CALLS == 3 and #UP.calls == 0, "a book open (asked from the file browser's instance): statistics and list sync, no uploads")
+ck(SHOWN[#SHOWN] and SHOWN[#SHOWN].text:find("back on the home screen"), "...and Sync now says the books wait for the home screen")
+READING = false
+-- a book opened in the middle of an upload batch: the rest wait
+reset()
+local mid = bb({ ui = { readest = readest(store()) } })
+mid:syncNow("ledger")
+table.remove(Q, 1)()            -- the list lands -> passes
+table.remove(Q, 1)()            -- first upload
+READING = true; drain(); READING = false
+ck(#UP.calls == 1 and not SYNC.uploading, "a book opened mid-batch: the uploads stop after the current one")
 
 -- 6. storage full: stops, says so once, waits a day
 reset(); UP.fail_from = 2
@@ -152,6 +172,37 @@ ck(#UP.calls == 0, "...and doesn't try again within the day")
 full.readest_quota_full_at = os.time() - 25 * 3600
 reset(); full:syncNow("manual", true); drain()
 ck(#UP.calls > 0, "...a day later it tries again")
+
+reset(); UP.fail_from = 1; UP.msg = "book upload failed: 403"
+local skew = bb({ ui = { readest = readest(store()) } })
+skew:syncNow("manual", true); drain()
+ck(not skew.readest_quota_full_at and #UP.calls == SYNC.UPLOAD_BATCH, "a refused upload link (403, not quota) isn't 'storage full'")
+UP.fail_from = nil
+
+-- deleted in the cloud: never uploaded again
+reset()
+local gone = {}
+for _, f in ipairs(SYNC.scan(W .. "/lib")) do
+    local h = SYNC.hashOf(f.path); gone[h] = { hash = h, title = "x", uploaded_at = 1, deleted_at = 5, cloud_present = 0 }
+end
+bb({ ui = { readest = readest(store(gone)) } }):syncNow("manual", true); drain()
+ck(#UP.calls == 0, "books deleted from the cloud on another device aren't uploaded (or undeleted) again")
+
+-- already here: a cloud book with the same checksum isn't downloaded
+reset()
+local first = SYNC.scan(W .. "/lib")[1]
+local h1 = SYNC.hashOf(first.path)
+local dupe = { [h1] = { hash = h1, title = "Same book", cloud_only = true, cloud_present = 1, uploaded_at = 1, progress_lib = "[50,300]", updated_at = os.time() * 1000 } }
+local st9 = store(dupe)
+bb({ ui = { readest = readest(st9) }, readest_library_upload = "off" }):syncNow("manual", true); drain()
+ck(#DQ.started == 0 and st9.rows[h1].local_present == 1 and st9.rows[h1].file_path == first.path, "a cloud book already on this device: marked as here, not downloaded again")
+
+-- the list must land before the file passes
+reset(); LIST.ok = true
+local order = bb({ ui = { readest = readest(store()) } })
+order:syncNow("ledger")
+ck(#UP.calls == 0 and #Q == 1, "nothing is uploaded before Readest's cloud list has come back")
+drain()
 
 -- 7. upload choices
 reset()
@@ -172,7 +223,7 @@ local rs8 = readest(store({ r1 = rows.reading, r2 = rows.done, r3 = rows.untouch
 bb({ ui = { readest = rs8 }, readest_library_upload = "off" }):syncNow("manual", true); drain()
 ck(#DQ.started == 1 and #DQ.started[1].books == 1 and DQ.started[1].books[1].hash == "r1",
     "downloads: only the book partway through on another device lately (not finished, unopened, stale or given up)")
-ck(rs8.settings.library_download_dir == W .. "/lib", "...into this device's library folder")
+ck(DQ.started[1].opts.settings.library_download_dir == nil, "...Readest's own download folder setting is left as it was")
 reset(); DQ.running = true
 bb({ ui = { readest = rs8 }, readest_library_upload = "off" }):syncNow("manual", true); drain()
 ck(#DQ.started == 0, "...not queued again while a download is running")

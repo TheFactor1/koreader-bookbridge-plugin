@@ -4,6 +4,30 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-07 — v0.9.1
+
+Bug fixes from a review of v0.9.0.
+
+- **Fixed**: searching your own book server stopped silently, and
+  **Library** could close KOReader when the download folder was missing.
+  Both came from a name used before it was defined further down the file;
+  a new check (`tests/audit-globals.sh`, part of `tests/run-all.sh`) now
+  fails the build on any such slip.
+- **Fixed**: after a companion plugin updated itself, the "restart to
+  finish" prompt didn't appear.
+- **Fixed** (Readest sync): books no longer upload while you're reading
+  (it looked at the wrong screen to tell); the statistics push before
+  sleep no longer stops the sync on wake; a book you deleted from the
+  Readest cloud on another device isn't uploaded again; dictionaries and
+  Amazon purchases (DRM) aren't uploaded; a cloud book that's already on
+  this device isn't downloaded a second time; Readest's own download
+  folder setting is left as you set it; "storage full" only when Readest
+  says so; uploads wait for the cloud list to arrive; an upload that fails
+  part-way no longer blocks later syncs; books over 40 MB are skipped.
+- **Fixed**: after installing Bookbridge, the Readest sign-in sometimes
+  didn't appear after the first restart (Readest hadn't loaded yet); it
+  now waits for Readest.
+
 ## 2026-10-06 — v0.9.0, build 9c51bcd
 
 Your devices in step, through Readest.

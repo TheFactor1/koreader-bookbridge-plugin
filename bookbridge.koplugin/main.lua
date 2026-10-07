@@ -58,6 +58,11 @@ local socketutil = require("socketutil")
 local _ = require("gettext")
 local T = ffiUtil.template
 
+-- The companions (CO) and sources (SRC) blocks are filled in further down,
+-- but functions above them use them too: declared here, so those functions
+-- see these locals and not a nil global (tests/audit-globals.sh checks).
+local CO, SRC
+
 local Bookbridge = WidgetContainer:extend{
     name = "bookbridge",
     settings_file = DataStorage:getSettingsDir() .. "/shelfmark.lua",
@@ -4482,7 +4487,7 @@ end
 -- API reports for it, unpacked beside the live folder, every Lua file
 -- parse-checked, then swapped in; the previous folder stays as .prev. One
 -- new top-level local (CO) for all of it: LuaJIT allows 200 in this file.
-local CO = {}
+CO = {}
 CO.DEF = {
     zlibrary = {
         label = "Z-Library", folder = "zlibrary.koplugin", menu_key = "zlibrary_main",
@@ -8907,7 +8912,8 @@ function Bookbridge:installCompanion(id, opts)
         return nil
     end
     self._companion_busy = id
-    local what, ok_run, run_err = nil, pcall(function() what = self:installCompanionNow(id, opts, state) end)
+    local what
+    local ok_run, run_err = pcall(function() what = self:installCompanionNow(id, opts, state) end)
     self._companion_busy = nil
     if not ok_run then error(run_err, 0) end
     return what
@@ -10779,7 +10785,7 @@ end
 --   fetchUrl(self, release)    -> url | nil, err | nil, nil, true (cancelled)   (sources that download)
 --   download(self, url, path)  -> ok, err   (optional: a source that must fetch its own way)
 --   tempPath(path)             -> the file to watch grow while download runs (optional)
-local SRC = {}
+SRC = {}
 SRC.ALL = { "zlibrary", "annasarchive", "shelfmark" }
 SRC.DEF = {}
 
@@ -14293,7 +14299,7 @@ end
 local SYNC = {
     MIN_GAP = 10 * 60,              -- between automatic runs
     UPLOAD_BATCH = 5,               -- books per run (a big library trickles up)
-    UPLOAD_MAX_BYTES = 60 * 1024 * 1024,
+    UPLOAD_MAX_BYTES = 40 * 1024 * 1024,
     QUOTA_BACKOFF = 24 * 3600,      -- after "storage full", try again a day later
     READING_WINDOW = 30 * 86400,    -- "being read": touched within this
     last = 0,                       -- the last automatic run (any instance)
@@ -14332,8 +14338,12 @@ function SYNC.scan(dir, out, depth)
             local path = dir .. "/" .. name
             local mode = lfs.attributes(path, "mode")
             if mode == "directory" then
-                if not name:match("%.sdr$") then SYNC.scan(path, out, depth + 1) end
-            elseif mode == "file" and not name:match("%.downloading$") and not name:match("%.part$") then
+                -- (a Kindle's dictionaries are no book of yours)
+                if not name:match("%.sdr$") and not SYNC.SKIP_DIRS[name:lower()] then SYNC.scan(path, out, depth + 1) end
+            elseif mode == "file" and not name:match("%.downloading$") and not name:match("%.part$")
+                    -- Amazon purchases and personal documents: DRM, no use anywhere else
+                    and not name:match("_EBOK[%.%-_]") and not name:match("_EBSP[%.%-_]") and not name:match("_PDOC[%.%-_]")
+                    and not name:match("_EBDOC[%.%-_]") then
                 local fmt = by_ext[(name:match("%.([^.]+)$") or ""):lower()]
                 if fmt then out[#out + 1] = { path = path, format = fmt } end
             end
@@ -14353,6 +14363,29 @@ function SYNC.hashOf(path)
     if not ok or not h then return nil end
     SYNC.hashes[path] = { size = attr.size, mtime = attr.modification, hash = h }
     return h, attr.size
+end
+
+SYNC.SKIP_DIRS = { dictionaries = true, dictionary = true, dicts = true, fonts = true }
+
+-- Is a book open on this device? (Any Bookbridge instance can ask: the
+-- file browser's stays alive in callbacks after a book opens.)
+function SYNC.reading()
+    local ok, ReaderUI = pcall(require, "apps/reader/readerui")
+    return ok and ReaderUI and ReaderUI.instance ~= nil or false
+end
+
+-- A few settings written straight into the shared settings, not the whole
+-- set from whichever instance a callback captured (that would put back
+-- older values another instance has since changed).
+function SYNC.save(bb, keys)
+    for k, v in pairs(keys) do bb[k] = v end
+    local ok = pcall(function()
+        local data = bb.sm_settings and bb.sm_settings.data and bb.sm_settings.data.shelfmark
+        assert(data, "no settings table")
+        for k, v in pairs(keys) do data[k] = v end
+        bb.sm_settings:flush()
+    end)
+    if not ok then pcall(bb.saveAllSettings, bb) end
 end
 
 -- Is this cloud book being read on another device? Started, not finished,
@@ -14467,10 +14500,18 @@ end
 
 -- After Bookbridge installed Readest and KOReader restarted: straight on
 -- to signing in (once; Later leaves it to the status screen and the Ledger).
-function Bookbridge:readestOnboard()
+function Bookbridge:readestOnboard(tries)
     if not self.readest_welcome_pending then return end
     local st = self:readestState()
-    if not st.loaded then return end
+    if not st.loaded then
+        -- (on its first start after the install Readest can take a few
+        -- seconds to be there; seen once in a fresh sandbox)
+        tries = (tries or 0) + 1
+        if tries < 10 then UIManager:scheduleIn(2, function() self:readestOnboard(tries) end) end
+        return
+    end
+    -- (not over a book, and not twice: the next start won't ask again)
+    if self.ui and self.ui.document then return end
     if st.signed_in then return self:readestWelcome() end
     self.readest_welcome_pending = nil
     self:saveAllSettings()
@@ -14496,8 +14537,8 @@ function Bookbridge:syncNow(reason, interactive)
         if interactive then UIManager:show(InfoMessage:new{ text = _("Connect to Wi-Fi to sync with your other devices.") }) end
         return false
     end
+    -- (the sleep push doesn't count: a wake right after it must still pull)
     if not interactive and reason ~= "sleep" and os.time() - SYNC.last < SYNC.MIN_GAP then return false end
-    SYNC.last = os.time()
     debugLog("[sync] " .. tostring(reason) .. ": statistics up")
     -- the open book's page turns are still in memory: out to the database first
     local reader = self.ui and self.ui.document and self.ui.statistics
@@ -14507,25 +14548,65 @@ function Bookbridge:syncNow(reason, interactive)
     local ok, err = pcall(rs.pushBookStats, rs, false)
     if not ok then debugLog("[sync] statistics push failed: " .. tostring(err)) end
     if reason == "sleep" then return true end
+    SYNC.last = os.time()
     debugLog("[sync] " .. tostring(reason) .. ": statistics and library down")
     ok, err = pcall(rs.pullBookStats, rs, false)
     if not ok then debugLog("[sync] statistics pull failed: " .. tostring(err)) end
-    ok, err = pcall(rs.syncBooksLibrary, rs, "both", false)
-    if not ok then debugLog("[sync] library list failed: " .. tostring(err)) end
-    self.readest_last_sync = os.time()
-    self:saveAllSettings()
-    -- the book files after the list has landed; never while a book is open
-    -- (an upload holds the screen for a moment)
-    UIManager:scheduleIn(2, function() self:readestLibraryPasses(rs, interactive) end)
+    SYNC.save(self, { readest_last_sync = os.time() })
+    -- the cloud book list first (Readest fetches it in the background); the
+    -- book files once it has landed, so nothing in the cloud is uploaded or
+    -- downloaded twice
+    local function passes()
+        local okp, perr = pcall(self.readestLibraryPasses, self, rs, interactive)
+        if not okp then
+            SYNC.uploading = false
+            debugLog("[sync] library pass failed: " .. tostring(perr))
+        end
+    end
+    local store = rs.getLibraryStore and rs:getLibraryStore()
+    local okb, books = pcall(require, "library.syncbooks")
+    if store and okb and type(books) == "table" and books.syncBooks then
+        local okl, lerr = pcall(books.syncBooks, { sync_auth = require("readest_syncauth"), sync_path = rs.path,
+            settings = rs.settings, store = store }, "both", function(success, msg)
+                if not success then debugLog("[sync] library list: " .. tostring(msg)) end
+                UIManager:scheduleIn(0.5, passes)
+            end)
+        if not okl then debugLog("[sync] library list failed: " .. tostring(lerr)); UIManager:scheduleIn(2, passes) end
+    else
+        pcall(rs.syncBooksLibrary, rs, "both", false)
+        UIManager:scheduleIn(5, passes)
+    end
     return true
 end
 
 function Bookbridge:readestLibraryPasses(rs, interactive)
-    if self.ui and self.ui.document then return end
+    local function tell(text)
+        if interactive then UIManager:show(InfoMessage:new{ text = text, timeout = 4 }) end
+    end
+    if SYNC.reading() then
+        -- (an upload holds the screen for a moment: not while you read)
+        return tell(_("In step with your other devices. Books go up and down once you're back on the home screen."))
+    end
     local store = rs.getLibraryStore and rs:getLibraryStore()
     if not store then return end
     local now = os.time()
     local up, down = 0, 0
+
+    -- this device's books, by checksum (also tells Readest which cloud
+    -- books are already here, so they aren't downloaded again)
+    local files = SYNC.scan(self:libraryDir())
+    local here = {}
+    for _unused, f in ipairs(files) do
+        local hash, size = SYNC.hashOf(f.path)
+        if hash then
+            f.hash, f.size = hash, size
+            here[hash] = f
+            local row = store:_getRowRaw(hash)
+            if row and row.cloud_present == 1 and row.local_present ~= 1 and not row.deleted_at then
+                pcall(function() store:upsertBook({ hash = hash, title = row.title, local_present = 1, file_path = f.path }) end)
+            end
+        end
+    end
 
     -- down: books being read on another device, into the library folder
     if self.readest_download ~= "off" then
@@ -14534,97 +14615,97 @@ function Bookbridge:readestLibraryPasses(rs, interactive)
             local picks = {}
             local okl, rows = pcall(function() return store:listCloudOnlyBooks() end)
             for _unused, row in ipairs(okl and rows or {}) do
-                if SYNC.readingElsewhere(row, now) then picks[#picks + 1] = row end
+                if not here[row.hash] and SYNC.readingElsewhere(row, now) then picks[#picks + 1] = row end
             end
             if #picks > 0 then
-                if not rs.settings.library_download_dir or rs.settings.library_download_dir == "" then
-                    rs.settings.library_download_dir = self:libraryDir()
-                end
+                -- into Bookbridge's folder for this run only; Readest's own
+                -- download folder setting is put back as it was
+                local before = rs.settings.library_download_dir
+                rs.settings.library_download_dir = self:libraryDir()
                 debugLog("[sync] downloading " .. #picks .. " book(s) being read elsewhere")
                 pcall(queue.start, picks, { settings = rs.settings, sync_auth = require("readest_syncauth"),
                     sync_path = rs.path, store = store })
+                rs.settings.library_download_dir = before
                 down = #picks
             end
         end
     end
 
-    -- up: every book in the library folder that isn't in the cloud yet
-    if self.readest_library_upload == "all" and not SYNC.uploading then
-        if self.readest_quota_full_at and now - self.readest_quota_full_at < SYNC.QUOTA_BACKOFF then
-            debugLog("[sync] Readest storage was full; next try after a day")
-        else
-            local todo = {}
-            for _unused, f in ipairs(SYNC.scan(self:libraryDir())) do
-                if #todo >= SYNC.UPLOAD_BATCH then break end
-                local hash, size = SYNC.hashOf(f.path)
-                if hash and size and size <= SYNC.UPLOAD_MAX_BYTES then
-                    local row = store:_getRowRaw(hash)
-                    if not (row and row.uploaded_at and not row.deleted_at) then
-                        todo[#todo + 1] = { path = f.path, format = f.format, hash = hash, existing = row }
-                    end
-                end
-            end
-            if #todo > 0 then
-                SYNC.uploading = true
-                local i = 0
-                local function nextOne()
-                    i = i + 1
-                    local f = todo[i]
-                    -- (stop when a book opens, Wi-Fi goes, or the batch is done)
-                    if not f or (self.ui and self.ui.document) or not SYNC.online() then
-                        SYNC.uploading = false
-                        if i > 1 then debugLog("[sync] uploaded " .. tostring(up) .. " book(s)") end
-                        if interactive then
-                            UIManager:show(InfoMessage:new{ text = T(_("In step with your other devices. %1 book(s) uploaded, %2 downloading."), up, down), timeout = 4 })
-                        end
-                        return
-                    end
-                    local title = (f.existing and f.existing.title and f.existing.title ~= "" and f.existing.title)
-                        or (f.path:match("([^/]+)$") or f.path):gsub("%.[^.]+$", "")
-                    local t_ms = math.floor(os.time() * 1000)
-                    local okr = pcall(function()
-                        store:upsertBook({
-                            hash = f.hash, title = title, format = f.format, file_path = f.path, local_present = 1,
-                            created_at = (f.existing and f.existing.created_at) or t_ms, updated_at = t_ms,
-                            _clear_fields = { "deleted_at" },
-                        })
-                    end)
-                    local row = okr and store:_getRowRaw(f.hash)
-                    if not row then return UIManager:scheduleIn(0.5, nextOne) end
-                    local okup, uerr = pcall(require("library.syncbooks").uploadAndRecord, row, {
-                        sync_auth = require("readest_syncauth"), sync_path = rs.path, settings = rs.settings, store = store,
-                        covers_dir = DataStorage:getSettingsDir() .. "/readest_covers",
-                    }, function(success, msg, status)
-                        if success then
-                            up = up + 1
-                            debugLog("[sync] uploaded " .. tostring(title))
-                            return UIManager:scheduleIn(0.5, nextOne)
-                        end
-                        debugLog("[sync] upload of " .. tostring(title) .. " failed: " .. tostring(msg or status))
-                        if status == 403 or tostring(msg):lower():find("quota") or tostring(msg):lower():find("storage") then
-                            self.readest_quota_full_at = os.time()
-                            self:saveAllSettings()
-                            SYNC.uploading = false
-                            UIManager:show(InfoMessage:new{
-                                text = _("Readest's cloud storage is full (the free plan holds 500 MB), so the rest of your books stay on this device. Bookbridge tries again tomorrow.\n\nReading progress and statistics keep syncing."),
-                            })
-                            return
-                        end
-                        return UIManager:scheduleIn(0.5, nextOne)
-                    end)
-                    if not okup then
-                        debugLog("[sync] upload error: " .. tostring(uerr))
-                        return UIManager:scheduleIn(0.5, nextOne)
-                    end
-                end
-                UIManager:scheduleIn(0.5, nextOne)
-                return
+    -- up: every book in the library folder that isn't in the cloud (and
+    -- never one deleted from it: that would bring it back everywhere)
+    if self.readest_library_upload ~= "all" or SYNC.uploading then
+        return tell(T(_("In step with your other devices. %1 book(s) uploaded, %2 downloading."), up, down))
+    end
+    if self.readest_quota_full_at and now - self.readest_quota_full_at < SYNC.QUOTA_BACKOFF then
+        debugLog("[sync] Readest storage was full; next try after a day")
+        return tell(T(_("In step with your other devices. %1 book(s) uploaded, %2 downloading."), up, down))
+    end
+    local todo = {}
+    for _unused, f in ipairs(files) do
+        if #todo >= SYNC.UPLOAD_BATCH then break end
+        if f.hash and f.size and f.size <= SYNC.UPLOAD_MAX_BYTES then
+            local row = store:_getRowRaw(f.hash)
+            if not row or (not row.uploaded_at and not row.deleted_at) then
+                todo[#todo + 1] = { path = f.path, format = f.format, hash = f.hash, existing = row }
             end
         end
     end
-    if interactive then
-        UIManager:show(InfoMessage:new{ text = T(_("In step with your other devices. %1 book(s) uploaded, %2 downloading."), up, down), timeout = 4 })
+    if #todo == 0 then
+        return tell(T(_("In step with your other devices. %1 book(s) uploaded, %2 downloading."), up, down))
     end
+    SYNC.uploading = true
+    local i = 0
+    local nextOne
+    local function step()
+        i = i + 1
+        local f = todo[i]
+        -- (stop when a book opens, Wi-Fi goes, or the batch is done)
+        if not f or SYNC.reading() or not SYNC.online() then
+            SYNC.uploading = false
+            if up > 0 then debugLog("[sync] uploaded " .. tostring(up) .. " book(s)") end
+            return tell(T(_("In step with your other devices. %1 book(s) uploaded, %2 downloading."), up, down))
+        end
+        local title = (f.existing and f.existing.title and f.existing.title ~= "" and f.existing.title)
+            or (f.path:match("([^/]+)$") or f.path):gsub("%.[^.]+$", "")
+        local t_ms = math.floor(os.time() * 1000)
+        store:upsertBook({
+            hash = f.hash, title = title, format = f.format, file_path = f.path, local_present = 1,
+            created_at = (f.existing and f.existing.created_at) or t_ms, updated_at = t_ms,
+        })
+        local row = store:_getRowRaw(f.hash)
+        if not row then return UIManager:scheduleIn(0.5, nextOne) end
+        require("library.syncbooks").uploadAndRecord(row, {
+            sync_auth = require("readest_syncauth"), sync_path = rs.path, settings = rs.settings, store = store,
+            covers_dir = DataStorage:getSettingsDir() .. "/readest_covers",
+        }, function(success, msg, status)
+            if success then
+                up = up + 1
+                debugLog("[sync] uploaded " .. tostring(title))
+                return UIManager:scheduleIn(0.5, nextOne)
+            end
+            debugLog("[sync] upload of " .. tostring(title) .. " failed: " .. tostring(msg or status))
+            -- (Readest's quota answer; a refused upload link is something else)
+            if tostring(msg):lower():find("quota", 1, true) then
+                SYNC.save(self, { readest_quota_full_at = os.time() })
+                SYNC.uploading = false
+                UIManager:show(InfoMessage:new{
+                    text = _("Readest's cloud storage is full (the free plan holds 500 MB), so the rest of your books stay on this device. Bookbridge tries again tomorrow.\n\nReading progress and statistics keep syncing."),
+                })
+                return
+            end
+            return UIManager:scheduleIn(0.5, nextOne)
+        end)
+    end
+    -- every step guarded: a scheduled task that throws takes KOReader down,
+    -- and a stuck "uploading" would stop uploads until a restart
+    nextOne = function()
+        local ok, err = pcall(step)
+        if not ok then
+            SYNC.uploading = false
+            debugLog("[sync] upload error: " .. tostring(err))
+        end
+    end
+    UIManager:scheduleIn(0.5, nextOne)
 end
 
 -- The Readest plugin saves the reading position 5 s after a page turn (at
