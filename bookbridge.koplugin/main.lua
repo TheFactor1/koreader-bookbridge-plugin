@@ -1225,6 +1225,13 @@ local function doRawRequest(server_url, cookie, method, path, body, socks5_proxy
         debugLog("<- timed out: " .. tostring(code))
         return nil, nil, cookie, _("Request to Shelfmark timed out.")
     end
+    -- LuaSocket reports a failed connection (refused, no route, DNS) as
+    -- (nil, "message"), not by raising, so it lands here as a string where
+    -- a status number belongs. Nothing was said by the server.
+    if type(code) ~= "number" then
+        debugLog("<- connection error: " .. tostring(code))
+        return nil, nil, cookie, _("Couldn't reach the Shelfmark server -- are you on your home network?")
+    end
     debugLog("<- HTTP " .. tostring(code))
 
     local new_cookie = extractSessionCookie(resp_headers) or cookie
@@ -1246,14 +1253,15 @@ end
 
 -- Returns (true, cookie) on success, or (false, nil, error_string).
 local function doLogin(server_url, username, password, socks5_proxy)
-    local resp, code, cookie = doRawRequest(server_url, nil, "POST", "/api/auth/login", {
+    local resp, code, cookie, raw_err = doRawRequest(server_url, nil, "POST", "/api/auth/login", {
         username = username,
         password = password,
     }, socks5_proxy)
     if code == 200 and resp and resp.success ~= false then
         return true, cookie
     end
-    local err = resp and resp.error or _("Login failed -- check your Shelfmark username/password in Settings.")
+    -- (not reached at all: say that, not "check your password")
+    local err = resp and resp.error or raw_err or _("Login failed -- check your Shelfmark username/password in Settings.")
     -- The status goes back too: 401 = wrong username/password, 429 = the
     -- account is locked after too many failures. nil = never reached the
     -- server, which says nothing about the credentials.
@@ -1347,6 +1355,12 @@ local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then
         debugLog("[cwa] <- timed out: " .. tostring(code))
         return nil, nil, _("Request to Calibre-Web timed out.")
+    end
+    -- (a refused connection, no route or a DNS failure comes back as a
+    -- message where the status belongs, not as an error)
+    if type(code) ~= "number" then
+        debugLog("[cwa] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach Calibre-Web -- check the Calibre-Web URL in Settings.")
     end
     debugLog("[cwa] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#table.concat(sink_table)))
     if cwa_run_guard and (code == 401 or code == 403 or code == 429) then
@@ -1954,6 +1968,10 @@ local function doAnnasSearch(annas_url, download_key, tld, query, socks5_proxy, 
         debugLog("[annas] <- timed out: " .. tostring(code))
         return nil, nil, _("Anna's Archive search timed out.")
     end
+    if type(code) ~= "number" then   -- (refused, no route, DNS: a message, not a status)
+        debugLog("[annas] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach the Anna's Archive service.")
+    end
     local body = table.concat(sink_table)
     debugLog("[annas] <- HTTP " .. tostring(code) .. ", body length " .. tostring(#body))
     if code ~= 200 then
@@ -2009,7 +2027,7 @@ local function doAnnasMirrorRefresh(annas_url, socks5_proxy, opts)
     end)
     socketutil:reset_timeout()
 
-    if not ok then
+    if not ok or type(code) ~= "number" then   -- (refused, no route, DNS, timeout: a message, not a status)
         debugLog("[annas] <- connection error: " .. tostring(code))
         return nil, nil, _("Couldn't reach the Anna's Archive service.")
     end
@@ -2049,7 +2067,7 @@ local function doAnnasFetchDownloadUrl(annas_url, download_key, tld, md5, socks5
     end)
     socketutil:reset_timeout()
 
-    if not ok then
+    if not ok or type(code) ~= "number" then   -- (refused, no route, DNS, timeout: a message, not a status)
         debugLog("[annas] <- connection error: " .. tostring(code))
         return nil, nil, _("Couldn't reach the Anna's Archive service.")
     end

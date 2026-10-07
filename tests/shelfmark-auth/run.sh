@@ -80,6 +80,11 @@ LOCKED = false
 local k4 = kindle("right"); NETDOWN = true
 k4:checkPendingRequestNotifications()
 ck(not k4:shelfmarkLoginKnownBad(), "Shelfmark unreachable: says nothing about the password, nothing is paused")
+-- ...and what the user is told is that, not "check your password" (it was,
+-- while doLogin dropped doRawRequest's own message)
+local _r6, _c6, err6 = k4:apiRequest("GET", "/api/search?q=x", nil, false)
+ck(tostring(err6):find("Couldn't reach", 1, true) and not tostring(err6):find("password", 1, true),
+  "Shelfmark unreachable: the search says it couldn't be reached, not to check the password")
 NETDOWN = false
 print(string.format("=== %d passed, %d failure(s)", pass, fail))
 os.exit(fail == 0 and 0 or 1)
