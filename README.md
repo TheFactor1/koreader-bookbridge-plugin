@@ -27,7 +27,10 @@ store or hand out any books itself -- each source is someone else's service,
 reached with your own account, and what you download is up to you and the law
 where you live. Pick one or more under **Bookbridge > Settings > Sources**
 (with the Reading Ledger installed, Bookbridge's menu opens from the Ledger's
-**Settings > Books**), in the order you want them asked.
+**Settings > Books**), in the order you want them asked. The first source
+that has the exact book -- its title and author, in your language, as an
+EPUB -- ends the search, and the list offers the others a tap away
+(**Also ask ...**).
 
 | Source | What you need | Where it's set up |
 |---|---|---|
