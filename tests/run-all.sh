@@ -127,6 +127,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  clipboard-retry (no local KOReader)"; skipped="${skipped:+$skipped, }clipboard-retry"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Series from Calibre-Web into KOReader's record of a downloaded book (real DocSettings and crengine)"
+out=$(bash tests/server-metadata/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  server-metadata (no local KOReader)"; skipped="${skipped:+$skipped, }server-metadata"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Devices in step through Readest (statistics up/down, library uploads and downloads, throttle, storage full)"
 out=$(bash tests/readest-sync/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"

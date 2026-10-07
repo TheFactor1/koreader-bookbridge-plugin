@@ -705,7 +705,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.9.6"
+local PLUGIN_VERSION = "0.9.7"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -5384,8 +5384,18 @@ local function parseOpdsEntries(xml)
                 end
             end
         end
+        -- the series (CWA's feed carries it as calibre:series since #1361),
+        -- the year and the summary: what applyServerMetadata puts in
+        -- KOReader's record of a downloaded book
+        local series = entry_xml:match("<calibre:series>(.-)</calibre:series>") or entry_xml:match("<dcterms:isPartOf>(.-)</dcterms:isPartOf>")
+        local series_index = tonumber(entry_xml:match("<calibre:series_index>(.-)</calibre:series_index>") or "")
+        local summary = entry_xml:match('<summary[^>]*>(.-)</summary>')
+        local year = entry_xml:match("<published>(%d%d%d%d)")
         if title and best_href then
-            table.insert(entries, { title = title, author = author, href = best_href, type = best_type, uuid = uuid })
+            table.insert(entries, { title = title, author = author, href = best_href, type = best_type, uuid = uuid,
+                series = series and decodeHtmlEntities(series) or nil, series_index = series_index,
+                description = summary and summary ~= "" and decodeHtmlEntities(summary) or nil,
+                year = year and year ~= "0101" and year or nil })
         end
     end
     return entries
@@ -8552,8 +8562,16 @@ function Bookbridge:refreshBookMetadata(file)
     if not completed then return end
 
     local label = title or require("apps/filemanager/filemanagerutil").splitFileNameType(file)
+    -- (and the series, which a file from the server doesn't carry: see
+    -- applyServerMetadata)
+    local series_added
+    if status == "synced" or status == "unchanged" or status == "untracked" then
+        series_added = self:serverMetadataFor(file, title)
+    end
 
-    if status == "synced" then
+    if series_added and status ~= "synced" then
+        UIManager:show(InfoMessage:new{ text = T(_("Added from Calibre-Web to \"%1\": %2"), label, series_added) })
+    elseif status == "synced" then
         -- Same cache-invalidate-then-repaint pattern as syncLibrary above,
         -- just for the one file instead of a replaced_paths list.
         invalidateBookInfoCache(file)
@@ -8574,6 +8592,31 @@ function Bookbridge:refreshBookMetadata(file)
     else
         UIManager:show(InfoMessage:new{ text = _("Couldn't reach Calibre-Web to check.") })
     end
+end
+
+-- Calibre-Web's entry for a book on this device, found by its title (and
+-- author when the book has one), and its series and summary applied to the
+-- book. -> what was added ("Series #n" or "summary") | nil
+function Bookbridge:serverMetadataFor(file, title)
+    if not self.cwa_url or self.cwa_url == "" then return nil end
+    local DocSettings = require("docsettings")
+    local cf = DocSettings:findCustomMetadataFile(file)
+    local custom = cf and DocSettings.openSettingsFile(cf):readSetting("custom_props") or {}
+    if custom.series and custom.series ~= "" then return nil end   -- (already there)
+    title = title or require("apps/filemanager/filemanagerutil").splitFileNameType(file)
+    local body, code = self:cwaRequest("/opds/search/" .. socketurl.escape(title), false)
+    if code ~= 200 or not body then return nil end
+    local function norm(v) return (tostring(v or ""):lower():gsub("[%p%s]+", " "):gsub("^ ", ""):gsub(" $", "")) end
+    local want = norm(title)
+    for _unused, e in ipairs(parseOpdsEntries(body)) do
+        if norm(e.title) == want and (e.series or e.description) then
+            if self:applyServerMetadata(file, e) then
+                return e.series and (e.series .. (e.series_index and (" #" .. tostring(e.series_index):gsub("%.0+$", "")) or "")) or _("summary")
+            end
+            return nil
+        end
+    end
+    return nil
 end
 
 -- Mirrors syncLibrary's Trapper-subprocess wrapping above.
@@ -9751,6 +9794,63 @@ end
 
 -- caller_menu, when given, is closed here rather than by the caller before
 -- invoking this -- see the identical note on doSearch's own caller_menu.
+-- Calibre-Web's series (and summary) for a book that came from it, put in
+-- KOReader's own record of the book -- custom_metadata.lua beside it, what
+-- Book information > edit writes -- so KOReader, its cover browser and the
+-- Reading Ledger all see it. The file itself is left alone: Calibre-Web's
+-- "embed metadata" is off on purpose (Readest knows a book by its bytes), so
+-- a downloaded book arrived without its series (Matt's Heir to the Empire,
+-- 2026-10-07: "Star Wars: The Thrawn Trilogy" #1 on the server, "N/A" on
+-- the Kindle). Only what the book doesn't say itself, and never over what
+-- was set by hand. -> true when something was added
+function Bookbridge:applyServerMetadata(file, meta)
+    if type(meta) ~= "table" or type(file) ~= "string" then return false end
+    if not (meta.series or meta.description) then return false end
+    local ok, res = pcall(function()
+        local DocSettings = require("docsettings")
+        local cs = DocSettings.openSettingsFile(DocSettings:findCustomMetadataFile(file))
+        local orig = cs:readSetting("doc_props")
+        if not orig then
+            -- (the book's own details, kept for "reset to original": read
+            -- the way Book information does, metadata only)
+            local DocumentRegistry = require("document/documentregistry")
+            local doc = DocumentRegistry:hasProvider(file) and DocumentRegistry:openDocument(file)
+            if not doc then return false end
+            local loaded = not doc.loadDocument or doc:loadDocument(false)
+            orig = loaded and doc:getProps() or nil
+            doc:close()
+            if type(orig) ~= "table" then return false end
+            orig.display_title = nil
+            cs:saveSetting("doc_props", orig)
+        end
+        local custom = cs:readSetting("custom_props") or {}
+        local function blank(v) return v == nil or v == "" or v == "N/A" end
+        local added = false
+        if not blank(meta.series) and blank(custom.series) and blank(orig.series) then
+            custom.series = meta.series
+            if meta.series_index and blank(custom.series_index) then custom.series_index = meta.series_index end
+            added = true
+        end
+        if not blank(meta.description) and blank(custom.description) and blank(orig.description) then
+            custom.description = meta.description
+            added = true
+        end
+        if not added then return false end
+        cs:saveSetting("custom_props", custom)
+        cs:flushCustomMetadata(file)
+        return true
+    end)
+    if not ok then debugLog("[cwa] metadata for " .. tostring(file) .. " failed: " .. tostring(res)) return false end
+    if res then
+        debugLog("[cwa] metadata added to " .. tostring(file) .. (meta.series and (": " .. meta.series .. " #" .. tostring(meta.series_index)) or ""))
+        invalidateBookInfoCache(file)
+        local Event = require("ui/event")
+        UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", file))
+        UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
+    end
+    return res
+end
+
 function Bookbridge:saveCwaEntry(entry, caller_menu)
     if caller_menu then UIManager:close(caller_menu) end
 
@@ -9791,6 +9891,8 @@ function Bookbridge:saveCwaEntry(entry, caller_menu)
     -- invalidateBookInfoCache. Runs on the main process (cwaFileDownload
     -- did its own forking internally and has already returned).
     invalidateBookInfoCache(save_path)
+    -- (the server's series and summary into KOReader's record of it)
+    self:applyServerMetadata(save_path, entry)
 
     registerSyncedBook(entry.uuid, save_path, entry.title)
     -- (straight into it is what you want most of the time; the path is

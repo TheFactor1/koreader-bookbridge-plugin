@@ -4,6 +4,18 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-07 — v0.9.7
+
+- **Series come with books from Calibre-Web**: a book downloaded from your
+  server (Get it, My requests) arrived without its series -- Calibre-Web's
+  "embed metadata" stays off so Readest sees one copy of each book -- so
+  *Heir to the Empire* said "N/A" on the Kindle while the server knew it as
+  *Star Wars: The Thrawn Trilogy* #1. Bookbridge now puts the server's series,
+  number and summary in KOReader's own record of the book (what Book
+  information > edit writes): the file itself is untouched, and nothing set
+  by hand is replaced. For books you already have, **Refresh from
+  Calibre-Web** (long-press the book) adds them.
+
 ## 2026-10-07 — v0.9.6
 
 - **Faster when Z-Library doesn't have the book**: the sources after the
