@@ -27,6 +27,26 @@ Bug fixes from a review of v0.9.0.
 - **Fixed**: after installing Bookbridge, the Readest sign-in sometimes
   didn't appear after the first restart (Readest hadn't loaded yet); it
   now waits for Readest.
+- **Fixed**: a book server that's down no longer reads as a wrong
+  password ("Login failed -- check your username/password"); it says it
+  couldn't be reached. The same for Calibre-Web, Anna's Archive's helper
+  server, GitHub update checks and companion installs while offline.
+- **Fixed**: "Files from your sources" (and the Ledger's "Get it") asked
+  Shelfmark, which can't search by words, and showed its raw error; a
+  plain request isn't offered for those either (Shelfmark needs a book
+  picked in its catalogue).
+- **Changed**: a source that isn't set up (no Anna's key, Z-Library not
+  installed) is mentioned only when nothing was found -- not on every
+  search that found books elsewhere.
+- **Fixed**: with the Reading Ledger installed and not set up yet, its
+  setup is the welcome on first start (it covers Readest, Z-Library and
+  Anna's), not Bookbridge's status screen on top of it.
+- **Fixed**: a companion in another plugins folder (desktop, Android,
+  KOReader's extra plugin paths) showed as "v?" and could be installed a
+  second time.
+- **Changed**: Sources say when Anna's key was rejected; pairing's import
+  summary names the sources and the Ledger choices; messages say where to
+  fix a login ("Bookbridge settings > Connections").
 
 ## 2026-10-06 — v0.9.0, build 9c51bcd
 
