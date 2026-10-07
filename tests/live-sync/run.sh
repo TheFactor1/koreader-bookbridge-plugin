@@ -118,9 +118,33 @@ reg=0; for i in $(seq 1 45); do
   [ "$reg" = 2 ] && break; sleep 2
 done
 
+# CWA's import of an upload can outlast the sync's own wait; the plugin's
+# answer is the next sync, which registers the book once CWA has it -- so the
+# test waits for CWA, then syncs once more, as a reader would.
+# (2026-10-07: on Calibre-Web-NextGen v4.1.43 this failed 5 runs in 6 for a
+# different reason: CWA's ingest ran `calibredb add` for the second upload
+# while the web app was still exporting the first, calibredb refused
+# ("Another calibre program ... is running", exit 1) and the book went to
+# /config/processed_books/failed -- it never imports, so no wait helps.
+# v4.1.45: 3 runs in 3 clean. Run with CWA_VERSION=v4.1.45 until the stack's
+# default moves.)
+cwa=0; for i in $(seq 1 60); do
+  cwa=$(curl -s --max-time 5 -u admin:admin123 http://127.0.0.1:$CWA_PORT/opds/new | grep -c '<entry>')
+  [ "$cwa" = 2 ] && break; sleep 2
+done
+second=""
+if [ "$reg" != 2 ] && [ "$cwa" = 2 ]; then
+  second=" (the one still importing registered by a second sync)"
+  for i in $(seq 1 20); do grep -q "\[sync\] summary" "$SET/shelfmark-debug.log" && break; sleep 1; done
+  curl -s --max-time 8 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$idx/callback/" >/dev/null
+  for i in $(seq 1 45); do
+    reg=$(python3 -c "import json;print(len(json.load(open('$SET/shelfmark_synced_books.json'))))" 2>/dev/null || echo 0)
+    [ "$reg" = 2 ] && break; sleep 2
+  done
+fi
+
 # --- assertions -----------------------------------------------------------
-[ "$reg" = 2 ] && say PASS "registry holds both books" || { say FAIL "registry holds $reg book(s), expected 2"; fail=1; }
-cwa=$(curl -s --max-time 5 -u admin:admin123 http://127.0.0.1:$CWA_PORT/opds/new | grep -c '<entry>')
+[ "$reg" = 2 ] && say PASS "registry holds both books$second" || { say FAIL "registry holds $reg book(s), expected 2"; fail=1; }
 [ "$cwa" = 2 ] && say PASS "sandbox CWA imported both uploads" || { say FAIL "sandbox CWA has $cwa book(s)"; fail=1; }
 # The regression itself: at least one search AFTER the last upload line.
 after=$(awk '/POST .*\/upload/{n=NR} END{print n+0}' "$SET/shelfmark-debug.log")
@@ -128,7 +152,8 @@ searches=$(awk -v n="$after" 'NR>n && /-> GET .*\/opds\/search\//' "$SET/shelfma
 [ "$after" -gt 0 ] && [ "$searches" -gt 0 ] && say PASS "post-upload pass re-asked CWA ($searches search request(s) after the last upload)" || { say FAIL "no search request after the last upload -- the import wait is answering from cache"; fail=1; }
 # the report is logged by the parent after the fork returns it -- a moment after the registry/CWA state the checks above waited on
 for i in $(seq 1 40); do grep -q "\[sync\] summary" "$SET/shelfmark-debug.log" && break; sleep 0.5; done
-summary=$(grep "\[sync\] summary" "$SET/shelfmark-debug.log" | tail -1)
+# (the first sync's line: a second one, above, uploads nothing)
+summary=$(grep "\[sync\] summary" "$SET/shelfmark-debug.log" | grep -m1 "uploaded=2" || grep "\[sync\] summary" "$SET/shelfmark-debug.log" | tail -1)
 echo "$summary" | grep -q "uploaded=2" && say PASS "debug log carries the sync summary line ($(echo "$summary" | sed 's/.*summary //'))" || { say FAIL "no [sync] summary with uploaded=2 in the debug log (got: $summary)"; fail=1; }
 grep -qE "ERROR|Traceback|attempt to" "$W/koreader.log" && { say FAIL "KOReader logged an error:"; grep -E "ERROR|Traceback|attempt to" "$W/koreader.log" | head -3; fail=1; } || say PASS "no KOReader errors"
 [ $fail -eq 0 ] && echo "=== LIVE SYNC PASS" || echo "=== LIVE SYNC FAIL"
