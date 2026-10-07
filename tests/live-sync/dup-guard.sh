@@ -43,7 +43,7 @@ stop_koreader() {
 }
 cleanup() {
   stop_koreader
-  (cd "$STACK" && COMPOSE_PROFILES=sync CWA_PORT=$CWA_PORT SHELFMARK_PORT=19094 CALIBRE_LIBRARY="$LIB" docker compose -p $P down -v >/dev/null 2>&1)
+  (cd "$STACK" && COMPOSE_PROFILES=sync CWA_PORT=$CWA_PORT SHELFMARK_PORT=19094 PAIRING_PORT=19096 CALIBRE_LIBRARY="$LIB" docker compose -p $P down -v >/dev/null 2>&1)
   rm -f "$SET/shelfmark.lua" "$SET/shelfmark_synced_books.json" "$SET/shelfmark_pending_uploads.json" "$SET/shelfmark-debug.log"
   for f in "$W"/bak/*; do [ -e "$f" ] || continue; case "$(basename "$f")" in settings.reader.lua) cp -a "$f" "$CFG/";; *) cp -a "$f" "$SET/";; esac; done
   rm -rf "$W"
@@ -51,7 +51,7 @@ cleanup() {
 trap cleanup EXIT
 
 # --- sandbox CWA ---
-(cd "$STACK" && COMPOSE_PROFILES=sync CWA_PORT=$CWA_PORT SHELFMARK_PORT=19094 CALIBRE_LIBRARY="$LIB" docker compose -p $P up -d >/dev/null 2>&1) || { say FAIL "sandbox up"; exit 1; }
+(cd "$STACK" && COMPOSE_PROFILES=sync CWA_PORT=$CWA_PORT SHELFMARK_PORT=19094 PAIRING_PORT=19096 CALIBRE_LIBRARY="$LIB" docker compose -p $P up -d >/dev/null 2>&1) || { say FAIL "sandbox up"; exit 1; }
 for i in $(seq 1 40); do [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -u admin:admin123 http://127.0.0.1:$CWA_PORT/opds)" = 200 ] && break; sleep 3; done
 [ "$(cwa_count)" = 0 ] && say PASS "sandbox CWA up, no Silent Echo yet" || { say FAIL "sandbox not clean"; exit 1; }
 
@@ -81,7 +81,7 @@ curl -s -o /dev/null --max-time 2 "$I/" || { say FAIL "inspector never answered"
 got=$(curl -s --max-time 5 "$I/ui/bookbridge/download_dir" | tr -d '"')
 [ "$got" = "$BOOKS" ] && say PASS "driving the KOReader this run launched" || { say FAIL "wrong KOReader (download_dir=$got)"; exit 1; }
 curl -s --max-time 8 "$I/ui/menu/onShowMenu/" >/dev/null; sleep 1
-idx=""; for i in $(seq 1 24); do [ "$(curl -s --max-time 5 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$i/text")" = "Sync library with CWA" ] && { idx=$i; break; }; done
+idx=""; for i in $(seq 1 24); do [ "$(curl -s --max-time 5 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$i/text")" = "Sync library with Calibre-Web" ] && { idx=$i; break; }; done
 [ -n "$idx" ] || { say FAIL "sync menu item not found"; exit 1; }
 fire_sync() { curl -s --max-time 8 "$I/ui/menu/menu_items/bookbridge/sub_item_table/$idx/callback/" >/dev/null; }
 
