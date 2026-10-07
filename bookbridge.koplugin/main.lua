@@ -705,7 +705,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.9.5"
+local PLUGIN_VERSION = "0.9.6"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -11203,6 +11203,10 @@ SRC.DEF.shelfmark = {
         return self.server_url ~= nil and self.server_url ~= ""
     end,
     missing = function(self) return _("No Shelfmark server is connected.") end,
+    -- (words only: see search below)
+    sitsOut = function(self, book)
+        return not (book and book.provider and book.provider ~= "" and book.provider_id and book.provider_id ~= "")
+    end,
     search = function(self, query, book, manual_query)
         -- Shelfmark finds files for a book picked in its catalogue (provider
         -- + id); typed words alone it refuses ("Parameters 'provider' and
@@ -11255,6 +11259,71 @@ SRC.DEF.shelfmark = {
         return all
     end,
 }
+
+-- What a source's search may learn that the reader keeps: logins, Anna's
+-- Archive's session and working domain, Shelfmark's source list.
+SRC.STATE = { "session_cookie", "_shelfmark_login_rejected", "annas_session", "annas_mirrors", "annas_tld", "_sm_sources" }
+
+-- Several sources at once, each in its own process: the list waits for the
+-- slowest, not for the sum (Matt's Kindle, 2026-10-07: Anna's Archive 5 s
+-- then Shelfmark 5 s, one after the other, when Z-Library didn't have the
+-- book). In a process of its own a source's search runs as it would in the
+-- reader -- Trapper, unwrapped there, simply runs the request -- and sends
+-- back its results and what it learned (SRC.STATE), which only the reader
+-- saves. Returns { { got =, err =, skipped = }, ... } in the order of ids,
+-- or nil, true when dismissed.
+function SRC.searchTogether(self, ids, query, book, manual_query)
+    local ffiutil = require("ffi/util")
+    local buffer = require("string.buffer")
+    local Trapper = require("ui/trapper")
+    local labels = {}
+    for _unused, id in ipairs(ids) do labels[#labels + 1] = SRC.DEF[id].label end
+    local completed, answers = Trapper:dismissableRunInSubprocess(function()
+        local kids = {}
+        for i, id in ipairs(ids) do
+            local pid, fd = ffiutil.runInSubProcess(function(_pid, write_fd)
+                local before = {}
+                for _u, k in ipairs(SRC.STATE) do before[k] = buffer.encode({ v = self[k] }) end
+                self.saveAllSettings = function() end   -- (the reader saves, once it has the answer)
+                local ok, got, err, _cancelled, skipped = pcall(SRC.DEF[id].search, self, query, book, manual_query)
+                local out = { got = ok and got or nil, skipped = ok and skipped and true or nil,
+                    err = (not ok and ("failed: " .. tostring(got))) or (err and tostring(err)) or nil, state = {} }
+                for _u, k in ipairs(SRC.STATE) do
+                    if buffer.encode({ v = self[k] }) ~= before[k] then out.state[#out.state + 1] = { k = k, v = self[k] } end
+                end
+                local okE, s = pcall(buffer.encode, out)
+                if not okE then s = buffer.encode({ err = "unreadable answer: " .. tostring(s) }) end
+                ffiutil.writeToFD(write_fd, s, true)
+            end, true)
+            kids[i] = { pid = pid, fd = fd }
+        end
+        local out = {}
+        for i, kid in ipairs(kids) do
+            local data = kid.pid and kid.fd and ffiutil.readAllFromFD(kid.fd) or ""
+            if kid.pid then
+                for _u = 1, 100 do
+                    if ffiutil.isSubProcessDone(kid.pid) then break end
+                    ffiutil.usleep(20000)
+                end
+            end
+            local ok, t = pcall(buffer.decode, data)
+            out[i] = (ok and type(t) == "table") and t or { err = kid.pid and "no answer" or "couldn't start" }
+        end
+        return out
+    end, T(_("Searching %1..."), table.concat(labels, ", ")))
+    if not completed then return nil, true end
+    answers = type(answers) == "table" and answers or {}
+    local save = false
+    for _unused, a in ipairs(answers) do
+        for _u, s in ipairs(type(a.state) == "table" and a.state or {}) do
+            self[s.k] = s.v
+            if s.k:match("^annas_") then save = true end
+        end
+        a.state = nil
+    end
+    if save then self:saveAllSettings() end
+    return answers
+end
 
 -- Shelfmark's enabled release sources other than its direct downloads
 -- (Anna's Archive and the like), for ebooks: { "prowlarr", ... }. Asked
@@ -11397,30 +11466,15 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu, opts)
     local query = (manual_query and manual_query ~= "") and manual_query or defaultReleaseQuery(book)
     local releases, tried, errors, notes, rest = {}, {}, {}, {}, {}
     local shelfmark_sat_out, stopped = false, nil
+    -- the sources that can answer, in order; the others explained
+    local ready = {}
     for _unused, id in ipairs(self:sourcesInOrder()) do
         local src = SRC.DEF[id]
-        if stopped then
-            if src.configured(self) then rest[#rest + 1] = src.label end
+        if src.configured(self) and src.sitsOut and src.sitsOut(self, book) then
+            -- (Shelfmark, given words only: not asked, so not named as searched)
+            shelfmark_sat_out = shelfmark_sat_out or id == "shelfmark"
         elseif src.configured(self) then
-            local got, err, cancelled, skipped = src.search(self, query, book, manual_query)
-            if cancelled then return end
-            if skipped then
-                -- (Shelfmark, given words only: not asked, so not named as searched)
-                shelfmark_sat_out = shelfmark_sat_out or id == "shelfmark"
-            else
-                tried[#tried + 1] = src.label
-                if type(got) == "table" then
-                    for _u2, r in ipairs(got) do releases[#releases + 1] = r end
-                elseif err then
-                    errors[#errors + 1] = src.label .. ": " .. tostring(err)
-                end
-            end
-            if not opts.all and #releases > 0 and self.sources_stop_first then stopped = src.label end
-            if not opts.all and not stopped and self.sources_stop_exact and type(got) == "table" then
-                for _u4, r in ipairs(got) do
-                    if SRC.match(r, book, self.hardcover_language).exact then stopped = src.label; break end
-                end
-            end
+            ready[#ready + 1] = id
         elseif src.missing then
             -- switched on but not ready. Awaiting a restart: always said.
             -- Not set up at all (no key, never installed): said only when
@@ -11432,6 +11486,49 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu, opts)
             if src.pending and src.pending(self) then errors[#errors + 1] = line else notes[#notes + 1] = line end
         end
     end
+    local function take(id, got, err, skipped)
+        local src = SRC.DEF[id]
+        if skipped then
+            -- (Shelfmark, given words only: not asked, so not named as searched)
+            shelfmark_sat_out = shelfmark_sat_out or id == "shelfmark"
+            return
+        end
+        tried[#tried + 1] = src.label
+        if type(got) == "table" then
+            for _u2, r in ipairs(got) do releases[#releases + 1] = r end
+        elseif err then
+            errors[#errors + 1] = src.label .. ": " .. tostring(err)
+        end
+        if opts.all or stopped then return end
+        if #releases > 0 and self.sources_stop_first then stopped = src.label end
+        if not stopped and self.sources_stop_exact and type(got) == "table" then
+            for _u4, r in ipairs(got) do
+                if SRC.match(r, book, self.hardcover_language).exact then stopped = src.label; break end
+            end
+        end
+    end
+    -- The first source alone (Z-Library answers in a second and usually
+    -- has the book); without the book, the rest at once.
+    local i = 1
+    while i <= #ready and not stopped do
+        if i > 1 and #ready - i >= 1 then
+            local together = {}
+            for j = i, #ready do together[#together + 1] = ready[j] end
+            local answers, cancelled = SRC.searchTogether(self, together, query, book, manual_query)
+            if cancelled then return end
+            for j, id in ipairs(together) do
+                local a = answers[j] or {}
+                take(id, a.got, a.err, a.skipped)
+            end
+            i = #ready + 1
+        else
+            local got, err, cancelled, skipped = SRC.DEF[ready[i]].search(self, query, book, manual_query)
+            if cancelled then return end
+            take(ready[i], got, err, skipped)
+            i = i + 1
+        end
+    end
+    for j = i, #ready do rest[#rest + 1] = SRC.DEF[ready[j]].label end
     if #releases == 0 then
         for _u3, n in ipairs(notes) do errors[#errors + 1] = n end
     end
@@ -11455,7 +11552,7 @@ function Bookbridge:browseReleases(book, manual_query, caller_menu, opts)
         }
         return
     end
-    if stopped then debugLog("[sources] stopped at " .. stopped .. "; not asked: " .. table.concat(rest, ", ")) end
+    if #rest > 0 then debugLog("[sources] stopped at " .. tostring(stopped) .. "; not asked: " .. table.concat(rest, ", ")) end
     self:browseReleasesContinue(book, manual_query, releases, errors, tried, rest)
 end
 

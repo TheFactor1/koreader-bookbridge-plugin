@@ -57,15 +57,25 @@ local function load(name) local f = io.open(FIX .. "/" .. name); local d = json.
 local ZL = { books = {} }
 package.loaded["zlibrary.api"] = { search = function() ZL.calls = (ZL.calls or 0) + 1; return { results = ZL.books } end }
 package.loaded["zlibrary.config"] = { getUserSession = function() return {} end }
+-- who was asked: a file, since the sources after the first are asked from
+-- processes of their own (SRC.searchTogether)
+local ASKED = W .. "/asked"
+local function rec(name) local f = io.open(ASKED, "a"); f:write(name, "\n"); f:close() end
+local function asked()
+    local out, f = {}, io.open(ASKED)
+    if f then for l in f:lines() do out[#out + 1] = l end; f:close() end
+    table.sort(out)   -- (at once: in no particular order)
+    return out
+end
 local function bb(t)
     t = t or {}
     t.hardcover_language = t.hardcover_language or "en"
-    t.asked = {}
+    os.remove(ASKED)
     t.prefetchCovers = function() end
-    t.annasSearch = function(self) self.asked[#self.asked + 1] = "annas"; return t._annas or {} end
+    t.annasSearch = function(self) rec("annas"); return t._annas or {} end
     t.apiRequest = function(self, _m, path)
         if path:find("release%-sources") then return { { name = "prowlarr", enabled = true, supported_content_types = { "ebook" } } }, 200 end
-        self.asked[#self.asked + 1] = "shelfmark"; return { releases = t._shelf or {} }, 200
+        rec("shelfmark"); return { releases = t._shelf or {} }, 200
     end
     return setmetatable(t, { __index = Bookbridge })
 end
@@ -150,13 +160,14 @@ local b = bb({ annas_download_key = "k", server_url = "http://s", sources_stop_e
 ZL.books = load("zlib-kaiju.json")
 SHOWN, MENU = {}, nil
 b:browseReleases({ title = KAIJU.title, authors = KAIJU.authors, provider = "hardcover", provider_id = "1" })
-ck(#b.asked == 0, "Z-Library had the book: Anna's and Shelfmark not asked (" .. table.concat(b.asked, ",") .. ")")
+ck(#asked() == 0, "Z-Library had the book: Anna's and Shelfmark not asked (" .. table.concat(asked(), ",") .. ")")
 ck(MENU and MENU.item_table[2] and MENU.item_table[2].is_ask_rest and MENU.item_table[2].text:find("Anna's Archive, Shelfmark", 1, true), "the list offers 'Also ask Anna's Archive, Shelfmark'")
 ck(MENU.item_table[3].release_data.exact_match, "...and the book itself right under it")
 -- tapping it asks every source
 local ask_menu = MENU
 ask_menu.onMenuSelect(nil, ask_menu.item_table[2])
-ck(#b.asked == 2 and b.asked[1] == "annas" and b.asked[2] == "shelfmark", "'Also ask': every source, in order")
+local a = asked()
+ck(#a == 2 and a[1] == "annas" and a[2] == "shelfmark", "'Also ask': every source (the two after Z-Library at once)")
 ck(MENU ~= ask_menu and not MENU.item_table[2].is_ask_rest, "...and the new list has nothing left to offer")
 
 -- 5. only foreign editions at Z-Library: it goes on to Anna's
@@ -165,15 +176,94 @@ for _u, r in ipairs(load("zlib-kaiju.json")) do if r.lang == "Italian" then it_o
 ZL.books = it_only
 b = bb({ annas_download_key = "k", sources_stop_exact = true })
 b:browseReleases(KAIJU)
-ck(#b.asked == 1 and b.asked[1] == "annas", "no exact copy at Z-Library (Italian only): Anna's asked")
+a = asked()
+ck(#a == 1 and a[1] == "annas", "no exact copy at Z-Library (Italian only): Anna's asked")
 -- 6. switched off: everything asked
 ZL.books = load("zlib-kaiju.json")
 b = bb({ annas_download_key = "k", sources_stop_exact = false })
 b:browseReleases(KAIJU)
-ck(#b.asked == 1 and b.asked[1] == "annas", "'Stop at the exact book' off: every source asked")
+a = asked()
+ck(#a == 1 and a[1] == "annas", "'Stop at the exact book' off: every source asked")
 local stopped_logged = false
 for _u, l in ipairs(LOG) do if l:find("stopped at Z-Library", 1, true) then stopped_logged = true end end
 ck(stopped_logged, "the stop is logged (which source, which weren't asked)")
+
+-- 7. the rest at once, for real (processes of their own): Anna's Archive and
+-- Shelfmark take a second each; the list comes after about one, not two
+local socket = require("socket")
+-- (Trapper as KOReader runs it: the task in a process of its own, so the
+-- sources' processes are started from inside one)
+local ffiutil, buffer = require("ffi/util"), require("string.buffer")
+local inline_trap = package.loaded["ui/trapper"].dismissableRunInSubprocess
+package.loaded["ui/trapper"].dismissableRunInSubprocess = function(_s, f, msg)
+    if not (type(msg) == "string" and msg:find("Anna's Archive, Shelfmark", 1, true)) then return true, f() end
+    local pid, fd = ffiutil.runInSubProcess(function(_p, w) ffiutil.writeToFD(w, buffer.encode(table.pack(f())), true) end, true)
+    local data = ffiutil.readAllFromFD(fd)
+    while not ffiutil.isSubProcessDone(pid) do ffiutil.usleep(10000) end
+    local t = buffer.decode(data)
+    return true, unpack(t, 1, t.n)
+end
+it_only = {}
+for _u, r in ipairs(load("zlib-kaiju.json")) do if r.lang == "Italian" then it_only[#it_only + 1] = r end end
+ZL.books = it_only
+b = bb({ annas_download_key = "k", server_url = "http://s", sources_stop_exact = true, annas_session = { cookie = "old" } })
+b.annasSearch = function(self)
+    socket.sleep(1); rec("annas")
+    self.annas_session = { cookie = "new" }   -- (what a sign-in learns)
+    self:saveAllSettings()                    -- (inside its own process: must not write)
+    return { { title = "The Kaiju Preservation Society", author = "John Scalzi", format = "epub", md5 = "m1", language = "English [en]" } }
+end
+b.apiRequest = function(self, _m, path)
+    if path:find("release%-sources") then return { { name = "prowlarr", enabled = true, supported_content_types = { "ebook" } } }, 200 end
+    socket.sleep(1); rec("shelfmark")
+    return { releases = { { title = "John Scalzi - The Kaiju Preservation Society (epub)", format = "epub", source = "prowlarr" } } }, 200
+end
+b.saveAllSettings = function() rec("save") end
+MENU = nil
+local t0 = socket.gettime()
+b:browseReleases({ title = KAIJU.title, authors = KAIJU.authors, provider = "hardcover", provider_id = "1" })
+local took = socket.gettime() - t0
+a = asked()
+ck(took < 1.8, string.format("Anna's Archive and Shelfmark asked at once: %.1f s for two 1 s searches", took))
+ck(#a == 3 and a[1] == "annas" and a[2] == "save" and a[3] == "shelfmark", "both asked; settings saved once, by the reader (" .. table.concat(a, ",") .. ")")
+ck(b.annas_session and b.annas_session.cookie == "new", "what Anna's sign-in learned reaches the reader")
+local srcs = {}
+for _u, item in ipairs(MENU and MENU.item_table or {}) do if item.release_data then srcs[item.release_data.source] = true end end
+ck(srcs.zlibrary and srcs.annasarchive and srcs.prowlarr, "the list has all three sources' files")
+ck(MENU and MENU.item_table[2].release_data and MENU.item_table[2].release_data.exact_match, "...the book itself on top, nothing left to 'Also ask'")
+
+-- one of them fails: the other's files still come, and the failure is named
+b = bb({ annas_download_key = "k", server_url = "http://s", sources_stop_exact = true })
+b.annasSearch = function() error("boom") end
+b.apiRequest = function(self, _m, path)
+    if path:find("release%-sources") then return { { name = "prowlarr", enabled = true, supported_content_types = { "ebook" } } }, 200 end
+    return { releases = { { title = "John Scalzi - The Kaiju Preservation Society", format = "epub", source = "prowlarr" } } }, 200
+end
+SHOWN, MENU = {}, nil
+b:browseReleases({ title = KAIJU.title, authors = KAIJU.authors, provider = "hardcover", provider_id = "1" })
+local named = false
+for _u, w in ipairs(SHOWN) do if w.text and w.text:find("Anna's Archive: failed", 1, true) then named = true end end
+ck(MENU ~= nil and named, "Anna's Archive failing: Shelfmark's files shown, the failure named")
+-- words only (Find a book, the Ledger's "Get it"): Shelfmark sits out, so
+-- Anna's Archive is asked alone -- no process started for nothing
+b = bb({ annas_download_key = "k", server_url = "http://s", sources_stop_exact = true })
+SHOWN, MENU = {}, nil
+local together_called = false
+local real_together = SRC.searchTogether
+SRC.searchTogether = function(...) together_called = true; return real_together(...) end
+b:browseReleases({ title = KAIJU.title, authors = KAIJU.authors })
+SRC.searchTogether = real_together
+a = asked()
+ck(not together_called and #a == 1 and a[1] == "annas", "words only: Shelfmark sits out, Anna's asked on its own (" .. table.concat(a, ",") .. ")")
+package.loaded["ui/trapper"].dismissableRunInSubprocess = inline_trap
+-- dismissed while waiting: nothing shown
+local real_trap = package.loaded["ui/trapper"].dismissableRunInSubprocess
+package.loaded["ui/trapper"].dismissableRunInSubprocess = function(_s, f, msg) if type(msg) == "string" and msg:find("Anna's Archive, Shelfmark", 1, true) then return false end return true, f() end
+b = bb({ annas_download_key = "k", server_url = "http://s", sources_stop_exact = true })
+SHOWN, MENU = {}, nil
+b:browseReleases({ title = KAIJU.title, authors = KAIJU.authors, provider = "hardcover", provider_id = "1" })
+ck(MENU == nil, "dismissed while the two are searching: no list")
+package.loaded["ui/trapper"].dismissableRunInSubprocess = real_trap
 
 print(string.format("=== %d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

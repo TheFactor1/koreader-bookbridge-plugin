@@ -4,6 +4,15 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-07 — v0.9.6
+
+- **Faster when Z-Library doesn't have the book**: the sources after the
+  first are now asked at the same time instead of one after the other, so
+  the list waits for the slowest of them, not all of them added up -- on
+  Matt's Kindle, Anna's Archive and Shelfmark took about 5 s each. The first
+  source (Z-Library by default) is still asked alone: it answers in about a
+  second, and when it has the exact book nothing else is asked.
+
 ## 2026-10-07 — v0.9.5
 
 - **Smoother reading**: with "upload books I read" on (Readest sync), the

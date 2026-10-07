@@ -30,7 +30,8 @@ where you live. Pick one or more under **Bookbridge > Settings > Sources**
 **Settings > Books**), in the order you want them asked. The first source
 that has the exact book -- its title and author, in your language, as an
 EPUB -- ends the search, and the list offers the others a tap away
-(**Also ask ...**).
+(**Also ask ...**). When the first source doesn't have it, the rest are
+asked at the same time.
 
 | Source | What you need | Where it's set up |
 |---|---|---|
