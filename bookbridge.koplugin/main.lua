@@ -4528,8 +4528,21 @@ function CO.pluginsDir()
     return dir ~= "" and dir or "/"
 end
 
+-- Where the companion lives: the folder KOReader found it in (another
+-- plugins folder, or one of its "extra plugin paths", on a desktop or
+-- Android), else beside Bookbridge, where Bookbridge installs it.
 function CO.folder(id)
-    return CO.pluginsDir() .. "/" .. CO.DEF[id].folder
+    local want = CO.DEF[id].folder
+    local ok, PluginLoader = pcall(require, "pluginloader")
+    if ok and type(PluginLoader) == "table" then
+        for _, list in ipairs({ PluginLoader.enabled_plugins or {}, PluginLoader.disabled_plugins or {} }) do
+            for _, plugin in pairs(list) do
+                local path = type(plugin) == "table" and type(plugin.path) == "string" and plugin.path:gsub("/+$", "")
+                if path and path:match("([^/]+)$") == want then return path end
+            end
+        end
+    end
+    return CO.pluginsDir() .. "/" .. want
 end
 
 -- The version a plugin folder carries (its _meta.lua), read as text: no

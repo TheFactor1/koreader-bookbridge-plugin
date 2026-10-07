@@ -181,6 +181,17 @@ info = CO.latest("ledger")
 ck(info and info.name == "reading-ledger-0.1.0.koplugin.zip" and info.version == "0.1.0", "ledger: the plugin-only asset is picked, not the bundle (" .. tostring(info and info.name) .. ")")
 ck(CO.DEF.ledger.tuck == false and CO.DEF.ledger.folder == "ledger.koplugin" and CO.ORDER[3] == "ledger", "ledger: its own KOReader menu entry stays (tuck = false)")
 
+-- 13. a companion KOReader found in another plugins folder (an "extra plugin
+-- path", a desktop or Android install): that's its folder, not a guess
+-- beside Bookbridge (which read as "v?" in Status & setup)
+ck(CO.folder("ledger") == W .. "/plugins/ledger.koplugin", "not loaded anywhere: beside Bookbridge")
+package.loaded["pluginloader"] = { enabled_plugins = { { name = "ledger", path = "/elsewhere/plugins/ledger.koplugin/" } },
+    disabled_plugins = { { name = "readest", path = "/other/readest.koplugin" } } }
+ck(CO.folder("ledger") == "/elsewhere/plugins/ledger.koplugin", "loaded from another folder: that folder (" .. CO.folder("ledger") .. ")")
+ck(CO.folder("readest") == "/other/readest.koplugin", "found but disabled: its folder too")
+ck(CO.folder("zlibrary") == W .. "/plugins/zlibrary.koplugin", "a companion KOReader didn't find: beside Bookbridge")
+package.loaded["pluginloader"] = nil
+
 
 print(string.format("=== %d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
