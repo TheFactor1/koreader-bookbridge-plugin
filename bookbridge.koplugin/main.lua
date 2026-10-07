@@ -1261,7 +1261,13 @@ local function doLogin(server_url, username, password, socks5_proxy)
         return true, cookie
     end
     -- (not reached at all: say that, not "check your password")
-    local err = resp and resp.error or raw_err or _("Login failed -- check your Shelfmark username/password in Settings.")
+    local err = resp and resp.error or raw_err or _("Login failed -- check your Shelfmark username and password (Bookbridge settings > Connections).")
+    -- a refused username/password: Shelfmark's own words, plus where to fix
+    -- them. ("Bookbridge settings", not a menu path: with the Reading Ledger
+    -- installed Bookbridge's menu opens from Ledger > Settings > Books.)
+    if code == 401 and resp and resp.error then
+        err = tostring(resp.error) .. " " .. _("(Bookbridge settings > Connections)")
+    end
     -- The status goes back too: 401 = wrong username/password, 429 = the
     -- account is locked after too many failures. nil = never reached the
     -- server, which says nothing about the credentials.
@@ -1319,7 +1325,7 @@ local cwa_run_guard = nil
 local function doCwaRequest(cwa_url, username, password, path, socks5_proxy)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting")
-        return nil, nil, _("Calibre-Web URL isn't set -- add it under Bookbridge > Settings.")
+        return nil, nil, _("Calibre-Web URL isn't set -- add it under Bookbridge settings > Connections.")
     end
     if cwa_run_guard and cwa_run_guard.stopped then
         debugLog("[cwa] -- skipped " .. path .. " (run stopped after HTTP " .. tostring(cwa_run_guard.stopped) .. ")")
@@ -1427,7 +1433,7 @@ end
 local function doCwaFileDownload(cwa_url, username, password, path, socks5_proxy, save_path)
     if not cwa_url or cwa_url == "" then
         debugLog("[cwa] no cwa_url configured, aborting download")
-        return nil, nil, _("Calibre-Web URL isn't set -- add it under Bookbridge > Settings.")
+        return nil, nil, _("Calibre-Web URL isn't set -- add it under Bookbridge settings > Connections.")
     end
     local headers = {}
     if username and username ~= "" then
@@ -2670,7 +2676,7 @@ local function doHardcoverGraphQL(token, query, variables)
         -- Its own wording, NOT "request failed": that phrase is classed as
         -- transient, so a revoked or expired token used to be retried silently
         -- forever with nobody told (found 2026-09-23). See HC_TOKEN_REJECTED.
-        return nil, T(_("Hardcover rejected the API token (HTTP %1) -- update it under Bookbridge > Settings."), tostring(code))
+        return nil, T(_("Hardcover rejected the API token (HTTP %1) -- update it under Bookbridge settings > Connections."), tostring(code))
     end
     if code ~= 200 then
         return nil, T(_("Hardcover request failed (HTTP %1)."), tostring(code))
@@ -6023,7 +6029,7 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
     local unmatched = {}
 
     if not cwa_url or cwa_url == "" then
-        return { _("Calibre-Web URL isn't set -- add it under Bookbridge > Settings.") }
+        return { _("Calibre-Web URL isn't set -- add it under Bookbridge settings > Connections.") }
     end
 
     if lfs.attributes(download_dir, "mode") ~= "directory" then
@@ -6140,11 +6146,11 @@ local function doSyncLibrary(cwa_url, cwa_username, cwa_password, socks5_proxy, 
         saveSyncRegistry(registry)
         savePendingUploads(pending_uploads)
         if code == 429 then
-            addLine(_("Sync stopped: Calibre-Web is refusing requests after too many failed logins (HTTP 429). Wait a minute, check the Calibre-Web password under Bookbridge > Settings, then sync again."))
+            addLine(_("Sync stopped: Calibre-Web is refusing requests after too many failed logins (HTTP 429). Wait a minute, check the Calibre-Web password under Bookbridge settings > Connections, then sync again."))
         elseif code == 403 then
             addLine(_("Sync stopped: Calibre-Web refused access (HTTP 403). Check that this Calibre-Web account is allowed to use OPDS, then sync again."))
         else
-            addLine(T(_("Sync stopped: Calibre-Web rejected the login (HTTP %1). Check the Calibre-Web username and password under Bookbridge > Settings, then sync again."), tostring(code)))
+            addLine(T(_("Sync stopped: Calibre-Web rejected the login (HTTP %1). Check the Calibre-Web username and password under Bookbridge settings > Connections, then sync again."), tostring(code)))
         end
         reportProgress(100)
         return report, replaced_paths, unmatched
@@ -8363,9 +8369,9 @@ function Bookbridge:suggestMatchForFile(file)
     if (type(candidates) ~= "table" or #candidates == 0) and failure then
         local text
         if failure == 401 or failure == 403 then
-            text = T(_("Calibre-Web rejected the login (HTTP %1). Check the Calibre-Web username and password under Bookbridge > Settings."), tostring(failure))
+            text = T(_("Calibre-Web rejected the login (HTTP %1). Check the Calibre-Web username and password under Bookbridge settings > Connections."), tostring(failure))
         elseif failure == 429 then
-            text = _("Calibre-Web is refusing requests after too many failed logins (HTTP 429). Wait a minute, check the Calibre-Web password under Bookbridge > Settings, then try again.")
+            text = _("Calibre-Web is refusing requests after too many failed logins (HTTP 429). Wait a minute, check the Calibre-Web password under Bookbridge settings > Connections, then try again.")
         elseif failure == "unreachable" then
             text = _("Couldn't reach Calibre-Web -- check the Calibre-Web URL in Settings and your connection.")
         else
@@ -12622,12 +12628,24 @@ end
 local function hardcoverErrorIsTransient(err)
     if type(err) ~= "string" then return true end
     local e = err:lower()
+    -- A refused token is never a network blip, whatever else the message
+    -- says: its "update it under Bookbridge settings > Connections" holds
+    -- "connection", which the network test below would otherwise match.
+    if e:find("rejected the api token", 1, true) then return false end
     return e:find("request failed", 1, true) ~= nil
         or e:find("unreachable", 1, true) ~= nil
         or e:find("resolution", 1, true) ~= nil
         or e:find("timed out", 1, true) ~= nil
         or e:find("timeout", 1, true) ~= nil
-        or e:find("connection", 1, true) ~= nil
+        -- (socket wording -- "connection refused", "...reset by peer",
+        -- "...closed" -- not the bare word: a settings path such as
+        -- "> Connections" in a message isn't a network condition)
+        or e:find("connection refused", 1, true) ~= nil
+        or e:find("connection reset", 1, true) ~= nil
+        or e:find("connection closed", 1, true) ~= nil
+        or e:find("connection error", 1, true) ~= nil
+        or e:find("no route", 1, true) ~= nil
+        or e:find("closed", 1, true) == 1
         -- The request layer's own wording for a thrown socket/SSL error
         -- ("Couldn't reach Hardcover.") and for a non-JSON body such as a
         -- captive portal's login page. Both are network conditions, not

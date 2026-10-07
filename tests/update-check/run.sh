@@ -4,9 +4,10 @@
 # on a local KOReader Linux install, which runs the identical frontend. The
 # plugin install under test is never touched: everything happens in /tmp.
 #
-#   bash tests/update-check/run.sh [ssh-alias|local] [base-url]
+#   bash tests/update-check/run.sh [local|ssh-alias] [base-url]
 #
-# `local` uses $KOREADER_DIR, or the newest ~/.local/opt/koreader-*/lib/koreader
+# With no argument it runs `local`: nothing reaches a Kindle unless one is
+# named. `local` uses $KOREADER_DIR, or the newest ~/.local/opt/koreader-*/lib/koreader
 # it can find, and seeds the scratch copy from this checkout's own
 # bookbridge.koplugin. With no base-url, it asks the target which update source
 # it is configured with -- the device's settings file over ssh, or the local
@@ -16,7 +17,7 @@
 # useless to anyone else, but it does not belong in a public repo.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
-DEV=${1:-kindle}; BASE=${2:-}
+DEV=${1:-local}; BASE=${2:-}
 SETTINGS_GREP="grep -o '\[\"update_url\"\] = \"[^\"]*\"'"
 if [ "$DEV" = local ]; then
   KDIR=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | sort -V | tail -1)}

@@ -227,7 +227,7 @@ end
 
 -- 3f. a rejected API token: ONE notice, then Hardcover is paused until it changes
 do
-  local TOKMSG = "Hardcover rejected the API token (HTTP 401) -- update it under Bookbridge > Settings."
+  local TOKMSG = "Hardcover rejected the API token (HTTP 401) -- update it under Bookbridge settings > Connections."
   ck(HC_TRANSIENT(TOKMSG) == false, "a rejected token is not transient (it was silently retried forever as \"request failed\")")
   local st = setmetatable({ hardcover_progress_sync = true, hardcover_token = "old",
       confirmHardcoverMatch = function() end, resolveHardcoverMatch = function() end }, { __index = Bookbridge })

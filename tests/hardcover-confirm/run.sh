@@ -224,7 +224,7 @@ end
 -- then paused (it used to be retried silently on every close and wake)
 do
     local old = doHardcoverFindBook
-    local TOK = "Hardcover rejected the API token (HTTP 401) -- update it under Bookbridge > Settings."
+    local TOK = "Hardcover rejected the API token (HTTP 401) -- update it under Bookbridge settings > Connections."
     doHardcoverFindBook = function() SEARCHES = SEARCHES + 1; return nil, nil, nil, TOK, nil, false, true end
     local noticed = {}
     local function inst(token) return { hardcover_token = token, hardcover_language = "en", _hc_prefetch = {},

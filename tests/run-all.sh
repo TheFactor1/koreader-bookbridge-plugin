@@ -214,15 +214,16 @@ elif [ $rc -eq 3 ]; then echo "SKIPPED  hardcover-park ($(echo "$out" | grep '^S
 else echo "$out" | grep -E '^FAIL'; echo "FAIL"; fail=1; fi
 
 # Prefers a local KOReader Linux install (identical frontend and luajit, no
-# device needed), then the Kindle over ssh, then SKIPPED.
+# device needed) -- with or without --no-device, since it touches no device --
+# then the Kindle over ssh (never with --no-device), then SKIPPED.
 section "update-check suite (needs KOReader's luajit: local install or the Kindle)"
 KLOCAL=${KOREADER_DIR:-$(ls -d ~/.local/opt/koreader-*/lib/koreader 2>/dev/null | sort -V | tail -1)}
-if [ $NODEV -eq 1 ]; then
-  echo "SKIPPED  --no-device"; skipped="update-check (by request)"
-elif [ -x "${KLOCAL:-/nonexistent}/luajit" ]; then
+if [ -x "${KLOCAL:-/nonexistent}/luajit" ]; then
   out=$(KOREADER_DIR="$KLOCAL" bash tests/update-check/run.sh local 2>&1)
   if echo "$out" | grep -q "=== 0 failure(s)"; then echo "PASS  on local KOReader ($KLOCAL)"
   else echo "$out" | grep -E "^FAIL|failure\(s\)|No update source|No local KOReader"; echo "FAIL"; fail=1; fi
+elif [ $NODEV -eq 1 ]; then
+  echo "SKIPPED  --no-device and no local KOReader"; skipped="update-check (by request)"
 elif ! timeout 8 ssh -o ConnectTimeout=5 -o BatchMode=yes "$DEV" true >/dev/null 2>&1; then
   echo "SKIPPED  no local KOReader and $DEV unreachable over ssh -- wake it, or pass --no-device"; skipped="update-check (device unreachable)"
 else

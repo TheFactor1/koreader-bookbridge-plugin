@@ -61,6 +61,7 @@ ck(LOGINS == 1, "...and 5 more wakes send it 0 more times (sent " .. (LOGINS - 1
 -- 2. the user doing something still tries, and sees why
 local _r, _c, err = k:apiRequest("GET", "/api/search?q=x", nil, false)
 ck(LOGINS == 2 and tostring(err):find("Invalid username or password", 1, true), "a search the user starts still tries once and shows Shelfmark's reason")
+ck(tostring(err):find("(Bookbridge settings > Connections)", 1, true), "...and says where to fix it")
 -- 3. fixing the password in Settings lifts it without anything else
 k.password = "right"; LOGINS = 0
 k:checkPendingRequestNotifications()
