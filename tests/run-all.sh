@@ -133,6 +133,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  readest-sync (no local KOReader)"; skipped="${skipped:+$skipped, }readest-sync"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "A book read goes up to Readest without stopping a page turn (after the page is drawn; cover from the open book)"
+out=$(bash tests/readest-auto-upload/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  readest-auto-upload (no local KOReader)"; skipped="${skipped:+$skipped, }readest-auto-upload"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Set up another device without a server (PAIR: sealed settings served once by the reader, legacy relay codes)"
 out=$(bash tests/pairing/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"

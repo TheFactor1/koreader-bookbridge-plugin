@@ -4,6 +4,16 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-07 — v0.9.5
+
+- **Smoother reading**: with "upload books I read" on (Readest sync), the
+  fifth page turn of a new book took 1.6 s instead of 0.4, and the next
+  two turns could stall for another second each. Readest's upload holds
+  the screen while it works: it opened a second copy of the book to get
+  its cover, then sent the book and the cover. The upload now starts a
+  couple of seconds after the page is up, while you read it, and the
+  cover comes from the book that's already open.
+
 ## 2026-10-07 — v0.9.4
 
 - **Fixed**: sending text from your phone could stop working after closing a

@@ -705,7 +705,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.9.4"
+local PLUGIN_VERSION = "0.9.5"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -14515,7 +14515,41 @@ function Bookbridge:onPageUpdate()
     self._rd_pages = (self._rd_pages or 0) + 1
     if self._rd_pages < READEST_AUTO_UPLOAD_PAGES then return end
     self._rd_upload_done = true   -- once per sitting, whatever happens
-    self:autoUploadToReadest()
+    -- (not here: this runs before the page is drawn, and the upload stops
+    -- the screen -- Readest renders the cover and sends the file without
+    -- letting go, ~3 s on a Kindle, which made that page turn take 1.6 s.
+    -- A moment after the page is up, while it's being read; the cover and
+    -- the upload apart.)
+    local doc = ui.document
+    UIManager:scheduleIn(2, function()
+        if not (self.ui and self.ui.document == doc) then return end
+        self:readestCoverFromOpenBook()
+        UIManager:scheduleIn(2, function()
+            if self.ui and self.ui.document == doc then self:autoUploadToReadest() end
+        end)
+    end)
+end
+
+-- Readest sends a cover with the book, and without one on hand it opens a
+-- second copy of the book to get it (a second of frozen screen on a
+-- Kindle): leave it one from the book that's already open, where it looks.
+function Bookbridge:readestCoverFromOpenBook()
+    local ui = self.ui
+    local hash = ui and ui.doc_settings and ui.doc_settings:readSetting("partial_md5_checksum")
+    if not (ui and ui.document and hash and hash ~= "") then return end
+    local dir = DataStorage:getSettingsDir() .. "/readest_covers"
+    local path = dir .. "/" .. hash .. ".png"
+    if lfs.attributes(path, "mode") == "file" then return end
+    local ok, err = pcall(function()
+        local bb = require("apps/filemanager/filemanagerbookinfo"):getCoverImage(ui.document)
+        if not bb then return end
+        if lfs.attributes(dir, "mode") ~= "directory" then lfs.mkdir(dir) end
+        local tmp = path .. ".part"
+        local wrote = bb:writeToFile(tmp, "png")
+        bb:free()
+        if wrote == true then os.rename(tmp, path) else os.remove(tmp) end
+    end)
+    if not ok then debugLog("[readest] cover from the open book failed: " .. tostring(err)) end
 end
 
 function Bookbridge:autoUploadToReadest()
