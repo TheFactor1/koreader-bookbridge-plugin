@@ -506,7 +506,7 @@ end
 function Bookbridge:editAnnasSettings()
     self.annas_settings_dialog = MultiInputDialog:new{
         title = _("Anna's Archive settings"),
-        description = _("Your member key from annas-archive.gd/account (Type on your phone works here). The reader talks to Anna's Archive directly; a helper server is only for the advanced option."),
+        description = _("Your member key from annas-archive.gd/account -- type it here, or tap 'Type on your phone' below. The reader talks to Anna's Archive directly; a helper server is only for the advanced option."),
         fields = {
             { text = self.annas_download_key, text_type = "password", hint = _("Member key") },
             { text = self.annas_tld, hint = _("Domain ending, e.g. gd, gl, pk (blank: automatic)") },
@@ -11076,25 +11076,31 @@ function Bookbridge:showSourcesDialog()
     local order = SRC.order(self)
     local buttons = {}
     local function reopen() UIManager:close(dlg); self:saveAllSettings(); self:showSourcesDialog() end
+    -- what the last connection check found (Status & setup's cache), so a
+    -- key that was refused doesn't read as ready here
+    local checks = self._status_checks
+    if checks and os.time() - (checks.at or 0) > STATUS_CHECK_MAX_AGE then checks = nil end
+    local refused = { annasarchive = checks and checks.annas and checks.annas.state == "token" and _("key rejected") }
     for i, id in ipairs(order) do
         local src = SRC.DEF[id]
         local on = SRC.enabled(self, id)
         local ready = src.configured(self)
+        local note = not ready and (src.short_missing and src.short_missing(self) or _("not set up")) or refused[id]
         buttons[#buttons + 1] = {
-            { text = (on and "\u{2611} " or "\u{2610} ") .. src.label
-                .. (ready and "" or ("  (" .. (src.short_missing and src.short_missing(self) or _("not set up")) .. ")")),
+            { text = (on and "\u{2611} " or "\u{2610} ") .. src.label .. (note and ("  (" .. note .. ")") or ""),
               align = "left",
               callback = function()
                   self.sources_enabled = type(self.sources_enabled) == "table" and self.sources_enabled or {}
                   self.sources_enabled[id] = not on
                   reopen()
               end },
-            { text = "\u{25B2}", enabled = i > 1, callback = function()
+            -- (no arrow where it can't move: a blank keeps the columns in line)
+            { text = i > 1 and "\u{25B2}" or " ", enabled = i > 1, callback = function()
                   order[i], order[i - 1] = order[i - 1], order[i]
                   self.sources_order = order
                   reopen()
               end },
-            { text = "\u{25BC}", enabled = i < #order, callback = function()
+            { text = i < #order and "\u{25BC}" or " ", enabled = i < #order, callback = function()
                   order[i], order[i + 1] = order[i + 1], order[i]
                   self.sources_order = order
                   reopen()
