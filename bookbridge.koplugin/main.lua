@@ -2711,11 +2711,12 @@ local function fetchJsonUrl(url, log_prefix, attempt)
     socketutil:reset_timeout()
     debugLog(log_prefix .. " GET " .. (url:gsub("%?.*$", "?...")) .. " -> " .. tostring(ok and code or ("error: " .. tostring(code))))
     -- Open Library resets connections now and then; one retry, once.
-    if (not ok or code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE) and attempt == 1 then
+    local unreachable = not ok or (type(code) ~= "number" and code ~= socketutil.TIMEOUT_CODE and code ~= socketutil.SINK_TIMEOUT_CODE)
+    if (unreachable or code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE) and attempt == 1 then
         require("ffi/util").sleep(1)
         return fetchJsonUrl(url, log_prefix, 2)
     end
-    if not ok then return nil, "unreachable" end
+    if unreachable then return nil, "unreachable" end
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SINK_TIMEOUT_CODE then return nil, "timeout" end
     if code ~= 200 then return nil, "HTTP " .. tostring(code) end
     local dok, obj = pcall(JSON.decode, table.concat(sink_table))
@@ -4237,7 +4238,13 @@ local function doCheckForUpdate(update_url, socks5_proxy)
         return nil, nil, _("Couldn't reach GitHub to check for updates.")
     end
     local content = table.concat(sink_table)
-    if type(code) ~= "number" or code >= 400 then
+    -- (LuaSocket says "no answer" -- DNS, refused, no route -- as a string
+    -- where the status goes, without raising)
+    if type(code) ~= "number" then
+        debugLog("[update] <- connection error: " .. tostring(code))
+        return nil, nil, _("Couldn't reach GitHub to check for updates.")
+    end
+    if code >= 400 then
         debugLog("[update] <- HTTP " .. tostring(code))
         return nil, code, T(_("GitHub returned HTTP %1."), tostring(code))
     end
@@ -4587,6 +4594,9 @@ function CO.latest(id)
     local body, code, err = doHttpGetString("https://api.github.com/repos/" .. def.repo .. "/releases/latest",
         nil, "[companion]", 15, 30)
     if not body then
+        -- (doHttpGetString hands back the raw socket message, e.g. "temporary
+        -- failure in name resolution", when nothing answered)
+        if code == nil then return nil, T(_("Couldn't reach GitHub to look up %1 -- is this reader online?"), def.label) end
         return nil, err or T(_("Couldn't reach GitHub (HTTP %1)."), tostring(code))
     end
     local ok, rel = pcall(JSON.decode, body)
@@ -10867,6 +10877,12 @@ SRC.DEF.zlibrary = {
         if state.installed then return _("restart needed") end
         return _("not installed")
     end,
+    -- installed, waiting for KOReader's restart: worth saying even when
+    -- another source found files (it was just set up and is expected)
+    pending = function(self)
+        local state = self:companionState("zlibrary")
+        return state.installed and not state.disabled
+    end,
     session = function()
         local Config = CO.module("zlibrary.config")
         local ok, s = pcall(function() return Config.getUserSession() end)
@@ -11042,7 +11058,7 @@ SRC.DEF.shelfmark = {
         -- Ledger's "Get it" come with words only: the other sources take
         -- those, and Shelfmark's catalogue is the search that came before.
         if not (book and book.provider and book.provider ~= "" and book.provider_id and book.provider_id ~= "") then
-            return {}
+            return nil, nil, nil, true
         end
         local qs = {
             "provider=" .. socketurl.escape(book.provider or ""),
@@ -11179,24 +11195,44 @@ end
 function Bookbridge:browseReleases(book, manual_query, caller_menu)
     if caller_menu then UIManager:close(caller_menu) end
     local query = (manual_query and manual_query ~= "") and manual_query or defaultReleaseQuery(book)
-    local releases, tried, errors = {}, {}, {}
+    local releases, tried, errors, notes = {}, {}, {}, {}
+    local shelfmark_sat_out = false
     for _unused, id in ipairs(self:sourcesInOrder()) do
         local src = SRC.DEF[id]
         if src.configured(self) then
-            tried[#tried + 1] = src.label
-            local got, err, cancelled = src.search(self, query, book, manual_query)
+            local got, err, cancelled, skipped = src.search(self, query, book, manual_query)
             if cancelled then return end
-            if type(got) == "table" then
-                for _u2, r in ipairs(got) do releases[#releases + 1] = r end
-            elseif err then
-                errors[#errors + 1] = src.label .. ": " .. tostring(err)
+            if skipped then
+                -- (Shelfmark, given words only: not asked, so not named as searched)
+                shelfmark_sat_out = shelfmark_sat_out or id == "shelfmark"
+            else
+                tried[#tried + 1] = src.label
+                if type(got) == "table" then
+                    for _u2, r in ipairs(got) do releases[#releases + 1] = r end
+                elseif err then
+                    errors[#errors + 1] = src.label .. ": " .. tostring(err)
+                end
             end
             if #releases > 0 and self.sources_stop_first then break end
         elseif src.missing then
-            -- switched on but not ready (plugin awaiting a restart, no
-            -- key yet): said, not silently skipped
-            errors[#errors + 1] = src.label .. ": " .. tostring(src.missing(self))
+            -- switched on but not ready. Awaiting a restart: always said.
+            -- Not set up at all (no key, never installed): said only when
+            -- nothing came back, where it explains the empty list -- not on
+            -- every search that found files elsewhere.
+            -- (most of these already start with the source's name)
+            local msg = tostring(src.missing(self))
+            local line = msg:sub(1, #src.label) == src.label and msg or (src.label .. ": " .. msg)
+            if src.pending and src.pending(self) then errors[#errors + 1] = line else notes[#notes + 1] = line end
         end
+    end
+    if #releases == 0 then
+        for _u3, n in ipairs(notes) do errors[#errors + 1] = n end
+    end
+    if #tried == 0 and shelfmark_sat_out then
+        UIManager:show(InfoMessage:new{
+            text = _("Shelfmark finds files for a book picked in its catalogue: use Search & request a book, then tap the book."),
+        })
+        return
     end
     if #tried == 0 then
         -- (a source that is ready but switched off is the likelier reason)
@@ -11320,7 +11356,13 @@ function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors,
     if #releases == 0 then
         local where = table.concat(tried or {}, ", ")
         local detail = (errors and #errors > 0) and ("\n\n" .. table.concat(errors, "\n")) or ""
-        if SRC.DEF.shelfmark.configured(self) and SRC.enabled(self, "shelfmark") then
+        local shelfmark_on = SRC.DEF.shelfmark.configured(self) and SRC.enabled(self, "shelfmark")
+        -- (a plain request names a book from Shelfmark's catalogue: provider
+        -- + id. Words only -- "Files from your sources", the Ledger's "Get
+        -- it" -- it refuses: "book_data missing required field(s): author,
+        -- provider, provider_id")
+        local picked = book and book.provider and book.provider ~= "" and book.provider_id and book.provider_id ~= ""
+        if shelfmark_on and picked then
             -- the server can keep looking: a plain request
             UIManager:show(InfoMessage:new{
                 text = T(_("Nothing found on %1. You can still submit a plain request and let Shelfmark keep looking."), where) .. detail,
@@ -11329,8 +11371,9 @@ function Bookbridge:browseReleasesContinue(book, manual_query, releases, errors,
             self:confirmBookLevelRequest(book)
             return
         end
+        local hint = shelfmark_on and ("\n\n" .. _("To have Shelfmark look for it, use Search & request a book and tap the book.")) or ""
         UIManager:show(InfoMessage:new{
-            text = T(_("Nothing found on %1 for \"%2\"."), where, truncate(defaultReleaseQuery(book), 80) or "?") .. detail,
+            text = T(_("Nothing found on %1 for \"%2\"."), where, truncate(defaultReleaseQuery(book), 80) or "?") .. hint .. detail,
         })
         return
     end

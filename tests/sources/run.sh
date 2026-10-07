@@ -81,6 +81,7 @@ local function bb(t)
     return setmetatable(t, { __index = Bookbridge })
 end
 local CONT = {}
+local REAL_CONTINUE = Bookbridge.browseReleasesContinue   -- (its real "nothing found" branch, checked in 5b)
 Bookbridge.browseReleasesContinue = function(self, book, q, releases, errors, tried)
     if #releases == 0 then return CONT_ORIG(self, book, q, releases, errors, tried) end
     CONT = { releases = releases, errors = errors, tried = tried }
@@ -164,6 +165,24 @@ do
     b4:getBook("Emma", "Jane Austen")
     local said = table.concat(CONT.errors or {}, " ")
     ck(asked == 0 and not said:find("Shelfmark", 1, true) and #CONT.releases == 2, "words only: Shelfmark isn't asked, no Shelfmark error, the other sources' files shown")
+    ck(not table.concat(CONT.tried or {}, ","):find("Shelfmark", 1, true), "words only: Shelfmark isn't named as searched")
+    -- Shelfmark the only source: pointed at its catalogue, not "no source set up"
+    local b5 = bb({ server_url = "http://s" }); b5.sources_enabled = { zlibrary = false }
+    SHOWN = {}
+    b5:getBook("Emma", "Jane Austen")
+    local last = SHOWN[#SHOWN]
+    ck(last and last.kind == "info" and tostring(last.text):find("catalogue", 1, true), "words only, Shelfmark the only source: told to pick the book in its catalogue")
+end
+-- 4d. a source that's switched on but not set up (Anna's without a key) is
+-- named only when nothing came back -- not on every search that found files
+do
+    local b6 = bb({})          -- Z-Library present (above), Anna's on by default, no key
+    b6:browseReleases({ title = "Persuasion", authors = { "Jane Austen" } })
+    ck(#CONT.releases > 0 and not table.concat(CONT.errors or {}, " "):find("Anna's Archive", 1, true), "results from Z-Library: no 'Anna's isn't set up' note")
+    local keep = ZL.books; ZL.books = {}
+    b6:browseReleases({ title = "Nothing here" })
+    ck(CONT.empty and table.concat(CONT.errors or {}, " "):find("Anna's Archive", 1, true), "nothing found anywhere: the note says why")
+    ZL.books = keep
 end
 -- Anna's Archive direct (a key, no helper): every domain was already tried
 -- inside one search, so MIRROR_DOWN ends it; through the helper the
@@ -209,6 +228,26 @@ b = bb({})
 SHOWN = {}
 b:browseReleases({ title = "Nothing" })
 ck(CONT.empty and not (SHOWN[#SHOWN] and SHOWN[#SHOWN].kind == "booklevel"), "nothing anywhere, no server: no request offered")
+
+-- 5b. the real "nothing found" branch: a plain request names a book from
+-- Shelfmark's catalogue (provider + id); words only, Shelfmark refuses one
+-- ("book_data missing required field(s): author, provider, provider_id",
+-- seen live), so it isn't offered -- the message points at the catalogue
+do
+    local b8 = bb({ server_url = "http://s" })
+    SHOWN = {}
+    REAL_CONTINUE(b8, { title = "Qzx" }, nil, {}, {}, { "Z-Library" })
+    local kinds = {}
+    for _u, w in ipairs(SHOWN) do kinds[#kinds + 1] = tostring(w.kind) end
+    ck(not table.concat(kinds, ","):find("booklevel", 1, true) and SHOWN[#SHOWN] and SHOWN[#SHOWN].kind == "info"
+        and tostring(SHOWN[#SHOWN].text):find("Search & request", 1, true), "words only, nothing found: no plain request; pointed at Search & request")
+    SHOWN = {}
+    REAL_CONTINUE(b8, { title = "Qzx", provider = "openlibrary", provider_id = "OL9W" }, nil, {}, {}, { "Shelfmark" })
+    ck(SHOWN[#SHOWN] and SHOWN[#SHOWN].kind == "booklevel", "a catalogue pick, nothing found: plain request offered")
+    SHOWN = {}
+    REAL_CONTINUE(bb({}), { title = "Qzx" }, nil, {}, {}, { "Z-Library" })
+    ck(SHOWN[#SHOWN] and SHOWN[#SHOWN].kind == "info" and not tostring(SHOWN[#SHOWN].text):find("Shelfmark", 1, true), "no server, nothing found: no Shelfmark hint")
+end
 
 -- 6. a changed plugin degrades, never crashes
 package.loaded["zlibrary.api"].search = function() error("boom: signature changed") end
@@ -257,7 +296,7 @@ do
     b7:browseReleases({ title = "Emma" })
     lfs.attributes = old_attr
     local note = table.concat(CONT.errors or {}, "|")
-    ck(#(CONT.releases or {}) == 1 and note:find("Z%-Library: Z%-Library is installed %-%- restart"), "Z-Library installed, not loaded: results from Anna's, and a 'restart KOReader' note (" .. note .. ")")
+    ck(#(CONT.releases or {}) == 1 and note:find("Z%-Library is installed %-%- restart") and not note:find("Z%-Library: Z%-Library"), "Z-Library installed, not loaded: results from Anna's, and a 'restart KOReader' note (" .. note .. ")")
     package.loaded["zlibrary.api"], package.loaded["zlibrary.config"] = api_mod, cfg_mod
 end
 -- the Ledger's one-glance states
