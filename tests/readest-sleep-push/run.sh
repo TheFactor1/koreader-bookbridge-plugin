@@ -160,25 +160,31 @@ local function reader(store, settings)
             if k == "doc_props" then return { title = "Some Book" } end end } } }, { __index = Bookbridge })
     return b
 end
+-- (the upload runs a moment after the page is drawn, in steps -- see
+-- tests/readest-auto-upload, which also covers the cover step stubbed here)
+Bookbridge.readestCoverFromOpenBook = function() end
 local store = mkstore()
 local b = reader(store)
-for i = 1, 4 do b:onPageUpdate(i) end
+for i = 1, 4 do b:onPageUpdate(i) end; drain()
+drain()
 ck(#uploads == 0, "4 page updates (opening + 3 turns): not yet -- a peek doesn't upload")
 b:onPageUpdate(5)
-ck(#uploads == 1, "5th page update: the book is uploaded")
+ck(#uploads == 0, "5th page update: not inside the page turn itself")
+drain()
+ck(#uploads == 1, "...but just after: the book is uploaded")
 local u = uploads[1]
 ck(u and u.row.hash == "abc123" and u.row.format == "EPUB" and u.row.file_path == "/mnt/us/books/Some Book.epub"
     and u.row.title == "Some Book" and u.row.meta_hash == "meta1" and u.row.local_present == 1,
     "...with the Kindle's own file, hash, format, title and meta hash")
 ck(u and u.opts.store == store and u.opts.sync_path == "/p" and u.opts.settings.user_id == "u", "...through Readest's own store and upload code")
-for i = 6, 30 do b:onPageUpdate(i) end
+for i = 6, 30 do b:onPageUpdate(i) end; drain()
 ck(#uploads == 1, "once per sitting, not on every page after")
 ck(shows == 0, "no popups at all")
 uploads = {}
 -- the upload is opt-in: off (the default for a new install) means pages aren't even counted
 do
     local b_off = reader(mkstore()); b_off.readest_upload = false
-    for i = 1, 30 do b_off:onPageUpdate(i) end
+    for i = 1, 30 do b_off:onPageUpdate(i) end; drain()
     ck(#uploads == 0 and b_off._rd_pages == nil, "readest_upload off: 30 pages, nothing uploaded, nothing counted")
     b_off:autoUploadToReadest()
     ck(#uploads == 0, "...and a direct call uploads nothing either")
@@ -201,25 +207,25 @@ do
     ck(settings_with({}, nil).readest_download == "reading" and settings_with({ readest_download = "off" }, nil).readest_download == "off", "downloads: books being read elsewhere, unless switched off")
 end
 local b2 = reader(mkstore({ abc123 = { hash = "abc123", title = "Some Book", uploaded_at = 1 } }))
-for i = 1, 6 do b2:onPageUpdate(i) end
+for i = 1, 6 do b2:onPageUpdate(i) end; drain()
 ck(#uploads == 0 and logs[#logs]:find("already in Readest", 1, true), "already uploaded: skipped")
 local b3 = reader(mkstore({ abc123 = { hash = "abc123", title = "Some Book", uploaded_at = 1, deleted_at = 5 } }))
-for i = 1, 6 do b3:onPageUpdate(i) end
+for i = 1, 6 do b3:onPageUpdate(i) end; drain()
 ck(#uploads == 1 and uploads[1].row.deleted_at == nil, "removed from Readest earlier and read again: uploaded again")
 uploads = {}; ONLINE = false
 local b4 = reader(mkstore())
-for i = 1, 6 do b4:onPageUpdate(i) end
+for i = 1, 6 do b4:onPageUpdate(i) end; drain()
 ck(#uploads == 0 and logs[#logs]:find("offline", 1, true), "offline: nothing sent")
 ONLINE = true
-for i = 1, 5 do b4:onPageUpdate(i) end
+for i = 1, 5 do b4:onPageUpdate(i) end; drain()
 ck(#uploads == 1, "...and the next sitting's reading uploads it")
 uploads = {}
 local b5 = reader(mkstore(), { auto_sync = false, access_token = "t", user_id = "u" })
-for i = 1, 6 do b5:onPageUpdate(i) end
+for i = 1, 6 do b5:onPageUpdate(i) end; drain()
 ck(#uploads == 0, "Readest auto sync off: nothing uploaded")
 package.loaded["library.syncbooks"] = { uploadAndRecord = function() error("readest changed") end }
 local b6 = reader(mkstore())
-local okp = pcall(function() for i = 1, 6 do b6:onPageUpdate(i) end end)
+local okp = pcall(function() for i = 1, 6 do b6:onPageUpdate(i) end; drain() end)
 ck(okp and logs[#logs]:find("auto-upload failed", 1, true), "a Readest error is caught and logged")
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)
