@@ -15092,6 +15092,10 @@ function Bookbridge:collectStatusRows()
         cw = statusCheckedLabel(checks.cwa, T(_("Signed in, %1 books"), n)) or T(_("%1 books synced"), n)
     end
     add({ text = _("Calibre-Web server -- library sync (optional)"), mandatory = cw, action = function() self:editCwaSettings() end })
+    -- (right after what it checks: on a Kindle-size screen, last in the
+    -- list put it alone on a second page)
+    add({ text = _("Check connections now"), mandatory = checks.at and os.date("%H:%M", checks.at) or "",
+        action = function() self:runStatusChecks() end })
 
     -- Updates
     local build
@@ -15122,8 +15126,6 @@ function Bookbridge:collectStatusRows()
 
     add({ text = _("What you need to host"), mandatory = _("Read"),
         action = function() self:showHostingGuide() end })
-    add({ text = _("Check connections now"), mandatory = checks.at and os.date("%H:%M", checks.at) or "",
-        action = function() self:runStatusChecks() end })
     for _unused, r in ipairs(rows) do r.mandatory = statusShort(r.mandatory) end
     return rows
 end
