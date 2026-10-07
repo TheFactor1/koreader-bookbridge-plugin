@@ -9420,7 +9420,7 @@ function Bookbridge:showSetupQrCode()
     local function confirm(via)
         local ConfirmBox = require("ui/widget/confirmbox")
         UIManager:show(ConfirmBox:new{
-            text = _("This shows a code with everything another reader needs: your logins and keys (Shelfmark, Calibre-Web, Anna's Archive, Hardcover), your sources and the AI relay. It is encrypted, but anyone who photographs the screen while it's open could use it. It works once and expires in 5 minutes.\n\nOn the other reader: Bookbridge > Settings > Set up another device > Import settings from another reader, then scan this code with your phone and send it there with Type on your phone."),
+            text = _("This shows a code with everything another reader needs: your logins and keys (Shelfmark, Calibre-Web, Anna's Archive, Hardcover), your sources and the AI relay. It is encrypted, but anyone who photographs the screen while it's open could use it. It works once and expires in 5 minutes.\n\nOn the other reader: Bookbridge > Settings > Set up another device > Import settings from another reader (on a new reader: Start here > Copy another reader's settings), then scan this code with your phone and send it there with Type on your phone."),
             ok_text = _("Show it"),
             ok_callback = function()
                 local Trapper = require("ui/trapper")
@@ -9522,11 +9522,14 @@ function Bookbridge:importSettingsFromText()
                     is_enter_default = true,
                     callback = function()
                         local pairing_text = dialog:getInputText()
-                        UIManager:close(dialog)
-                        if pairing_text and pairing_text:gsub("%s", "") ~= "" then
-                            local Trapper = require("ui/trapper")
-                            Trapper:wrap(function() self:applyPairingText(pairing_text) end)
+                        if not pairing_text or pairing_text:gsub("%s", "") == "" then
+                            -- (left open: nothing to import yet)
+                            UIManager:show(InfoMessage:new{ text = _("Paste or type the other reader's code first."), timeout = 3 })
+                            return
                         end
+                        UIManager:close(dialog)
+                        local Trapper = require("ui/trapper")
+                        Trapper:wrap(function() self:applyPairingText(pairing_text) end)
                     end,
                 },
             },
@@ -9605,10 +9608,21 @@ function Bookbridge:applyPairingText(pairing_text)
         text = T(_("Import these settings?\n\nServer: %1\nCalibre-Web: %2\n\nThis overwrites your current Server settings and Calibre-Web settings on this device. Your download folder is left alone."),
             tostring(settings_tbl.server_url), tostring(settings_tbl.cwa_url))
     else
-        local srcs = type(settings_tbl.sources_order) == "table" and table.concat(settings_tbl.sources_order, ", ") or "--"
-        text = T(_("Import these settings?\n\nShelfmark: %1\nCalibre-Web: %2\nAnna's Archive key: %3\nHardcover token: %4\nSources: %5\n\nThis replaces this reader's connection settings with the other reader's. Your download folder and installed plugins stay as they are."),
+        -- (the sources by name, in the other reader's order; none saved
+        -- there means it never changed the default)
+        local names = {}
+        for _unused, id in ipairs(type(settings_tbl.sources_order) == "table" and settings_tbl.sources_order or {}) do
+            local def = type(SRC) == "table" and SRC.DEF and SRC.DEF[id]
+            names[#names + 1] = def and def.label or tostring(id)
+        end
+        local srcs = #names > 0 and table.concat(names, ", ") or _("default order")
+        text = T(_("Import these settings?\n\nShelfmark: %1\nCalibre-Web: %2\nAnna's Archive key: %3\nHardcover token: %4\nSources: %5"),
             settings_tbl.server_url and tostring(settings_tbl.server_url) or "--", settings_tbl.cwa_url and tostring(settings_tbl.cwa_url) or "--",
             has("annas_download_key"), has("hardcover_token"), srcs)
+        if type(settings_tbl.ledger) == "table" and next(settings_tbl.ledger) then
+            text = text .. "\n" .. _("Reading Ledger: your runner, rival and their names")
+        end
+        text = text .. "\n\n" .. _("This replaces this reader's connection settings with the other reader's. Your download folder stays as it is; plugins the other reader has and this one lacks are offered next.")
     end
     UIManager:show(ConfirmBox:new{
         text = text,
@@ -15298,7 +15312,15 @@ function Bookbridge:maybeShowFirstRunSetup()
     if self:sourcesConfigured() then return end               -- (a source already works: not a first run)
     if G_reader_settings:isTrue("bookbridge_first_run_shown") then return end
     G_reader_settings:saveSetting("bookbridge_first_run_shown", true)
-    UIManager:scheduleIn(1, function() self:showStatus({ no_auto_check = true }) end)
+    UIManager:scheduleIn(1, function()
+        -- the Reading Ledger, when it's here and not set up yet, introduces
+        -- itself with a setup that covers ours (Readest, Z-Library, Anna's);
+        -- one welcome, not two on top of each other. (Asked a second later:
+        -- plugins start in folder order, Bookbridge before the Ledger.)
+        local ledger = self.ui and self.ui.ledger
+        if ledger and ledger.settings and not ledger.settings:readSetting("onboarded") then return end
+        self:showStatus({ no_auto_check = true })
+    end)
 end
 
 -- The same "what runs where" the README opens with, on the device, so a new
