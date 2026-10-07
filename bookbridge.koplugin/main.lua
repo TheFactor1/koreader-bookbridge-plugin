@@ -11036,6 +11036,14 @@ SRC.DEF.shelfmark = {
     end,
     missing = function(self) return _("No Shelfmark server is connected.") end,
     search = function(self, query, book, manual_query)
+        -- Shelfmark finds files for a book picked in its catalogue (provider
+        -- + id); typed words alone it refuses ("Parameters 'provider' and
+        -- 'book_id' are required"). "Files from your sources" and the
+        -- Ledger's "Get it" come with words only: the other sources take
+        -- those, and Shelfmark's catalogue is the search that came before.
+        if not (book and book.provider and book.provider ~= "" and book.provider_id and book.provider_id ~= "") then
+            return {}
+        end
         local qs = {
             "provider=" .. socketurl.escape(book.provider or ""),
             "book_id=" .. socketurl.escape(book.provider_id or ""),

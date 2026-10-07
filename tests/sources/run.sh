@@ -131,19 +131,21 @@ ck(ZL.search_calls == 1 and ZL.last_query == "Emma Jane Austen", "getBook(title,
 b:getBook("Emma", "")
 ck(ZL.last_query == "Emma", "getBook without an author")
 
--- 4. order and on/off
+-- 4. order and on/off (a book picked in Shelfmark's catalogue: it carries
+-- the catalogue's provider + id, which Shelfmark's release search needs)
+local PICKED = { title = "Emma", provider = "openlibrary", provider_id = "OL1W" }
 b = bb({ server_url = "http://s", _shelf = { { title = "Emma.epub", source = "prowlarr", indexer = "x" } } })
-b:browseReleases({ title = "Emma" })
+b:browseReleases(PICKED)
 ck(#CONT.tried == 2 and CONT.tried[1] == "Z-Library" and CONT.tried[2] == "Shelfmark" and #CONT.releases == 3, "default order: Z-Library then Shelfmark, results merged")
 b.sources_order = { "shelfmark", "zlibrary" }
-b:browseReleases({ title = "Emma" })
+b:browseReleases(PICKED)
 ck(CONT.tried[1] == "Shelfmark" and CONT.tried[2] == "Z-Library", "order setting honoured")
 b.sources_stop_first = true
-b:browseReleases({ title = "Emma" })
+b:browseReleases(PICKED)
 ck(#CONT.tried == 1 and CONT.tried[1] == "Shelfmark" and #CONT.releases == 1, "stop at the first source with results")
 b.sources_stop_first = false
 b.sources_enabled = { zlibrary = false }
-b:browseReleases({ title = "Emma" })
+b:browseReleases(PICKED)
 ck(#CONT.tried == 1 and CONT.tried[1] == "Shelfmark", "a switched-off source is skipped")
 do
     local b2 = bb({}); b2.sources_enabled = { zlibrary = false }
@@ -152,6 +154,17 @@ do
     ck(SHOWN[#SHOWN] and SHOWN[#SHOWN].kind == "confirm" and SHOWN[#SHOWN].text:find("Z%-Library is turned off"), "the only source switched off: says so, not 'install it'")
 end
 ck(b:sourcesSummary() == "Shelfmark", "summary lists only enabled, configured sources")
+-- 4c. words only ("Files from your sources", the Ledger's "Get it"): Shelfmark
+-- isn't asked -- its release search refuses a book without provider + id
+-- ("Parameters 'provider' and 'book_id' are required", seen live)
+do
+    local asked = 0
+    local b4 = bb({ server_url = "http://s", _shelf = { { title = "Emma.epub", source = "prowlarr", indexer = "x" } } })
+    b4.apiRequest = function() asked = asked + 1; return { error = "Parameters 'provider' and 'book_id' are required" }, 400 end
+    b4:getBook("Emma", "Jane Austen")
+    local said = table.concat(CONT.errors or {}, " ")
+    ck(asked == 0 and not said:find("Shelfmark", 1, true) and #CONT.releases == 2, "words only: Shelfmark isn't asked, no Shelfmark error, the other sources' files shown")
+end
 -- Anna's Archive direct (a key, no helper): every domain was already tried
 -- inside one search, so MIRROR_DOWN ends it; through the helper the
 -- mirror refresh gets up to three more tries.
