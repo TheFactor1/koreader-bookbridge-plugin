@@ -4,6 +4,19 @@ Plain-language notes on what changed and why. Build ids refer to the
 `build` field in `shelfmark.koplugin/manifest.json`, which is what
 **Shelfmark → Check for updates** compares against.
 
+## 2026-10-08 — v0.9.8
+
+- **Smoother opening and closing of books**: the reader no longer listens
+  for your phone all the time. It used to stop and start its little phone
+  receiver (port 8090) every time a book opened or closed -- firewall rules
+  out and back in, about 0.1 s on a Kindle each time. Now it starts only for
+  **Type on your phone** and **Set up another device**, and stops once their
+  code has run out (or the reader sleeps).
+- **Removed**: sending text to the reader from a phone shortcut
+  (`http://<reader>:8090/clip?text=...`) and the "Phone clipboard" line in
+  Status & setup. **Type on your phone** does the same job when a box is
+  open.
+
 ## 2026-10-07 — v0.9.7
 
 - **Series come with books from Calibre-Web**: a book downloaded from your

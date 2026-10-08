@@ -244,8 +244,8 @@ function Bookbridge:init()
         UIManager:scheduleIn(30, function() self:autoCheckForUpdate("startup") end)
     end
     self:registerFileDialogButtons()
-    -- Always-on clipboard receiver so a phone can push text into the clipboard.
-    self:startClipboardReceiver()
+    -- (the phone receiver on 8090 starts only when Type on your phone or Set
+    -- up another device needs it -- see startClipboardReceiver)
     -- (the other plugin instances exist a tick from now)
     UIManager:nextTick(function() self:tuckCompanions() end)
     if self.readest_welcome_pending and not (self.ui and self.ui.document) then
@@ -705,7 +705,7 @@ end
 -- step to derive this from git, so it has to be kept in sync manually
 -- (matches the tag pushed via `gh release create`, e.g. this is "0.3.0"
 -- for tag "v0.3.0").
-local PLUGIN_VERSION = "0.9.7"
+local PLUGIN_VERSION = "0.9.8"
 local UPDATE_REPO = "TheFactor1/koreader-bookbridge-plugin"
 
 -- This file's own directory on disk, derived from the currently-executing
@@ -9490,6 +9490,10 @@ function Bookbridge:showSetupQrCode()
     -- through the server's pairing relay when one is set (readers on
     -- different networks); a choice when both are possible.
     self:startClipboardReceiver()
+    -- (up for two minutes of choosing; an offer made keeps it up longer, and
+    -- a cancel or the relay lets it go when they're up)
+    CLIP.grace = { expires = os.time() + 120 }
+    self:stopReceiverWhenIdle()
     local ip = localAddress()
     local lan_ok = ip ~= nil and CLIP.server ~= nil
     local relay_ok = self.pairing_relay_url ~= nil and self.pairing_relay_url ~= ""
@@ -9554,8 +9558,11 @@ function Bookbridge:generateAndShowPairingQr(via)
         end
         pairing_text = "bookbridge-pair:relay:" .. pair_code .. ":" .. PAIR.b64url(key)
     else
+        -- (up again if the choosing took longer than its two minutes)
+        self:startClipboardReceiver()
         local ip = localAddress()
         if not ip or not CLIP.server then
+            self:stopReceiverWhenIdle()
             UIManager:show(InfoMessage:new{ text = _("Connect this reader to Wi-Fi first -- the other reader fetches the settings from it directly.") })
             return
         end
@@ -9563,6 +9570,7 @@ function Bookbridge:generateAndShowPairingQr(via)
         local code = raw:gsub(".", function(c) return string.format("%02x", c:byte()) end)
         -- (a new offer replaces the old; nothing is written to disk)
         CLIP.pair = { code = code, blob_b64 = blob_b64, expires = os.time() + PAIR.TTL, tries = 0 }
+        self:stopReceiverWhenIdle()
         pairing_text = "bookbridge-pair:" .. ip .. ":" .. CLIPBOARD_RECEIVER_PORT .. ":" .. code .. ":" .. PAIR.b64url(key)
     end
     debugLog("[pair] offer shown (" .. tostring(via) .. ")")
@@ -14281,18 +14289,16 @@ end
 
 -- Device sleeping: capture now, push on the next resume (a scheduled push
 -- wouldn't survive the sleep). No-op in FileManager (no document).
--- ===== Clipboard receiver ("Send to Kindle") =====
--- A tiny always-on HTTP listener that lets a phone push text straight into
--- KOReader's clipboard, so you can paste instead of typing on the device.
--- Unlike the debug HTTP inspector, it does exactly one thing -- set the
--- clipboard -- and exposes nothing else about the device.
---
--- Send with a GET whose `text` query parameter carries the URL-encoded text:
---   GET /clip?text=hello%20scribe%20123
--- The query form accepts any content -- spaces, punctuation, URLs, slashes --
--- because the value is parsed here rather than routed through URL path
--- segments (which split on "/"). Then long-press any input field on the
--- device -> Clipboard -> paste.
+-- ===== Phone receiver (port 8090) =====
+-- A tiny HTTP listener for two things a phone does for the reader: the page
+-- behind "Type on your phone" (POST /type puts what's typed into the open
+-- box), and "Set up another device", whose encrypted settings it serves once
+-- (GET /pair/<code>). It runs only while one of those is open: started by
+-- typeOnPhone / showSetupQrCode, stopped when their session or offer runs
+-- out (stopReceiverWhenIdle) and when the device sleeps. It used to run all
+-- the time for a share-text-from-the-phone shortcut (GET /clip); stopping
+-- and starting it with every book opened and closed cost ~90 ms each way
+-- on a Kindle, and the shortcut is gone (v0.9.8).
 -- (BOOKBRIDGE_CLIPBOARD_PORT: another port, for a desktop where 8090 is taken)
 -- (CLIPBOARD_RECEIVER_PORT and CLIP are declared above the PAIR block: the
 -- pairing code, earlier in this file, serves its offer through them)
@@ -14387,7 +14393,9 @@ function Bookbridge:_onPairRequest(path, method, client)
     end
     CLIP.pair = nil
     debugLog("[pair] settings handed to the other reader")
-    return self:_clipboardSend(client, 200, JSON.encode({ ciphertext = offer.blob_b64 }), "application/json")
+    self:_clipboardSend(client, 200, JSON.encode({ ciphertext = offer.blob_b64 }), "application/json")
+    -- (done: the receiver goes once nothing else is waiting)
+    UIManager:nextTick(function() self:stopReceiverWhenIdle() end)
 end
 
 function Bookbridge:_onClipboardRequest(data, client)
@@ -14425,58 +14433,44 @@ function Bookbridge:_onClipboardRequest(data, client)
         if session and t == session.token then return page(nil, t) end
         return page(no_session)
     end
-    local text
-    if path == "/type" and method == "POST" then
-        -- the body follows the headers the server already read
-        local len = tonumber(data:lower():match("\ncontent%-length:%s*(%d+)")) or 0
-        if len > 64 * 1024 then
-            return page('<div class="msg bad">That is too long to send.</div>', session and session.token)
-        end
-        local body = ""
-        if len > 0 then
-            local got, _err, partial = client:receive(len)
-            body = got or partial or ""
-        end
-        if not (session and param(body, "t") == session.token) then return page(no_session) end
-        text = param(body, "text") or ""
-    elseif path == "/clip" then
-        -- (share shortcuts: GET /clip?text=..., no page)
-        text = param(query, "text")
-        if not text or text == "" then
-            return self:_clipboardSend(client, 400, "Missing text parameter")
-        end
-    else
+    if not (path == "/type" and method == "POST") then
         return self:_clipboardSend(client, 404, "Not found")
     end
+    -- the body follows the headers the server already read
+    local len = tonumber(data:lower():match("\ncontent%-length:%s*(%d+)")) or 0
+    if len > 64 * 1024 then
+        return page('<div class="msg bad">That is too long to send.</div>', session and session.token)
+    end
+    local body = ""
+    if len > 0 then
+        local got, _err, partial = client:receive(len)
+        body = got or partial or ""
+    end
+    if not (session and param(body, "t") == session.token) then return page(no_session) end
+    local text = param(body, "text") or ""
     -- Phone line endings, and no control characters: a newline in a one-line
     -- box would press its Enter.
     text = text:gsub("\r\n?", "\n"):gsub("[%z\1-\9\11-\31\127]", "")
     -- (a phone's text box adds a trailing newline or space to a pasted key)
-    if path == "/type" then text = text:gsub("^%s+", ""):gsub("%s+$", "") end
+    text = text:gsub("^%s+", ""):gsub("%s+$", "")
     local target = findFocusedInputText()
     -- one-line box: a key that wrapped on the phone arrives in one piece
     if target and not target.allow_newline then text = text:gsub("\n", "") end
-    if path == "/type" then
-        if text == "" then
-            return page('<div class="msg bad">Nothing to send -- type something first.</div>', session.token)
-        end
-        page(target and '<div class="msg ok">Sent. It\'s in the box on your reader.</div>'
-            or '<div class="msg ok">Sent -- but no box is open on the reader, so it\'s on its clipboard: hold a box there and choose Paste.</div>',
-            session.token)
-    else
-        self:_clipboardSend(client, 200, "OK")
+    if text == "" then
+        return page('<div class="msg bad">Nothing to send -- type something first.</div>', session.token)
     end
-    -- Into the open box; the clipboard only when there is none, or for a
-    -- share (typed keys and passwords don't linger on the clipboard).
+    page(target and '<div class="msg ok">Sent. It\'s in the box on your reader.</div>'
+        or '<div class="msg ok">Sent -- but no box is open on the reader, so it\'s on its clipboard: hold a box there and choose Paste.</div>',
+        session.token)
+    -- Into the open box; the clipboard only when there is none (typed keys
+    -- and passwords don't linger on the clipboard).
     local Device = require("device")
-    if (path ~= "/type" or not target) and Device.input and Device.input.setClipboardText then
+    if not target and Device.input and Device.input.setClipboardText then
         Device.input.setClipboardText(text)
     end
     debugLog("[clipboard] received " .. tostring(#text) .. " chars")
-    local preview = text
-    if #preview > 60 then preview = preview:sub(1, 60) .. "..." end
-    -- typed on the phone page: often a key or a password, so don't show it
-    if path == "/type" then preview = T(_("%1 characters from your phone"), #text) end
+    -- (often a key or a password, so it isn't shown)
+    local preview = T(_("%1 characters from your phone"), #text)
     UIManager:nextTick(function()
         -- the "type on your phone" code has done its job
         if CLIP.qr and UIManager:isWidgetShown(CLIP.qr) then
@@ -14505,6 +14499,7 @@ function Bookbridge:typeOnPhone()
     self:startClipboardReceiver()
     local ip = localAddress()
     if not ip or not CLIP.server then
+        self:stopReceiverWhenIdle()
         UIManager:show(InfoMessage:new{
             text = not ip and _("Typing on your phone needs this reader on Wi-Fi. Connect it, then try again.")
                 or T(_("Couldn't open port %1 on this reader for the phone (something else is using it)."), CLIPBOARD_RECEIVER_PORT),
@@ -14519,6 +14514,7 @@ function Bookbridge:typeOnPhone()
     if not bytes or #bytes < 8 then bytes = tostring(math.random()) .. tostring(os.time()) end
     local token = (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end)):sub(1, 16)
     CLIP.session = { token = token, expires = os.time() + 600 }
+    self:stopReceiverWhenIdle()
     local url = "http://" .. ip .. ":" .. CLIPBOARD_RECEIVER_PORT .. "/?t=" .. token
     -- say which box it fills (in a dialog with several, the focused one;
     -- a box without a hint goes by its dialog's title)
@@ -14551,6 +14547,29 @@ end
 -- A dialog button row for it (dialogs add it under their own buttons).
 function Bookbridge:phoneButtonRow()
     return { { text = _("Type on your phone"), callback = function() self:typeOnPhone() end } }
+end
+
+-- The receiver stays up only while a typing code or a settings offer is
+-- still good: stopped now when neither is, else checked again when the
+-- later of them runs out.
+function Bookbridge:stopReceiverWhenIdle()
+    if CLIP.idle then UIManager:unschedule(CLIP.idle); CLIP.idle = nil end
+    local now, untl = os.time(), nil
+    for _unused, held in ipairs({ CLIP.session or false, CLIP.pair or false, CLIP.grace or false }) do
+        if held and held.expires and held.expires > now then untl = math.max(untl or 0, held.expires) end
+    end
+    if not untl then
+        if CLIP.server or CLIP.retry then
+            debugLog("[clipboard] nothing waiting for the phone: receiver stopped")
+            self:stopClipboardReceiver()
+        end
+        return
+    end
+    CLIP.idle = function()
+        CLIP.idle = nil
+        self:stopReceiverWhenIdle()
+    end
+    UIManager:scheduleIn(untl - now + 1, CLIP.idle)
 end
 
 function Bookbridge:startClipboardReceiver()
@@ -14601,7 +14620,7 @@ function Bookbridge:startClipboardReceiver()
         -- wake. So it tries again, every 3 s for a minute.
         CLIP.retries = (CLIP.retries or 0) + 1
         debugLog("[clipboard] failed to start: " .. tostring(err)
-            .. (CLIP.retries <= 20 and (" -- again in 3 s (" .. CLIP.retries .. ")") or " -- giving up until the next wake"))
+            .. (CLIP.retries <= 20 and (" -- again in 3 s (" .. CLIP.retries .. ")") or " -- giving up"))
         if CLIP.retries <= 20 then
             if CLIP.retry then UIManager:unschedule(CLIP.retry) end
             CLIP.retry = function()
@@ -14631,11 +14650,13 @@ function Bookbridge:startClipboardReceiver()
 end
 
 function Bookbridge:stopClipboardReceiver()
-    -- (an older instance going away leaves the newer one's receiver alone)
-    if CLIP.owner and CLIP.owner ~= self then return end
-    -- (no retry left waiting: asleep, nobody should be listening)
+    -- (whichever instance started it: it's one receiver per KOReader, and
+    -- since v0.9.8 a book closing no longer stops it)
+    -- (no retry or idle check left waiting: nobody should be listening)
     if CLIP.retry then UIManager:unschedule(CLIP.retry); CLIP.retry = nil end
+    if CLIP.idle then UIManager:unschedule(CLIP.idle); CLIP.idle = nil end
     CLIP.retries = nil
+    CLIP.grace = nil
     if CLIP.fw then
         os.execute("iptables -D INPUT -p tcp --dport " .. CLIPBOARD_RECEIVER_PORT ..
             " -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null")
@@ -14656,8 +14677,9 @@ function Bookbridge:stopClipboardReceiver()
 end
 
 function Bookbridge:onCloseWidget()
+    -- (the phone receiver, when a code is open, carries on into the next file
+    -- browser or book and stops on its own -- see stopReceiverWhenIdle)
     self._closed = true
-    self:stopClipboardReceiver()
 end
 
 function Bookbridge:onSuspend()
@@ -15262,8 +15284,6 @@ function Bookbridge:pushReadestPositionBeforeSleep()
 end
 
 function Bookbridge:onResume()
-    -- Bring the clipboard receiver back up after a wake.
-    UIManager:scheduleIn(1, function() self:startClipboardReceiver() end)
     -- in step with your other devices once Wi-Fi is back (a no-op without it;
     -- NetworkConnected catches a later connection)
     if self.readestSyncReady and self:readestSyncReady() then
@@ -15516,13 +15536,6 @@ function Bookbridge:collectStatusRows()
         action = function()
             local Trapper = require("ui/trapper")
             Trapper:wrap(function() self:checkForUpdate() end)
-        end })
-
-    -- Phone clipboard
-    add({ text = _("Phone clipboard"),
-        mandatory = CLIP.server and T(_("Listening on %1"), CLIPBOARD_RECEIVER_PORT) or _("Not running"),
-        action = function()
-            UIManager:show(InfoMessage:new{ text = T(_("Share text from your phone to http://<this device's address>:%1/clip?text=... and it lands in the field you're typing in (or the clipboard)."), CLIPBOARD_RECEIVER_PORT) })
         end })
 
     -- Download folder

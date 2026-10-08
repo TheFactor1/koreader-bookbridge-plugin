@@ -77,8 +77,8 @@ curl -s --max-time 30 -g "$IB/UIManager/_window_stack/$IDX/widget/ok_callback/" 
 grep -q 'e2e-annas-key' "$B/settings/shelfmark.lua" && grep -q "\"$B/books\"" "$B/settings/shelfmark.lua"; ck $? "B: saved to its settings file"
 
 # 3. the code worked once
-[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$CLIP_A/pair/$CODE")" = "404" ]; ck $? "A: the same code again is gone (404)"
-[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$CLIP_A/clip?text=still+here")" = "200" ]; ck $? "A: the phone clipboard route still answers"
+# (v0.9.8: with nothing else waiting, A's receiver closes once the code is taken)
+[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$CLIP_A/pair/$CODE")" = "000" ]; ck $? "A: the code worked once -- its receiver closed after handing it over"
 
 # 4. clean logs
 ! grep -qE "ERROR|Traceback|attempt to|stack traceback" "$W/A.log" "$W/B.log" "$A/settings/shelfmark-debug.log" "$B/settings/shelfmark-debug.log" 2>/dev/null; ck $? "no error or traceback in either reader's logs"

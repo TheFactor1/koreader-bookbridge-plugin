@@ -279,10 +279,11 @@ Adds a **Bookbridge** entry to KOReader's main menu.
 - **Connections** — Shelfmark server, CWA, Anna's Archive, AI match
   suggestions, and **Advanced** (the SOCKS5 proxy and pairing relay, which
   most people never need to touch).
-- **Phone clipboard** — the reader listens on port 8090. Opening
-  `http://<reader>:8090` on a phone gives a page to type or paste into, and it
-  lands in the box open on the reader (**Type on your phone** shows that
-  address as a QR code). Share shortcuts can send `GET /clip?text=...` too.
+- **Type on your phone** — while its QR code is up (and for ten minutes
+  after), the reader listens on port 8090: the code opens a page on your phone
+  to type or paste into, and it lands in the box open on the reader. The
+  reader listens only then, and while a setup code (below) is waiting -- not
+  all the time.
 - **Set up another device** — **Show setup code** on this reader, **Import
   settings from another reader** on the other: it fetches this reader's
   settings over your Wi-Fi, straight from this reader (no server). Carries

@@ -70,7 +70,7 @@ ck(#QUEUE == 0 and CLIP.retries == nil, "the Kindle sleeps: the waiting retry is
 -- gives up after a minute
 CLIP.retries = 20
 bb:startClipboardReceiver()
-ck(#QUEUE == 0 and LOG[#LOG]:find("giving up until the next wake", 1, true), "held for a minute: gives up until the next wake")
+ck(#QUEUE == 0 and LOG[#LOG]:find("giving up", 1, true), "held for a minute: gives up (Type on your phone tries again when tapped)")
 holder:close()
 -- a closed instance's retry doesn't start anything
 CLIP.retries = nil

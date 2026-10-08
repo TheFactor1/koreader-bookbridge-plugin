@@ -16,7 +16,7 @@ M="$REPO/bookbridge.koplugin/main.lua"
   awk '/^-- ===== CO begin/{f=1} f{print} f&&/^-- ===== CO end/{exit}' "$M"
   awk '/^-- ===== PAIR begin/{f=1} f{print} f&&/^-- ===== PAIR end/{exit}' "$M" | sed 's/^local PAIR = {}/PAIR = {}/'
   for f in randomBytes xorBytes stripJsonNull doPairingDownload; do awk "/^local function $f\\(/{f=1} f{print} f&&/^end\$/{exit}" "$M" | sed "s/^local function $f(/function $f(/"; done   # (globals: the test calls them too)
-  for f in showSetupQrCode generateAndShowPairingQr importSettingsFromText applyPairingText _onPairRequest _onClipboardRequest _clipboardSend companionState askCompanionRestart promptPairingRelayUrl phoneButtonRow; do awk "/^function Bookbridge:$f\\(/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
+  for f in showSetupQrCode generateAndShowPairingQr importSettingsFromText applyPairingText _onPairRequest _onClipboardRequest _clipboardSend companionState askCompanionRestart promptPairingRelayUrl phoneButtonRow stopReceiverWhenIdle; do awk "/^function Bookbridge:$f\\(/{f=1} f{print} f&&/^end\$/{exit}" "$M"; done
 } > "$W/fns.lua"
 grep -q "function PAIR.seal" "$W/fns.lua" && grep -q "function Bookbridge:applyPairingText" "$W/fns.lua" || { echo "FAIL  extraction failed"; exit 1; }
 cd "$KDIR" || exit 1
@@ -60,7 +60,8 @@ local DEVICE = { isDesktop = function() return false end, isAndroid = function()
 package.loaded["device"] = DEVICE
 local msgs, CB, BD, QR, ID = {}, {}, nil, nil, nil
 UIManager = { show = function(_s, w) msgs[#msgs + 1] = w end, close = function() end, nextTick = function(_s, f) f() end,
-    isWidgetShown = function() return false end, restartKOReader = function() end }
+    isWidgetShown = function() return false end, restartKOReader = function() end,
+    scheduleIn = function() end, unschedule = function() end }
 InfoMessage = { new = function(_s, t) t.kind = "info"; return t end }
 QRMessage = { new = function(_s, t) QR = t; t.kind = "qr"; return t end }
 package.loaded["ui/widget/confirmbox"] = { new = function(_s, t) CB[#CB + 1] = t; t.kind = "confirm"; return t end }
@@ -100,6 +101,7 @@ local function reader(t)
     t.saved = {}
     t.saveAllSettings = function(self, msg) self.saved[#self.saved + 1] = msg or "" end
     t.startClipboardReceiver = function() CLIP.server = CLIP.server or fake_server() end
+    t.stopClipboardReceiver = function() CLIP.server = nil end
     t.installed = {}
     t.installCompanion = function(self, id, opts) self.installed[#self.installed + 1] = { id, opts }; return "installed" end
     t.showStatus = function(self) self.status_shown = (self.status_shown or 0) + 1 end
@@ -171,6 +173,9 @@ ck(CLIP.pair == nil, "A: the offer is gone after one fetch")
 msgs = {}; FETCHES = {}
 B:applyPairingText(text)
 ck(last("info") and last("info").text:find("already been used or has expired", 1, true), "a second fetch of the same code: already used")
+ck(CLIP.server ~= nil and CLIP.grace ~= nil, "A: its phone receiver stays for the rest of the setup screen's two minutes")
+CLIP.grace.expires = os.time() - 1; A:stopReceiverWhenIdle()
+ck(CLIP.server == nil, "...then, nothing else waiting, it stops (v0.9.8: up only while needed)")
 A:generateAndShowPairingQr("lan"); local text2 = QR.text
 CLIP.pair.expires = os.time() - 1
 msgs = {}; B:applyPairingText(text2)
@@ -203,7 +208,7 @@ do
     local c = {}; A:_onClipboardRequest("POST /pair/" .. CLIP.pair.code .. " HTTP/1.1\r\n\r\n", c)
     ck(c.out:match("^HTTP/1%.1 404") ~= nil and CLIP.pair ~= nil, "POST /pair/<code>: 404, offer kept")
     c = {}; A:_onClipboardRequest("GET /clip?text=hi HTTP/1.1\r\n\r\n", c)
-    ck(c.out:match("^HTTP/1%.1 200") ~= nil, "/clip still works while an offer is up")
+    ck(c.out:match("^HTTP/1%.1 404") ~= nil, "/clip (the old share-text shortcut) is gone: 404")
     c = {}; A:_onClipboardRequest("GET /pair/ HTTP/1.1\r\n\r\n", c)
     ck(c.out:match("^HTTP/1%.1 404") ~= nil, "/pair/ with no code: 404")
     CLIP.pair = nil

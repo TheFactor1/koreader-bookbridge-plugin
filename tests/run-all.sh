@@ -127,6 +127,12 @@ if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
 elif [ $rc -eq 3 ]; then echo "SKIPPED  clipboard-retry (no local KOReader)"; skipped="${skipped:+$skipped, }clipboard-retry"
 else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
 
+section "Phone receiver runs only while a code needs it (not started by books or wakes; stops when codes run out)"
+out=$(bash tests/phone-receiver-on-demand/run.sh 2>&1); rc=$?
+if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"
+elif [ $rc -eq 3 ]; then echo "SKIPPED  phone-receiver-on-demand (no local KOReader)"; skipped="${skipped:+$skipped, }phone-receiver-on-demand"
+else echo "$out" | grep -E '^FAIL|rror'; echo "FAIL"; fail=1; fi
+
 section "Series from Calibre-Web into KOReader's record of a downloaded book (real DocSettings and crengine)"
 out=$(bash tests/server-metadata/run.sh 2>&1); rc=$?
 if [ $rc -eq 0 ]; then echo "PASS  $(echo "$out" | grep -c '^PASS') checks"

@@ -147,7 +147,7 @@ do
     ck(row(rows, "Readest").text:find("library & sync", 1, true), "Readest row: your library and sync, every device")
 end
 ck(row(rows, "Updates").mandatory == "Automatic", "Updates: 'Automatic'")
-ck(row(rows, "Phone clipboard").mandatory == "Listening on 8090", "clipboard: listening")
+ck(row(rows, "Phone clipboard") == nil, "no 'Phone clipboard' row (v0.9.8: the receiver runs only for Type on your phone / Set up another device)")
 ck(row(rows, "Download folder").mandatory == "/mnt/us/books", "download folder shown")
 for _, r in ipairs(rows) do if #r.mandatory > 22 then ck(false, "status too long: " .. r.mandatory) end end
 ck(true, "no right-hand status longer than 22 characters")
